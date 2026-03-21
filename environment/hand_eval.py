@@ -140,6 +140,20 @@ def card_is_wild(card: dict) -> bool:
     return card_enhancement(card) == "WILD"
 
 
+ALL_SUITS = {"Hearts", "Diamonds", "Clubs", "Spades"}
+
+
+def card_effective_suits(card: dict) -> set[str]:
+    """Return the set of suits a card counts as.
+
+    Wild cards count as ALL suits. Normal cards return {their suit}.
+    """
+    if card_is_wild(card):
+        return ALL_SUITS
+    s = card_suit(card)
+    return {s} if s else set()
+
+
 def card_chips(card: dict) -> int:
     """Chip value a card contributes when scored."""
     rank = card_rank(card)
@@ -169,9 +183,14 @@ def classify_hand(cards: list[dict]) -> tuple[str, list[int]]:
     rank_counts = Counter(ranks)
     suit_counts = Counter(suits)
 
+    # Wild cards count as all suits — find best suit count including wilds
+    wild_count = sum(1 for c in cards if card_is_wild(c))
+    non_wild_suit_counts = Counter(card_suit(c) for c in cards if not card_is_wild(c))
+    best_suit_count = (max(non_wild_suit_counts.values()) if non_wild_suit_counts else 0) + wild_count
+
     # Count of each frequency
     freq = Counter(rank_counts.values())
-    is_flush = n >= 5 and max(suit_counts.values()) >= 5
+    is_flush = n >= 5 and best_suit_count >= 5
     is_straight = _is_straight(ranks) if n >= 5 else False
 
     # Five of a Kind (5 same rank)
@@ -304,7 +323,6 @@ def estimate_score(hand_type: str, cards: list[dict],
     chip_face_retriggers = 0
     chip_low_retriggers = 0   # Hack: ranks 2,3,4,5
     chip_all_retriggers = 0
-    has_dusk = False
     for j in jokers:
         jk = j.get("joker_key", "") or j.get("key", "")
         jn = _api_key_to_name(jk)
@@ -317,7 +335,11 @@ def estimate_score(hand_type: str, cards: list[dict],
         elif jn == "Seltzer":
             chip_all_retriggers += 1
         elif jn == "Dusk":
-            has_dusk = True
+            # Dusk: +1 retrigger on ALL cards on last hand of round
+            hands_left_val = gamestate.get("round", {}).get("hands_left",
+                              gamestate.get("current_round", {}).get("hands_left", 4))
+            if hands_left_val <= 1:
+                chip_all_retriggers += 1
 
     scoring_chips = 0.0
     for card_pos_in_scoring, i in enumerate(scoring_indices):
@@ -337,7 +359,9 @@ def estimate_score(hand_type: str, cards: list[dict],
         if card_seal(c) == "RED":
             extra += 1
         total_triggers = 1 + extra
-        scoring_chips += card_chips(c) * total_triggers
+        # Stone cards contribute 0 rank chips (only +50 from enhancement)
+        if card_enhancement(c) != "STONE":
+            scoring_chips += card_chips(c) * total_triggers
 
     total_chips = level_chips + scoring_chips
     total_mult = level_mult
@@ -371,8 +395,8 @@ def estimate_score(hand_type: str, cards: list[dict],
         elif enh == "MULT":
             total_mult += 4 * seal_retriggers
         elif enh == "GLASS":
-            # x2 per Glass card scored, but 25% chance to break (EV = x1.75)
-            enhance_xmult *= 1.75 ** seal_retriggers
+            # x2 per Glass card scored (shatter risk is future-hand, not current)
+            enhance_xmult *= 2.0 ** seal_retriggers
         elif enh == "STONE":
             total_chips += 50 * seal_retriggers
         elif enh == "LUCKY":
@@ -538,6 +562,8 @@ def compute_joker_scoring(hand_type: str, cards: list[dict],
     scoring_cards = [cards[i] for i in scoring_indices if i < len(cards)]
     scoring_ranks = [card_rank(c) for c in scoring_cards]
     scoring_suits = [card_suit(c) for c in scoring_cards]
+    # Effective suit sets per scoring card (Wild = all suits)
+    scoring_suit_sets = [card_effective_suits(c) for c in scoring_cards]
 
     # Per-card-instance jokers (Greedy, Fibonacci, etc.) fire only on
     # SCORING cards, not kickers.
@@ -552,7 +578,6 @@ def compute_joker_scoring(hand_type: str, cards: list[dict],
     face_retriggers = 0        # extra triggers on each face card
     low_retriggers = 0         # extra triggers on 2,3,4,5 (Hack)
     all_retriggers = 0         # extra triggers on all cards
-    has_dusk = False
     red_seal_indices: set[int] = set()  # scoring card positions with Red Seal
     for j in jokers:
         jk = j.get("joker_key", "") or j.get("key", "")
@@ -566,7 +591,11 @@ def compute_joker_scoring(hand_type: str, cards: list[dict],
         elif jn == "Seltzer":
             all_retriggers += 1
         elif jn == "Dusk":
-            has_dusk = True
+            # Dusk: +1 retrigger on ALL cards on last hand of round
+            hands_left_val = gamestate.get("round", {}).get("hands_left",
+                              gamestate.get("current_round", {}).get("hands_left", 4))
+            if hands_left_val <= 1:
+                all_retriggers += 1
 
     # Detect Red Seal on scoring cards (retrigger source on the card itself)
     for card_pos, c in enumerate(scoring_cards):
@@ -652,20 +681,25 @@ def compute_joker_scoring(hand_type: str, cards: list[dict],
                     triggered = True
 
             elif trigger == "specific_suit":
-                target_suits = schema.get("trigger_suits") or []
+                target_suits_set = set(schema.get("trigger_suits") or [])
                 detail_logic = schema.get("trigger_detail_logic", "any")
                 if detail_logic == "all":
                     # Must have ALL target suits in scoring cards (e.g. Flower Pot)
-                    if all(s in set(scoring_suits) for s in target_suits):
+                    # Wild cards count as all suits
+                    all_effective = set()
+                    for ss in scoring_suit_sets:
+                        all_effective |= ss
+                    if target_suits_set.issubset(all_effective):
                         triggered = True
                 elif schema.get("per_card_instance"):
                     # Fires on every SCORING card with matching suit (e.g. Greedy Joker)
-                    count = sum(1 for s in scoring_suits if s in target_suits)
+                    # Wild cards match all suits
+                    count = sum(1 for ss in scoring_suit_sets if ss & target_suits_set)
                     if count > 0:
                         triggered = True
                         trigger_count = count
                 else:
-                    if any(s in target_suits for s in scoring_suits):
+                    if any(ss & target_suits_set for ss in scoring_suit_sets):
                         triggered = True
 
             elif trigger == "specific_rank":
@@ -873,8 +907,9 @@ def compute_joker_scoring(hand_type: str, cards: list[dict],
                     # Check if this card would fire this joker
                     fires = False
                     if "specific_suit" in triggers:
-                        target_suits = schema.get("trigger_suits") or []
-                        if s in target_suits:
+                        target_suits = set(schema.get("trigger_suits") or [])
+                        # Wild cards match all suits
+                        if card_effective_suits(c) & target_suits:
                             fires = True
                     if "specific_rank" in triggers:
                         target_ranks = _normalize_trigger_ranks(schema.get("trigger_ranks") or [])
@@ -909,8 +944,8 @@ def compute_joker_scoring(hand_type: str, cards: list[dict],
                         if "face_card" in triggers and first_is_face:
                             qualifies = True
                         if "specific_suit" in triggers:
-                            target_suits = schema.get("trigger_suits") or []
-                            if card_suit(first_card) in target_suits:
+                            target_suits = set(schema.get("trigger_suits") or [])
+                            if card_effective_suits(first_card) & target_suits:
                                 qualifies = True
                         if "scoring_card" in triggers:
                             qualifies = True
@@ -1035,12 +1070,17 @@ def _hand_contains(played_hand: str, target_hand: str) -> bool:
     e.g. Full House contains Pair and Three of a Kind.
     """
     # Containment relationships in Balatro
+    # Key = the sub-hand a joker triggers on.
+    # Value = set of played hand types that CONTAIN that sub-hand.
     containment = {
-        "Pair": {"Two Pair", "Full House", "Flush House",
+        "Pair": {"Two Pair", "Three of a Kind", "Full House", "Flush House",
                  "Four of a Kind", "Five of a Kind", "Flush Five"},
-        "Two Pair": {"Full House", "Flush House"},
+        "Two Pair": {"Full House", "Flush House",
+                     "Four of a Kind", "Five of a Kind", "Flush Five"},
         "Three of a Kind": {"Full House", "Flush House",
                             "Four of a Kind", "Five of a Kind", "Flush Five"},
+        "Full House": {"Flush House"},
+        "Four of a Kind": {"Five of a Kind", "Flush Five"},
         "Straight": {"Straight Flush"},
         "Flush": {"Straight Flush", "Flush House", "Flush Five"},
     }
@@ -1370,7 +1410,7 @@ def compute_draw_outs(hand_cards: list[dict], deck_cards: list[dict],
     probs["Pair"] = min(matching_in_deck / deck_size, 1.0) if hand_ranks else 0.0
 
     # P(Three of a Kind+): need 2 more of a rank we have 1 of, or 1 more of a pair
-    pair_ranks = [r for r, c in hand_ranks.items() if c >= 2]
+    pair_ranks = [r for r, c in hand_ranks.items() if c == 2]
     if pair_ranks:
         # Already have pair, need 1 more match
         best_count = max(deck_ranks.get(r, 0) for r in pair_ranks)
@@ -1463,12 +1503,14 @@ def _count_straight_outs(hand_ranks: Counter, deck_ranks: Counter) -> int:
     return outs
 
 
+_RANK_ORDER_INV = {v: k for k, v in RANK_ORDER.items()}
+
+
 def _value_to_rank(value: int) -> Optional[str]:
     """Convert numeric value back to rank string."""
-    inv = {v: k for k, v in RANK_ORDER.items()}
     if value == 1:
         return "A"  # Ace low
-    return inv.get(value)
+    return _RANK_ORDER_INV.get(value)
 
 
 def _hypergeometric_approx(successes_in_pop: int, pop_size: int,
@@ -1894,7 +1936,7 @@ def find_best_discard(hand_cards: list[dict], deck_cards: list[dict],
         for r, cnt in rank_count.items():
             if cnt == 2:
                 in_deck = deck_ranks.get(r, 0)
-                p_trip = 1 - ((deck_size - in_deck) / max(deck_size, 1)) ** num_draws if deck_size > 0 else 0
+                p_trip = _draw_probability(in_deck, deck_size, 1, num_draws) if deck_size > 0 else 0
                 trip_bonus = estimate_score("Three of a Kind", kept_cards, list(range(len(kept_cards))), jokers, gamestate)
                 base_ev += p_trip * (trip_bonus - base_ev) * 0.5  # weighted improvement
 
@@ -2126,12 +2168,17 @@ def _multi_discard_probability(outs: int, deck_size: int, needed: int,
         # Fast path: P(at least 1 across D tries) = 1 - product(P(0 each time))
         p_fail_all = 1.0
         remaining_deck = deck_size
+        remaining_outs = outs
         for _ in range(num_discards):
-            if remaining_deck <= 0:
+            if remaining_deck <= 0 or remaining_outs <= 0:
                 break
-            p_miss = _draw_probability(outs, remaining_deck, 1, cards_per_discard)
+            p_miss = _draw_probability(remaining_outs, remaining_deck, 1, cards_per_discard)
             p_fail_all *= (1.0 - p_miss)
-            remaining_deck -= cards_per_discard  # deck shrinks each discard
+            # Drawn cards leave the deck — outs shrink proportionally
+            if remaining_deck > 0:
+                expected_outs_drawn = remaining_outs * cards_per_discard / remaining_deck
+                remaining_outs = max(0, round(remaining_outs - expected_outs_drawn))
+            remaining_deck -= cards_per_discard
         return 1.0 - p_fail_all
 
     # General case: track distribution of "outs collected so far"
@@ -2140,26 +2187,28 @@ def _multi_discard_probability(outs: int, deck_size: int, needed: int,
     dist[0] = 1.0
 
     remaining_deck = deck_size
+    remaining_outs = outs
     for _ in range(num_discards):
-        if remaining_deck <= 0:
+        if remaining_deck <= 0 or remaining_outs <= 0:
             break
         new_dist = [0.0] * (needed + 1)
         for have in range(needed):
             if dist[have] < 1e-12:
                 continue
-            # How many outs can we draw this batch?
-            max_draw = min(cards_per_discard, outs, needed - have)
+            max_draw = min(cards_per_discard, remaining_outs, needed - have)
             for k in range(0, max_draw + 1):
-                p_k = _draw_probability(outs, remaining_deck, k, cards_per_discard)
-                # Exact P of drawing EXACTLY k: P(>=k) - P(>=k+1)
-                p_k_plus = _draw_probability(outs, remaining_deck, k + 1, cards_per_discard) if k < max_draw else 0.0
+                p_k = _draw_probability(remaining_outs, remaining_deck, k, cards_per_discard)
+                p_k_plus = _draw_probability(remaining_outs, remaining_deck, k + 1, cards_per_discard) if k < max_draw else 0.0
                 p_exact = p_k - p_k_plus
                 got = min(have + k, needed)
                 new_dist[got] += dist[have] * max(p_exact, 0.0)
-        # Carry forward already-completed probability
         new_dist[needed] += dist[needed]
         dist = new_dist
-        remaining_deck -= cards_per_discard  # deck shrinks each discard
+        # Drawn cards leave the deck — outs shrink proportionally
+        if remaining_deck > 0:
+            expected_outs_drawn = remaining_outs * cards_per_discard / remaining_deck
+            remaining_outs = max(0, round(remaining_outs - expected_outs_drawn))
+        remaining_deck -= cards_per_discard
 
     return min(max(dist[needed], 0.0), 1.0)
 
@@ -2865,7 +2914,8 @@ def _any_joker_triggers(hand_type: str, jokers: list[dict]) -> bool:
         schema = JOKERS[name]
         triggers = schema.get("triggers") or []
         if "specific_hand_type" in triggers:
-            if schema.get("trigger_hand_type") == hand_type:
+            target = schema.get("trigger_hand_type", "")
+            if hand_type == target or _hand_contains(hand_type, target):
                 return True
     return False
 
@@ -2946,8 +2996,9 @@ def estimate_score_for_hand_type(jokers: list[dict], gamestate: dict) -> float:
     # Figure out which hand types the bot actually plays
     # Use play counts to weight the estimate toward realistic hands
     COMMON_HAND_TYPES = [
-        "Pair", "Two Pair", "Three of a Kind", "Straight",
-        "Flush", "Full House", "Four of a Kind",
+        "High Card", "Pair", "Two Pair", "Three of a Kind", "Straight",
+        "Flush", "Full House", "Four of a Kind", "Straight Flush",
+        "Five of a Kind", "Flush House", "Flush Five",
     ]
 
     # Determine which suit our jokers favor for smarter Flush evaluation
@@ -2967,22 +3018,24 @@ def estimate_score_for_hand_type(jokers: list[dict], gamestate: dict) -> float:
         total = max(len(deck_cards), 1)
         ds = {s: n / total for s, n in counts.items()}
 
-    # Detect retrigger jokers once (same for all hand types)
-    # Retriggers replay the FULL per-card scoring: base chips + enhancement + seal
-    # Average face card: ~10 base chips + ~15 enhancement bonus ≈ 25 effective chips
-    # Average scoring card: ~8 base chips + ~10 enhancement bonus ≈ 18 effective chips
-    retrig_chip_bonus = 0.0
-    for j in jokers:
-        jk = j.get("joker_key", "") or j.get("key", "")
-        jn = _api_key_to_name(jk)
-        if jn == "Sock and Buskin":
-            retrig_chip_bonus += 25.0 * 2  # ~2 face cards × 25 eff chips × 1 retrigger
-        elif jn == "Hanging Chad":
-            retrig_chip_bonus += 25.0 * 2  # first card × 25 eff chips × 2 retriggers
-        elif jn == "Hack":
-            retrig_chip_bonus += 15.0 * 2  # ~2 low cards (2-5) × 15 eff chips × 1 retrigger
-        elif jn == "Seltzer":
-            retrig_chip_bonus += 18.0 * 5  # all 5 cards × 18 eff chips × 1 retrigger
+    # Retrigger chip bonus is handled INSIDE _estimate_joker_scoring_for_type
+    # via retrigger_extra on per-card jokers. We only need the base card chip
+    # contribution from retriggers on the cards themselves (not joker effects).
+    retrig_card_chip_bonus = 0.0
+    # Retriggers re-fire card chips: avg card ~8 chips
+    if has_hanging_chad:
+        retrig_card_chip_bonus += 8.0 * 2   # first card × 8 chips × 2 retriggers
+    if has_sock_buskin:
+        retrig_card_chip_bonus += 10.0 * 2  # ~2 face cards × 10 chips × 1 retrigger
+    if has_hack:
+        retrig_card_chip_bonus += 4.0 * 2   # ~2 low cards × avg 3.5 chips × 1 retrigger
+    if has_seltzer:
+        retrig_card_chip_bonus += 8.0 * 5   # all 5 cards × 8 chips × 1 retrigger
+    if has_dusk:
+        # Dusk fires on last hand only — weight by 1/hands_left as estimate
+        est_hands = gamestate.get("round", {}).get("hands_left",
+                     gamestate.get("current_round", {}).get("hands_left", 4))
+        retrig_card_chip_bonus += 8.0 * 5 / max(est_hands, 1)
 
     # Collect hand types with their play frequency
     scored_types = []
@@ -2994,7 +3047,7 @@ def estimate_score_for_hand_type(jokers: list[dict], gamestate: dict) -> float:
         ht_chips = ht_info.get("chips", base_chips_default)
         ht_mult = ht_info.get("mult", base_mult_default)
 
-        scoring_card_chips = 40.0 + retrig_chip_bonus
+        scoring_card_chips = 40.0 + retrig_card_chip_bonus
 
         j_chips, j_mult, j_xmult = _estimate_joker_scoring_for_type(
             ht_name, jokers, gamestate, dominant_suit=dominant_suit,
@@ -3166,6 +3219,8 @@ def _estimate_joker_scoring_for_type(hand_type: str, jokers: list[dict],
     has_hanging_chad = False
     has_sock_buskin = False
     has_hack = False
+    has_dusk = False
+    has_seltzer = False
     for j in jokers:
         jk = j.get("joker_key", "") or j.get("key", "")
         jn = _api_key_to_name(jk)
@@ -3175,6 +3230,10 @@ def _estimate_joker_scoring_for_type(hand_type: str, jokers: list[dict],
             has_sock_buskin = True
         elif jn == "Hack":
             has_hack = True
+        elif jn == "Dusk":
+            has_dusk = True
+        elif jn == "Seltzer":
+            has_seltzer = True
 
     # Count uncommon jokers for Baseball Card
     uncommon_count = 0
@@ -3371,6 +3430,20 @@ def _estimate_joker_scoring_for_type(hand_type: str, jokers: list[dict],
         if timing == "during_card" and has_hack and "scoring_card" in triggers:
             if schema.get("per_card_instance"):
                 retrigger_extra += 2  # ~2 low cards (2-5) each retrigger 1x
+        if timing == "during_card" and has_seltzer:
+            if schema.get("per_card_instance"):
+                retrigger_extra += trigger_count  # all cards retrigger 1x
+            else:
+                retrigger_extra += 1
+        if timing == "during_card" and has_dusk:
+            # Dusk fires on last hand — weighted estimate
+            est_hands = gamestate.get("round", {}).get("hands_left",
+                         gamestate.get("current_round", {}).get("hands_left", 4))
+            dusk_weight = 1.0 / max(est_hands, 1)
+            if schema.get("per_card_instance"):
+                retrigger_extra += max(1, round(trigger_count * dusk_weight))
+            else:
+                retrigger_extra += max(0, round(dusk_weight))
 
         effective_count = trigger_count + (retrigger_extra if schema.get("per_card_instance") else 0)
 
@@ -3709,7 +3782,7 @@ def _compute_single_joker_effect(
             triggered = True
         if "specific_hand_type" in triggers:
             target_ht = schema.get("trigger_hand_type") or ""
-            if target_ht and hand_type == target_ht:
+            if target_ht and (hand_type == target_ht or _hand_contains(hand_type, target_ht)):
                 triggered = True
         if "scoring_card" in triggers:
             triggered = True

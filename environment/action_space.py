@@ -416,6 +416,8 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
         has_must_buy = False
 
         # Find weakest owned joker via delta evaluation (removing it hurts least)
+        # Skip eternal, negative, MUST_BUY, retrigger, and copy jokers
+        from data.jokers import JOKERS as _JOKER_DB
         weakest_owned_value = float("inf")
         weakest_owned_idx = -1
         owned_values = []
@@ -429,6 +431,17 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             if ed == "NEGATIVE":
                 owned_values.append(float("inf"))
                 continue
+            # Never mark MUST_BUY, retrigger, or copy jokers as weakest
+            _jk = card.get("joker_key", "") or card.get("key", "")
+            _jname = _api_key_to_name(_jk)
+            if _jname in MUST_BUY_JOKERS:
+                owned_values.append(float("inf"))
+                continue
+            if _jname and _jname in _JOKER_DB:
+                _jschema = _JOKER_DB[_jname]
+                if _jschema.get("retrigger_effect") or _jschema.get("copy"):
+                    owned_values.append(float("inf"))
+                    continue
             value = _estimate_joker_value(card, joker_cards, raw_state)
             owned_values.append(value)
             if value < weakest_owned_value:
@@ -524,6 +537,11 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 # Non-scoring but still positive (economy joker that helps)
                 any_buyable_joker = True
                 mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = 1.0 * ip
+            elif not is_scoring and shop_delta == 0 and has_joker_slot:
+                # Economy jokers (Egg, Delayed Gratification, etc.) have delta=0
+                # because they don't affect scoring. Allow buying with slight penalty.
+                any_buyable_joker = True
+                mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.3) * ip
             else:
                 # Delta <= 0 — hard block (heuristic will always reject)
                 mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = 0.0

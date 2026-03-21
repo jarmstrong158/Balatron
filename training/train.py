@@ -421,6 +421,62 @@ class JokerOrderLogger:
 
 
 # ============================================================
+# Sell-guard helpers
+# ============================================================
+
+def _find_weakest_sellable_joker(
+    jokers_raw: list[dict],
+    raw_state: dict,
+    *,
+    exclude_indices: set[int] | None = None,
+) -> tuple[int, float]:
+    """Find the weakest joker that is safe to sell.
+
+    Skips: eternal, negative edition, MUST_BUY (Blueprint/Brainstorm),
+    retrigger jokers, and copy jokers.
+
+    Returns (index, value) of weakest sellable joker, or (-1, inf) if none.
+    """
+    from environment.action_space import (
+        _estimate_joker_value, _api_key_to_name, MUST_BUY_JOKERS,
+    )
+    from data.jokers import JOKERS
+
+    weakest_idx = -1
+    weakest_val = float("inf")
+    exclude = exclude_indices or set()
+
+    for i, j in enumerate(jokers_raw):
+        if i in exclude:
+            continue
+        mod = j.get("modifier", {})
+        if isinstance(mod, dict):
+            if mod.get("eternal", False):
+                continue
+            if mod.get("edition", "") == "NEGATIVE":
+                continue
+
+        # Never sell MUST_BUY jokers
+        jk = j.get("joker_key", "") or j.get("key", "")
+        name = _api_key_to_name(jk)
+        if name in MUST_BUY_JOKERS:
+            continue
+
+        # Never sell retrigger or copy jokers
+        if name and name in JOKERS:
+            schema = JOKERS[name]
+            if schema.get("retrigger_effect") or schema.get("copy"):
+                continue
+
+        val = _estimate_joker_value(j, jokers_raw, raw_state)
+        if val < weakest_val:
+            weakest_val = val
+            weakest_idx = i
+
+    return weakest_idx, weakest_val
+
+
+# ============================================================
 # Training Orchestrator
 # ============================================================
 
@@ -1464,20 +1520,9 @@ class Trainer:
             if name in MUST_BUY_JOKERS:
                 if joker_count >= joker_limit:
                     # Slots full — sell weakest to make room
-                    from environment.action_space import (
-                        _estimate_joker_value as _ejv2, _joker_sell_value as _jsv2,
-                    )
-                    weakest_i = -1
-                    weakest_v = float("inf")
-                    for ji, jj in enumerate(jokers_raw):
-                        jmod = jj.get("modifier", {})
-                        if isinstance(jmod, dict) and (jmod.get("eternal", False) or
-                                                        jmod.get("edition", "") == "NEGATIVE"):
-                            continue
-                        jval = _ejv2(jj, jokers_raw, raw_state)
-                        if jval < weakest_v:
-                            weakest_v = jval
-                            weakest_i = ji
+                    from environment.action_space import _joker_sell_value as _jsv2
+                    weakest_i, _ = _find_weakest_sellable_joker(
+                        jokers_raw, raw_state)
                     if weakest_i >= 0:
                         sell_price = _jsv2(jokers_raw[weakest_i])
                         if cost <= money + sell_price:
@@ -1507,21 +1552,11 @@ class Trainer:
                     return "gamestate", None
             else:
                 # Slots full — only buy if it's a >10% upgrade over weakest
-                # Find weakest owned joker
-                weakest_idx = -1
-                weakest_value = float("inf")
-                for i, j in enumerate(jokers_raw):
-                    mod = j.get("modifier", {})
-                    if isinstance(mod, dict) and (mod.get("eternal", False) or
-                                                   mod.get("edition", "") == "NEGATIVE"):
-                        continue
-                    val = _estimate_joker_value(j, jokers_raw, raw_state)
-                    if val < weakest_value:
-                        weakest_value = val
-                        weakest_idx = i
+                weakest_idx, _ = _find_weakest_sellable_joker(
+                    jokers_raw, raw_state)
 
                 if weakest_idx < 0:
-                    return "gamestate", None  # all eternal/negative
+                    return "gamestate", None  # all protected
 
                 # Score with swap
                 swapped = [j for i, j in enumerate(jokers_raw) if i != weakest_idx]
@@ -1569,51 +1604,26 @@ class Trainer:
             if j_idx >= joker_count:
                 return "gamestate", None  # invalid index
 
-            joker = jokers_raw[j_idx]
-            mod = joker.get("modifier", {})
-            if isinstance(mod, dict):
-                if mod.get("eternal", False):
-                    return "gamestate", None  # can't sell eternal
-                if mod.get("edition", "") == "NEGATIVE":
-                    return "gamestate", None  # never sell negative
-
-            from environment.action_space import (
-                _estimate_joker_value, _joker_is_scoring, _api_key_to_name,
-                MUST_BUY_JOKERS,
-            )
-            joker_key = joker.get("joker_key", "") or joker.get("key", "")
-            name = _api_key_to_name(joker_key) or joker_key
-
             # Never sell your only joker
             if joker_count <= 1:
                 return "gamestate", None
 
-            # Never sell must-buy jokers (Blueprint, Brainstorm)
-            if name in MUST_BUY_JOKERS:
+            from environment.action_space import (
+                _estimate_joker_value, _api_key_to_name,
+            )
+
+            # Use shared sell guard — checks eternal, negative, MUST_BUY,
+            # retrigger, copy jokers
+            weakest_idx, _ = _find_weakest_sellable_joker(
+                jokers_raw, raw_state)
+
+            # Block if: target isn't the weakest sellable, or nothing is sellable
+            if weakest_idx < 0 or j_idx != weakest_idx:
                 return "gamestate", None
 
-            # Never sell retrigger or copy jokers — they amplify everything
-            from data.jokers import JOKERS
-            if name and name in JOKERS:
-                schema = JOKERS[name]
-                if schema.get("retrigger_effect") or schema.get("copy"):
-                    return "gamestate", None
-
-            # Only allow selling if this is the weakest joker AND there's
-            # a better replacement available in shop
-            value = _estimate_joker_value(joker, jokers_raw, raw_state)
-            min_value = float("inf")
-            for i, j in enumerate(jokers_raw):
-                m = j.get("modifier", {})
-                if isinstance(m, dict) and (m.get("eternal", False) or
-                                             m.get("edition", "") == "NEGATIVE"):
-                    continue
-                v = _estimate_joker_value(j, jokers_raw, raw_state)
-                if v < min_value:
-                    min_value = v
-
-            if value > min_value * 1.05:
-                return "gamestate", None
+            joker = jokers_raw[j_idx]
+            joker_key = joker.get("joker_key", "") or joker.get("key", "")
+            name = _api_key_to_name(joker_key) or joker_key
 
             # Check if there's a better joker available in shop
             shop_cards = raw_state.get("shop", {}).get("cards", [])
@@ -1819,16 +1829,12 @@ class Trainer:
             if has_riff_raff and joker_count >= joker_limit and joker_count > 1:
                 # Joker slots are full — Riff-Raff can't fire.
                 # Find the weakest non-essential joker and sell it to make room.
-                from environment.action_space import (
-                    _estimate_joker_value, _api_key_to_name,
-                )
 
                 # Figure out the upcoming blind target so we don't sell
                 # ourselves into a loss.
                 blinds_data = raw_state.get("blinds", {})
                 next_blind_target = 0
                 if isinstance(blinds_data, dict):
-                    # In SHOP, the next blind to play is the first UPCOMING one
                     for bkey in ("small", "big", "boss"):
                         b = blinds_data.get(bkey, {})
                         if isinstance(b, dict) and b.get("status") == "UPCOMING":
@@ -1842,21 +1848,9 @@ class Trainer:
                 current_total_score = estimate_score_for_hand_type(
                     jokers_raw, raw_state) * hands_available
 
-                worst_val = float("inf")
-                worst_idx = -1
-                for ji, j in enumerate(jokers_raw):
-                    if ji == riff_raff_idx:
-                        continue  # never sell Riff-Raff itself
-                    mod = j.get("modifier", {})
-                    if isinstance(mod, dict):
-                        if mod.get("eternal", False):
-                            continue
-                        if mod.get("edition", "") == "NEGATIVE":
-                            continue
-                    val = _estimate_joker_value(j, jokers_raw, raw_state)
-                    if val < worst_val:
-                        worst_val = val
-                        worst_idx = ji
+                worst_idx, worst_val = _find_weakest_sellable_joker(
+                    jokers_raw, raw_state,
+                    exclude_indices={riff_raff_idx})
 
                 # Only sell if the joker is genuinely weak (below threshold).
                 # A random Common joker averages ~4.0 value — sell if worse.
