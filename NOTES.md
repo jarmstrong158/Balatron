@@ -19,11 +19,13 @@
 ## Architecture Decisions (LOCKED)
 
 - **Algorithm:** PPO (not DQN — variable action space, long horizon, need stability)
-- **Network:** Shared trunk + 3 separate heads (Play, Shop, Blind)
+- **Network:** Shared trunk (512-1024 neurons) + 3 separate heads (Play, Shop, Blind)
 - **Batch size:** 50-100 runs per update
 - **Three game states:** Blind board (passive), Shop, Play
-- **State vector:** ~200-300 numbers (joker properties, economy, deck comp, blind board data, vouchers)
+- **State vector:** ~500-800 numbers (joker fingerprints, economy, deck comp, blind data, vouchers, poker hand levels, shop contents)
 - **Jokers encoded as property fingerprints, NOT joker ID numbers**
+- **Game interface:** BalatroBot mod (github.com/coder/balatrobot) — JSON-RPC 2.0 HTTP API at 127.0.0.1:12346
+- **No screen capture needed** — BalatroBot exposes full game state and accepts action commands via API
 
 ---
 
@@ -34,8 +36,7 @@ balatron/
 ├── environment/
 │   ├── game_state.py
 │   ├── action_space.py
-│   ├── reward.py
-│   └── capture.py
+│   └── reward.py
 ├── agent/
 │   ├── network.py
 │   ├── ppo.py
@@ -54,19 +55,369 @@ balatron/
 
 ---
 
-## State Vector Notes (for game_state.py later)
+## State Vector Layout (520 floats)
 
-- Glass card count in deck needs to be tracked as a deck composition metric
-- Joker position in lineup is a relevant state variable
-- Enhanced card count by type needs to be tracked (drives Driver's License magnitude)
+```
+Section 1: Game Meta (10)
+  [0]  ante / 8                          # Current ante, normalized
+  [1]  round / 24                        # Current round, normalized
+  [2]  log10(money)                      # Log-scaled money
+  [3]  hands_left / 8                    # Remaining hands
+  [4]  discards_left / 6                 # Remaining discards
+  [5]  reroll_cost / 20                  # Current reroll cost
+  [6]  log10(chips)                      # Current chips scored (log scale / 15)
+  [7]  log10(blind_score)               # Required score (log scale / 15)
+  [8]  is_boss                           # 1.0 if boss blind
+  [9]  blinds_skipped / 8               # Cumulative blinds skipped
+
+Section 2: Poker Hand Levels (39 = 13 × 3)
+  Per hand type (High Card → Flush Five):
+    level / 20, log10(chips), log10(mult)
+
+Section 3: Deck Composition (61 = 52 + 9)
+  52 rank×suit counts (4 suits × 13 ranks), each / 4.0
+  9 enhancement/seal counts:
+    BONUS, MULT, WILD, GLASS, STEEL, STONE, GOLD, LUCKY, sealed
+
+Section 4: Vouchers (32)
+  Binary flags for each voucher owned
+
+Section 5: Joker Slots (160 = 5 × 32)
+  Per slot (zero-padded if empty):
+    [0]   tier_weight / 10
+    [1-9] effect flags: chip, mult, xmult, economy, chip_scaling,
+          mult_scaling, xmult_scaling, copy, in_hand_effect
+    [10]  log(chip_value)
+    [11]  log(mult_value)
+    [12]  log(xmult_value)
+    [13]  log(money_per_round)
+    [14]  log(scaling_increment)
+    [15]  log(scaling_start_value)
+    [16-21] flags: retrigger, rule_mod, game_param, consumable_creation,
+            survival, boss_blind
+    [22]  effect_probability
+    [23]  has_expiry
+    [24-27] edition one-hot: foil, holo, polychrome, negative
+    [28]  debuffed
+    [29]  eternal
+    [30]  perishable
+    [31]  log(current_scaled_value)       # Runtime from ScalingTracker
+
+Section 6: Hand Cards (96 = 12 × 8)
+  Per card slot (zero-padded):
+    rank/12, suit/3, enhancement/8, seal/4, edition/4,
+    debuffed, base_chips/11, is_face
+
+Section 7: Consumables (12 = 2 × 6)
+  Per slot:
+    type (0.33=tarot, 0.67=planet, 1.0=spectral),
+    key_hash, is_negative, cost/10, placeholder×2
+
+Section 8: Shop (130 = 3×30 + 2×5 + 2×5)
+  Shop Jokers (3 × 30): fingerprint[0:28] + cost/20 + affordable
+  Shop Vouchers (2 × 5): voucher_id/32 + cost/20 + affordable + placeholder×2
+  Shop Packs (2 × 5): type (0.25=arcana..1.0=buffoon) + cost/12 + affordable + is_mega + placeholder
+```
+
+### State Vector Design Notes
+
+- Glass card count tracked via deck composition enhancement counts (GLASS index)
+- Joker position encoded by slot order (positional in array)
+- Enhanced card counts by type tracked in deck composition section (9 enhancement counters)
+- All large values log-normalized to prevent gradient issues
+- Zero-padding for empty slots (network learns "empty" = all zeros)
+
+---
+
+## Action Space Layout (45-dim head output)
+
+```
+Action Type Logits (14):
+  [0]  play              — play selected hand cards
+  [1]  discard           — discard selected hand cards
+  [2]  buy_joker         — buy a joker from shop
+  [3]  buy_voucher       — buy a voucher from shop
+  [4]  buy_pack          — buy a booster pack from shop
+  [5]  sell_joker        — sell an owned joker
+  [6]  sell_consumable   — sell a consumable
+  [7]  reroll            — reroll the shop
+  [8]  use_consumable    — use a consumable
+  [9]  select_blind      — accept the current blind
+  [10] skip_blind        — skip the current blind
+  [11] select_pack_card  — pick a card from opened pack
+  [12] skip_pack         — close pack without picking
+  [13] end_shop          — leave shop, proceed to next blind
+
+Card Selection Logits (12):
+  Per hand card slot — sigmoid → threshold at 0.5 for play/discard
+  Clamped to 1-5 selected cards
+
+Target Selection Logits (19):
+  [0-2]   shop joker slots (3)
+  [3-4]   shop voucher slots (2)
+  [5-6]   shop pack slots (2)
+  [7-11]  owned joker slots (5) — for selling
+  [12-13] consumable slots (2)
+  [14-18] pack card slots (5) — from opened booster
+```
+
+### Valid Actions Per Game State
+
+| State | Valid Action Types |
+|---|---|
+| BLIND_SELECT | select_blind, skip_blind |
+| SELECTING_HAND | play, discard, use_consumable, sell_joker, sell_consumable |
+| SHOP | buy_joker, buy_voucher, buy_pack, sell_joker, sell_consumable, reroll, use_consumable, end_shop |
+| SMODS_BOOSTER_OPENED | select_pack_card, skip_pack |
+| ROUND_EVAL | (none — game resolving) |
+| GAME_OVER | (none — run done) |
+
+### Masking
+
+Invalid actions are masked to -inf before softmax so the network can only pick legal moves. Feasibility checks include: money vs cost, hands/discards remaining, joker slot capacity, eternal modifier (can't sell), boss blind (can't skip).
+
+---
+
+## Reward Shaping
+
+### Reward Tiers (largest to smallest)
+
+| Tier | When | Default Weight | Notes |
+|---|---|---|---|
+| Game win (Ante 8) | Terminal | +10.0 | Phase 1 goal |
+| naneinf achieved | Terminal | +50.0 | Phase 2 goal |
+| Game loss | Terminal | -2.0 + 0.5/ante survived | Partial credit for progress |
+| Ante cleared | Boss blind beaten | +2.0 + 0.5 * ante_num | Scales with difficulty |
+| Boss blind cleared | Boss round won | +1.0 extra | On top of blind cleared |
+| Blind cleared | Any blind beaten | +0.5 | Base round reward |
+| Score ratio | Blind cleared | +0.3 * log10(score/target) | Rewards overkill |
+| Score progress | Per hand played | +0.05 * log10(chips_gained) | Small shaping signal |
+| Money gain | Per action | +0.02 per dollar | Economy health |
+| Money spent | Per action | -0.01 per dollar | Lighter (spending necessary) |
+| Interest bonus | Per action | +0.01 per $5 tier held | Rewards banking |
+| Scaling growth | Per action | +0.05 * log growth | Rewards scaling joker investment |
+| Invalid action | Per action | -0.1 | Penalty for illegal moves |
+
+### Design Principles
+
+- All score-based rewards use log10 (Balatro scores grow exponentially)
+- Shaping rewards (per-action) are 10-100x smaller than outcome rewards
+- Economy rewards asymmetric: gaining > spending penalty
+- Phase 2 adds naneinf bonus and extreme-score scaling rewards
+- `RewardConfig` class allows hyperparameter sweeps over all weights
+
+---
+
+## Network Architecture (1.88M parameters)
+
+```
+Input (520)
+  |
+  Shared Trunk (3 layers, LayerNorm + ReLU each):
+    520 -> 768 (401K params)
+    768 -> 768 (591K params)
+    768 -> 512 (394K params)
+  |
+  +-- Play Head:  512 -> 256 -> 45  (143K) -- SELECTING_HAND
+  +-- Shop Head:  512 -> 256 -> 45  (143K) -- SHOP, SMODS_BOOSTER_OPENED
+  +-- Blind Head: 512 -> 128 -> 45  (71K)  -- BLIND_SELECT
+  +-- Value Head: 512 -> 256 -> 1   (132K) -- all states
+```
+
+### Design Choices
+
+- **Orthogonal initialization** (gain=sqrt(2)) — standard for PPO stability
+- **LayerNorm** over BatchNorm — no batch statistics issues in RL
+- **3 policy heads** — each game context has different strategic considerations
+- **Blind head smaller** (128 hidden) — simpler decision (select vs skip)
+- **Action format**: [type(1) + cards(12) + target(1)] = 14 values per action
+- **Mixed distributions**: Categorical for type/target, Bernoulli for card selection
+- **CUDA**: RTX 5070 Ti (sm_120) — working with torch 2.10.0+cu128 (install from `https://download.pytorch.org/whl/cu128`)
+
+---
+
+## PPO Training
+
+### Hyperparameters (defaults)
+
+| Parameter | Value | Notes |
+|---|---|---|
+| learning_rate | 3e-4 | Adam, annealed linearly |
+| gamma | 0.99 | Discount factor |
+| gae_lambda | 0.95 | GAE lambda |
+| clip_epsilon | 0.2 | Surrogate clipping |
+| clip_value | 0.2 | Value function clipping |
+| entropy_coef | 0.01 | Entropy bonus weight |
+| value_coef | 0.5 | Value loss weight |
+| max_grad_norm | 0.5 | Gradient clipping |
+| num_epochs | 4 | PPO epochs per rollout |
+| num_minibatches | 4 | Minibatches per epoch |
+| rollout_steps | 2048 | Steps per rollout |
+| target_kl | 0.03 | Early stopping threshold |
+
+### Training Loop
+
+```
+1. Collect rollout_steps transitions via environment interaction
+   - Each step: state -> network -> action -> env.step() -> reward
+   - Store (state, action, log_prob, reward, value, done, mask, head_idx)
+2. Compute GAE advantages + returns (bootstrap from last value)
+3. Normalize advantages (zero mean, unit variance)
+4. For num_epochs:
+   a. Shuffle and split into num_minibatches
+   b. Per minibatch:
+      - Forward pass through correct head per sample
+      - Compute clipped surrogate policy loss
+      - Compute clipped value loss
+      - Compute entropy bonus
+      - total_loss = policy + 0.5*value - 0.01*entropy
+      - Backprop + gradient clip + optimizer step
+   c. Early stop if approx_kl > target_kl
+5. Reset buffer, repeat
+```
+
+### Checkpoint Format
+
+Saved via `torch.save()`: network_state_dict, optimizer_state_dict, total_updates, total_steps, config.
+Also saves `_meta.json` with training config, episode stats, and elapsed time.
+
+### Usage
+
+```bash
+# Phase 1: General competence (target: reliably clear Ante 8)
+python -m training.train --phase 1 --total-timesteps 1000000
+
+# Phase 2: naneinf hunting (transfer learning from Phase 1)
+python -m training.train --phase 2 --checkpoint checkpoints/balatron_phase1_final.pt
+
+# Resume interrupted training
+python -m training.train --checkpoint checkpoints/balatron_phase1_update000100.pt
+
+# Custom settings
+python -m training.train --lr 1e-4 --rollout-steps 4096 --device cuda
+```
+
+### Prerequisites
+
+1. Balatro running with BalatroBot mod installed
+2. BalatroBot API listening on 127.0.0.1:12346
+3. Game can be at main menu — trainer auto-starts runs via `start` endpoint
+
+---
+
+## BalatroBot API Reference
+
+**Source:** github.com/coder/balatrobot
+**Protocol:** JSON-RPC 2.0 over HTTP at 127.0.0.1:12346
+
+**CRITICAL:** All card references use **0-based positional indices**, NOT card IDs.
+
+### Game States (7)
+
+| State | Description |
+|---|---|
+| MENU | Main menu, no run active |
+| BLIND_SELECT | Choose or skip the next blind |
+| SELECTING_HAND | Choose cards to play or discard |
+| ROUND_EVAL | Round scoring complete, awaiting cash_out |
+| SHOP | Buy jokers, vouchers, packs, reroll |
+| SMODS_BOOSTER_OPENED | Booster pack is open, pick cards |
+| GAME_OVER | Run ended |
+
+### Game Flow
+
+```
+MENU --start--> BLIND_SELECT --select/skip--> SELECTING_HAND
+  --play/discard--> ROUND_EVAL --cash_out--> SHOP
+  --next_round--> BLIND_SELECT
+```
+
+- `MENU` and `ROUND_EVAL` are handled automatically (not agent decisions)
+- `MENU` → call `start(deck="Red Deck", stake=1)`
+- `ROUND_EVAL` → call `cash_out()` to transition to SHOP
+
+### Action Methods (11)
+
+| Method | Parameters | Game State |
+|---|---|---|
+| start | deck: str, stake: int | MENU |
+| play | cards: int[] (0-based indices, 1-5 cards) | SELECTING_HAND |
+| discard | cards: int[] (0-based indices) | SELECTING_HAND |
+| select | (none) | BLIND_SELECT |
+| skip | (none) | BLIND_SELECT |
+| buy | card: int OR voucher: int OR pack: int (0-based) | SHOP |
+| sell | joker: int OR consumable: int (0-based) | SHOP/SELECTING_HAND |
+| reroll | (none) | SHOP |
+| use | consumable: int, cards?: int[] (0-based) | SHOP/SELECTING_HAND |
+| next_round | (none) | SHOP (leaves shop) |
+| cash_out | (none) | ROUND_EVAL |
+| pack | card: int OR skip: true | SMODS_BOOSTER_OPENED |
+
+### Parameter Details
+
+**buy** — separate param keys, only one per call:
+- `{"card": 0}` — buy 1st shop joker
+- `{"voucher": 0}` — buy 1st voucher
+- `{"pack": 1}` — buy 2nd booster pack
+
+**sell** — separate param keys:
+- `{"joker": 2}` — sell 3rd owned joker
+- `{"consumable": 0}` — sell 1st consumable
+
+**use** — consumable index + optional card targets:
+- `{"consumable": 0, "cards": [1, 3]}` — use 1st consumable on 2nd and 4th hand cards
+
+**pack** — pick or skip from opened booster:
+- `{"card": 0}` — pick 1st card from pack
+- `{"skip": true}` — close pack without picking
+
+### Cost Structure
+
+Card costs in gamestate are nested objects, not flat integers:
+```json
+{"cost": {"buy": 6, "sell": 3}}
+```
+Access buy price: `card["cost"]["buy"]`
+Access sell price: `card["cost"]["sell"]`
+
+### GameState Response Fields
+
+```
+state, round_num, ante_num, money, deck, stake, seed, won,
+used_vouchers, hands, round, blinds, jokers, consumables,
+cards, hand, shop, vouchers, packs, pack
+```
+
+**Round:** hands_left, hands_played, discards_left, discards_used, reroll_cost, chips
+**Blind:** type, status, name, effect, score, tag_name, tag_effect
+**Card:** id, key, set, label, value, modifier (seal/edition/enhancement/eternal/perishable/rental), state (debuff/hidden/highlight), cost ({buy, sell})
+**Hand (poker):** order, level, chips, mult, played, played_this_round, example
+**Area:** count, limit, highlighted_limit, cards[]
+
+### Mapping to Our Architecture
+
+- `environment/game_state.py` — polls `gamestate` endpoint, translates JSON → state vector
+- `environment/action_space.py` — maps agent outputs → API method calls with valid parameters
+- `environment/reward.py` — computes reward from gamestate diffs
 
 ---
 
 ## Current Status
 
-- **Phase:** Schema design for data/jokers.py
-- **Schema status:** COMPLETE AND LOCKED
-- **Next step:** Write jokers.py — Python structure + hand-code all 150 jokers
+- **Phase:** Live training — Phase 1 in progress
+- **data/jokers.py:** COMPLETE — 150 jokers, validation, tier_weights pending
+- **environment/game_state.py:** COMPLETE — API client, EventDetector, ScalingTracker, 520-float state vector
+- **environment/action_space.py:** COMPLETE — 14 action types, 45-dim head, masking, ActionDecoder
+- **environment/reward.py:** COMPLETE — 4-tier shaped rewards, log-scaled, RewardConfig
+- **agent/network.py:** COMPLETE — 1.88M params, shared trunk, 3 policy heads + value head
+- **agent/ppo.py:** COMPLETE — RolloutBuffer, GAE, PPO update, checkpoints
+- **training/train.py:** COMPLETE — async orchestrator, episode tracking, LR annealing, CLI args
+- **API corrections applied:** All files updated to use 0-based indices, correct endpoint names, nested cost structure
+- **CUDA fixed:** torch 2.10.0+cu128, RTX 5070 Ti sm_120 verified working
+- **Training checkpoint:** `checkpoints/balatron_phase1_final.pt` — last confirmed at ~110,041 steps
+- **hand_eval.py:** Multiple scoring and decision bugs fixed (see Bug Fix Log below)
+- **pack.lua:** Buffoon Pack freeze fixed
+- **Consumable use:** Tarot/Celestial use was completely broken — now fixed
 
 ---
 
@@ -646,6 +997,78 @@ Most are null/false for any given joker. A simple static joker touches ~8-10 fie
 
 ---
 
+## Bug Fix Log
+
+### 1. Stale `.pyc` Bytecode (CRITICAL — affected multiple systems)
+**File:** `environment/hand_eval.py`
+**Root cause:** Orphaned `if not hand_cards:` at line ~2625 with no body — valid Python syntax but created a dangling if. Python hit a SyntaxError on compile, silently fell back to old `.pyc` bytecode from `__pycache__/hand_eval.cpython-312.pyc`.
+**Symptoms:**
+- Spam log: `"📦 Skipping c_hanged_man: no hand cards (state=SHOP)"` on every frame (old code path)
+- Tarot/Celestial cards bought but NEVER used — old bytecode had broken consumable logic
+**Fix:** Removed the orphaned `if not hand_cards:` line. Deleted `.pyc` cache to force recompile.
+**Lesson:** If Python behavior doesn't match the source, check for SyntaxErrors and delete `__pycache__`.
+
+---
+
+### 2. Suit Joker Scoring Only Counted Scoring Cards (Greedy/Lusty/Wrathful/Gluttonous)
+**File:** `environment/hand_eval.py` — `compute_joker_scoring()`
+**Root cause:** `per_card_instance` suit jokers were counting only `scoring_suits` (e.g., the 2 cards in a Pair) instead of ALL 5 played cards. A Pair with 3 Diamond kickers was getting +3 mult per-card instead of +9.
+**Fix:** Added `all_played_suits` and `all_played_ranks` built from ALL `cards` (not just scoring cards). The `specific_suit` trigger with `per_card_instance` now uses `all_played_suits`.
+
+---
+
+### 3. Baron / Shoot the Moon Corrupted by Rank Fix
+**File:** `environment/hand_eval.py` — `compute_joker_scoring()`
+**Root cause:** After adding `all_played_ranks` for rank jokers, Baron's `specific_rank` (King) trigger would override the correct King count from the `card_held_in_hand` handler.
+**Fix:** In `specific_rank` handler, skip if `"card_held_in_hand" in triggers` — those jokers are fully handled by the held-card path.
+
+---
+
+### 4. 8 Ball Phantom Scoring
+**File:** `environment/hand_eval.py` — `compute_joker_scoring()`
+**Root cause:** 8 Ball is an economy joker (creates Planets when 8s are scored), not a mult joker. The `specific_rank` handler was firing for it and adding phantom mult.
+**Fix:** In `specific_rank` handler, skip if `schema.get("scoring_timing") != "during_card"`. 8 Ball has `scoring_timing=None`.
+
+---
+
+### 5. Same fix for `face_card` trigger / Reserved Parking
+**File:** `environment/hand_eval.py` — `compute_joker_scoring()`
+**Root cause:** Same dual-trigger pattern. Reserved Parking is held-in-hand, not a scoring joker.
+**Fix:** In `face_card` handler, skip if `"card_held_in_hand" in triggers`.
+
+---
+
+### 6. Flush Draw EV Underestimated — Bot Wouldn't Chase Diamond Flush
+**File:** `environment/hand_eval.py` — `plan_optimal_action()`
+**Root cause (part 1 — fallback too low):** When evaluating the EV of discarding to chase a flush, the "miss" fallback was `estimate_score(classify_hand(kept_cards))` — i.e., score of ONLY the kept cards played as a standalone High Card (~300). In reality, after drawing you have `kept_cards + drawn_cards` = 8 cards to pick from. The true fallback is much closer to your current best play.
+**Fix:** `fallback = max(kept_only_score, best_play_score * 0.6)`. Reflects that even on a miss, you have a full hand to work with.
+
+**Root cause (part 2 — no under-target aggression):** The EV comparison was purely `draw_ev > play_score`. No logic for "this play can't win the round anyway, so chase the flush." Two Pair at 1728 beats flush draw EV even when the target is 5000 and Two Pair alone can never get there efficiently.
+**Fix:** Added under-target aggression check: if `best_play_score < per_hand_needed` AND draw has ≥30% hit chance AND projected score ≥1.5× needed AND draw EV ≥75% of play score → discard for the draw.
+
+---
+
+### 7. Buffoon Pack Freeze (Lua)
+**File:** `Mods/balatrobot/src/lua/endpoints/pack.lua`
+**Root cause:** "Choose 2" packs were hanging. Multiple issues: constructed button ref instead of actual buy button, `G.CONTROLLER.locks.use` getting stuck set, 5-second timeout before giving up.
+**Fixes applied:**
+- Use card's actual buy button (`card.children.buy_button`) when available
+- Clear `G.CONTROLLER.locks.use` before `use_card`
+- 1-second fast-fail if `pack_choices` count doesn't change (frozen detection)
+- Timeout reduced from 5s to 3s
+
+---
+
+### 8. Training Restart — Checkpoint Timestep Mismatch
+**Issue:** Running `--total-timesteps 100000` when checkpoint was already at step 110,041 caused immediate training exit (already past target).
+**Fix:** Always set `--total-timesteps` higher than current checkpoint step.
+**Training command:**
+```
+python -u -m training.train --checkpoint checkpoints/balatron_phase1_final.pt --total-timesteps 210000 --device cuda
+```
+
+---
+
 ## Next Session Instructions
 
 ### For Claude Code
@@ -654,11 +1077,20 @@ Read this document fully before starting. Do not summarize it back to Jonny. Do 
 
 ### Next Task
 
-Write `data/jokers.py`:
-1. Define the Python structure (recommended: hybrid approach — TypedDict for schema definition, plain dicts for joker data, validation function)
-2. Build the empty template
-3. Jonny hand-codes all 150 jokers against the schema
-4. Validation pass to catch typos/missing fields
+1. **Boss blind hardcoding** — Encode suit debuffs (Goad=Clubs, Window=Diamonds, Head=Hearts, Club Boss=Spades), The Needle (play only 1 card), and The Psychic (must play 5 cards) into `plan_optimal_action`. These bosses change what hands are legal or what suits score. Worth implementing; others are not.
+
+2. **Verify `optimize_play_order` is wired correctly** — It exists in hand_eval.py and is called from train.py. Confirm it handles Hanging Chad (retrigger first card → put highest-chip card first) and Photograph (x2 on first face card → put best face card first).
+
+3. **Continue training** — Checkpoint at ~110k steps. Use `--total-timesteps 210000` or higher. Watch for flush/suit-chase decisions improving after the EV fix.
+
+### Training Data Quality Note
+
+Training data collected before the bug fixes (steps 0–110k) included:
+- Incorrect joker scoring (suit/rank per-card jokers severely undervalued)
+- Broken tarot/celestial use (consumables never used)
+- Potentially corrupted Buffoon Pack handling
+
+Whether to trash this data or continue from the checkpoint is a judgment call. The policy learned patterns from broken rewards, but it still learned *something* about game structure. Continuing from checkpoint with corrected logic is the pragmatic choice unless win rates are terrible.
 
 ### Who Is Jonny
 
