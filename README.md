@@ -275,7 +275,7 @@ balatron/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/balatron.git
+git clone https://github.com/jarmstrong158/Balatron.git
 cd balatron
 ```
 
