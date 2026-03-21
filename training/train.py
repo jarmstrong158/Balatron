@@ -1034,9 +1034,12 @@ class Trainer:
                 elif card_set == "JOKER":
                     # Joker packs: evaluate which pack joker adds most scoring power
                     JOKER_BLACKLIST = {
-                        "j_hack",        # Hack — retriggers 2,3,4,5 (we don't play these)
                         "j_four_fingers", # Four Fingers — we don't build 4-card flushes/straights
                         "j_drunkard",    # Drunkard — +1 discard but -1 hand
+                    }
+                    # Must-pick jokers in packs — always grab these regardless of delta
+                    PACK_MUST_PICK = {
+                        "j_blueprint", "j_brainstorm",
                     }
                     jokers_info = raw.get("jokers", {})
                     joker_count = jokers_info.get("count", 0)
@@ -1044,21 +1047,34 @@ class Trainer:
                     current_jokers = jokers_info.get("cards", [])
 
                     if joker_count < joker_limit:
-                        # Slots available — pick the best joker from the pack
-                        current_score = estimate_score_for_hand_type(current_jokers, raw)
-                        best_improvement = 0.0
-                        best_pack_idx = 0
+                        # Check for must-pick jokers first
+                        must_pick_idx = -1
                         for pc_idx, pc in enumerate(pack_cards):
                             pc_key = pc.get("key", "")
-                            if pc_key in JOKER_BLACKLIST:
-                                continue
-                            test_jokers = current_jokers + [pc]
-                            score_with = estimate_score_for_hand_type(test_jokers, raw)
-                            improvement = score_with - current_score
-                            if improvement > best_improvement:
-                                best_improvement = improvement
-                                best_pack_idx = pc_idx
-                        pick_idx = best_pack_idx
+                            if pc_key in PACK_MUST_PICK:
+                                must_pick_idx = pc_idx
+                                print(f"[PACK] MUST-PICK joker found: {pc_key} "
+                                      f"at index {pc_idx}", flush=True)
+                                break
+
+                        if must_pick_idx >= 0:
+                            pick_idx = must_pick_idx
+                        else:
+                            # Slots available — pick the best joker from the pack
+                            current_score = estimate_score_for_hand_type(current_jokers, raw)
+                            best_improvement = 0.0
+                            best_pack_idx = 0
+                            for pc_idx, pc in enumerate(pack_cards):
+                                pc_key = pc.get("key", "")
+                                if pc_key in JOKER_BLACKLIST:
+                                    continue
+                                test_jokers = current_jokers + [pc]
+                                score_with = estimate_score_for_hand_type(test_jokers, raw)
+                                improvement = score_with - current_score
+                                if improvement > best_improvement:
+                                    best_improvement = improvement
+                                    best_pack_idx = pc_idx
+                            pick_idx = best_pack_idx
 
                     else:
                         # Slots full — evaluate swap with weakest owned joker
@@ -1078,19 +1094,30 @@ class Trainer:
                                 worst_score_without = score_without
                                 worst_idx = j_idx
 
-                        # Check each pack joker as a replacement for the weakest
-                        best_swap = None
-                        best_swap_score = current_score
+                        # Check for must-pick jokers first (always swap for these)
+                        must_pick_idx = -1
                         for pc_idx, pc in enumerate(pack_cards):
                             pc_key = pc.get("key", "")
-                            if pc_key in JOKER_BLACKLIST:
-                                continue
-                            jokers_with_swap = [j for i, j in enumerate(current_jokers) if i != worst_idx]
-                            jokers_with_swap.append(pc)
-                            swap_score = estimate_score_for_hand_type(jokers_with_swap, raw)
-                            if swap_score > best_swap_score:
-                                best_swap_score = swap_score
-                                best_swap = pc_idx
+                            if pc_key in PACK_MUST_PICK:
+                                must_pick_idx = pc_idx
+                                print(f"[PACK] MUST-PICK joker {pc_key} found "
+                                      f"(slots full, will swap)", flush=True)
+                                break
+
+                        # Check each pack joker as a replacement for the weakest
+                        best_swap = must_pick_idx if must_pick_idx >= 0 else None
+                        best_swap_score = current_score
+                        if best_swap is None:
+                            for pc_idx, pc in enumerate(pack_cards):
+                                pc_key = pc.get("key", "")
+                                if pc_key in JOKER_BLACKLIST:
+                                    continue
+                                jokers_with_swap = [j for i, j in enumerate(current_jokers) if i != worst_idx]
+                                jokers_with_swap.append(pc)
+                                swap_score = estimate_score_for_hand_type(jokers_with_swap, raw)
+                                if swap_score > best_swap_score:
+                                    best_swap_score = swap_score
+                                    best_swap = pc_idx
 
                         if best_swap is not None:
                             # Sell the weakest joker then IMMEDIATELY pick
@@ -1552,6 +1579,7 @@ class Trainer:
 
             from environment.action_space import (
                 _estimate_joker_value, _joker_is_scoring, _api_key_to_name,
+                MUST_BUY_JOKERS,
             )
             joker_key = joker.get("joker_key", "") or joker.get("key", "")
             name = _api_key_to_name(joker_key) or joker_key
@@ -1559,6 +1587,17 @@ class Trainer:
             # Never sell your only joker
             if joker_count <= 1:
                 return "gamestate", None
+
+            # Never sell must-buy jokers (Blueprint, Brainstorm)
+            if name in MUST_BUY_JOKERS:
+                return "gamestate", None
+
+            # Never sell retrigger or copy jokers — they amplify everything
+            from data.jokers import JOKERS
+            if name and name in JOKERS:
+                schema = JOKERS[name]
+                if schema.get("retrigger_effect") or schema.get("copy"):
+                    return "gamestate", None
 
             # Only allow selling if this is the weakest joker AND there's
             # a better replacement available in shop
@@ -1591,8 +1630,13 @@ class Trainer:
                     swapped = [j for i, j in enumerate(jokers_raw) if i != j_idx]
                     swapped.append(sc)
                     swap_score = estimate_score_for_hand_type(swapped, raw_state)
-                    if swap_score > current_score * 1.05:
+                    if swap_score > current_score * 1.15:
                         has_upgrade = True
+                        print(f"[SHOP] Selling {name} (idx {j_idx}) — "
+                              f"shop has {sc_name} as upgrade "
+                              f"(score {current_score:.0f} -> {swap_score:.0f}, "
+                              f"+{(swap_score/max(current_score,1)-1)*100:.0f}%)",
+                              flush=True)
                         break
 
             if not has_upgrade:
