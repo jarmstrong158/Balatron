@@ -587,6 +587,11 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             ip = _interest_penalty(money, cost)
             pack_key = card.get("key", "")
 
+            # Standard packs add cards to deck — dilutes draw odds. Block them.
+            if "standard" in pack_key:
+                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = 0.0
+                continue
+
             # If scoring jokers are available in shop, penalize packs heavily
             # (jokers are almost always better value than packs)
             if has_scoring_joker_in_shop and has_joker_slot:
@@ -646,13 +651,13 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
         if upgrade_sell_idx >= 0 and upgrade_target_idx >= 0 and mask[ACTION_SELL_JOKER] > 0:
             # Upgrade available — boost selling the weakest
             mask[ACTION_SELL_JOKER] = math.exp(HAND_BIAS_STRENGTH * 0.4)
-        elif any_sellable and mask[ACTION_SELL_JOKER] > 0:
-            if all_scoring:
-                # All jokers are scoring — HARD BLOCK selling entirely
-                mask[ACTION_SELL_JOKER] = 0.0
-            else:
-                # Some non-scoring jokers exist — allow but penalize
-                mask[ACTION_SELL_JOKER] = math.exp(-HAND_BIAS_STRENGTH * 0.4)
+        else:
+            # No upgrade available — HARD BLOCK selling entirely.
+            # The heuristic will block any sell without a shop upgrade anyway,
+            # so allowing sells here just creates no-op spam.
+            mask[ACTION_SELL_JOKER] = 0.0
+            for i in range(JOKER_SLOTS):
+                mask[target_offset + TARGET_OWNED_JOKER_OFFSET + i] = 0.0
 
         # Consumables (for selling or using)
         # Block selling consumables that plan_consumable_use would want to use

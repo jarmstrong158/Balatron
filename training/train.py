@@ -1596,6 +1596,35 @@ class Trainer:
             cost = shop_packs[p_idx].get("cost", {}).get("buy", 999)
             if cost > money:
                 return "gamestate", None
+
+            # Guard: don't buy packs when there's a good joker available
+            # Jokers are almost always better than packs early game
+            pack_key = shop_packs[p_idx].get("key", "")
+            if joker_count < joker_limit:
+                from environment.action_space import (
+                    _estimate_joker_value, _api_key_to_name, BAD_JOKERS,
+                )
+                shop_cards = raw_state.get("shop", {}).get("cards", [])
+                for sc in shop_cards:
+                    sc_set = sc.get("set", "")
+                    if sc_set and sc_set != "Joker":
+                        continue
+                    sc_cost = sc.get("cost", {}).get("buy", 999)
+                    if sc_cost > money:
+                        continue
+                    sc_key = sc.get("joker_key", "") or sc.get("key", "")
+                    sc_name = _api_key_to_name(sc_key)
+                    if sc_name and sc_name not in BAD_JOKERS:
+                        delta = _estimate_joker_value(sc, jokers_raw, raw_state)
+                        if delta > 0:
+                            print(f"[SHOP] BLOCKED pack buy — joker {sc_name} "
+                                  f"available (+{delta:.0f})", flush=True)
+                            return "gamestate", None  # buy joker instead
+
+            # Block standard packs — they add cards to deck, diluting draws
+            if "standard" in pack_key:
+                return "gamestate", None
+
             return "buy", {"pack": p_idx}
 
         # Sell joker (target 7-11 -> joker index 0-4)

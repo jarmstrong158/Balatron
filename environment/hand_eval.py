@@ -1075,8 +1075,7 @@ def _hand_contains(played_hand: str, target_hand: str) -> bool:
     containment = {
         "Pair": {"Two Pair", "Three of a Kind", "Full House", "Flush House",
                  "Four of a Kind", "Five of a Kind", "Flush Five"},
-        "Two Pair": {"Full House", "Flush House",
-                     "Four of a Kind", "Five of a Kind", "Flush Five"},
+        "Two Pair": {"Full House", "Flush House"},
         "Three of a Kind": {"Full House", "Flush House",
                             "Four of a Kind", "Five of a Kind", "Flush Five"},
         "Full House": {"Flush House"},
