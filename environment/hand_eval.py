@@ -3018,6 +3018,26 @@ def estimate_score_for_hand_type(jokers: list[dict], gamestate: dict) -> float:
         total = max(len(deck_cards), 1)
         ds = {s: n / total for s, n in counts.items()}
 
+    # Detect retrigger jokers once for chip bonus estimation
+    has_hanging_chad = False
+    has_sock_buskin = False
+    has_hack = False
+    has_dusk = False
+    has_seltzer = False
+    for j in jokers:
+        jk = j.get("joker_key", "") or j.get("key", "")
+        jn = _api_key_to_name(jk)
+        if jn == "Hanging Chad":
+            has_hanging_chad = True
+        elif jn == "Sock and Buskin":
+            has_sock_buskin = True
+        elif jn == "Hack":
+            has_hack = True
+        elif jn == "Dusk":
+            has_dusk = True
+        elif jn == "Seltzer":
+            has_seltzer = True
+
     # Retrigger chip bonus is handled INSIDE _estimate_joker_scoring_for_type
     # via retrigger_extra on per-card jokers. We only need the base card chip
     # contribution from retriggers on the cards themselves (not joker effects).
