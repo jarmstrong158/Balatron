@@ -1504,7 +1504,7 @@ class GameStateManager:
             slot_offset = offset + slot_idx * SHOP_JOKER_SIZE
             if slot_idx < len(shop_jokers):
                 card = shop_jokers[slot_idx]
-                if card.get("set", "") == "Joker" or card.get("key", "").startswith("j_"):
+                if card.get("set", "").upper() == "JOKER" or card.get("key", "").startswith("j_"):
                     key = card.get("key", "")
                     modifier = _as_dict(card.get("modifier", {}))
                     edition = modifier.get("edition")

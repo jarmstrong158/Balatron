@@ -867,18 +867,14 @@ class Trainer:
                     if self._shop_noop_count >= 3:
                         # Before forcing leave, try to buy the best affordable joker
                         from environment.action_space import (
-                            _estimate_joker_value as _noop_ejv,
-                            _joker_is_scoring as _noop_jis,
-                            _api_key_to_name as _noop_aktn,
-                            HIGH_VALUE_JOKERS as _noop_hv,
+                            _is_joker_card as _noop_ij,
                         )
-                        # Try to buy ANY affordable shop card that could be a joker
+                        # Try to buy ANY affordable joker in shop
                         noop_shop = raw_state.get("shop", {}).get("cards", [])
                         noop_jokers = raw_state.get("jokers", {}).get("cards", [])
                         noop_jcount = len(noop_jokers)
                         noop_jlimit = raw_state.get("joker_limit", 5)
                         best_noop_buy = -1
-                        # Log what we see so we can debug
                         for ni, nc in enumerate(noop_shop):
                             nc_key = nc.get("key", "")
                             nc_set = nc.get("set", "")
@@ -886,15 +882,11 @@ class Trainer:
                             print(f"[SHOP-NOOP-SCAN] slot {ni}: "
                                   f"key={nc_key} set={nc_set} cost=${nc_cost}",
                                   flush=True)
-                            # Buy ANY joker-type card we can afford with open slots
                             if nc_cost > noop_money:
                                 continue
                             if noop_jcount >= noop_jlimit:
                                 continue
-                            # Accept if set is Joker OR key starts with j_
-                            is_joker = (nc_set == "Joker" or
-                                        nc_key.startswith("j_"))
-                            if is_joker and best_noop_buy < 0:
+                            if _noop_ij(nc) and best_noop_buy < 0:
                                 best_noop_buy = ni
                         if best_noop_buy >= 0:
                             bk = noop_shop[best_noop_buy].get("key", "?")
@@ -914,11 +906,54 @@ class Trainer:
             else:
                 self._shop_noop_count = 0
 
+            # Stuck-state detector: if we keep getting the same state,
+            # escalate from force-play → restart
+            state_fingerprint = (
+                game_state_name,
+                str(raw_state.get("hand", {}).get("cards", [])),
+                raw_state.get("round", {}).get("hands_left", -1),
+                raw_state.get("round", {}).get("discards_left", -1),
+            )
+            prev_fingerprint = getattr(self, '_prev_state_fingerprint', None)
+            if state_fingerprint == prev_fingerprint:
+                self._state_stuck_count = getattr(self, '_state_stuck_count', 0) + 1
+                stuck = self._state_stuck_count
+
+                if stuck == 3 and game_state_name == "SELECTING_HAND":
+                    # First escalation: force-play best hand
+                    print(f"[STUCK] State unchanged {stuck}x — "
+                          f"force-playing best hand", flush=True)
+                    hand_cards = raw_state.get("hand", {}).get("cards", [])
+                    jokers_raw = raw_state.get("jokers", {}).get("cards", [])
+                    try:
+                        best = find_best_hands(hand_cards, jokers_raw, raw_state, top_n=1)
+                        forced_cards = list(best[0]["card_indices"])[:5] if best else [0]
+                    except Exception:
+                        forced_cards = [0] if hand_cards else []
+                    api_method = "play"
+                    api_params = {"cards": forced_cards}
+                    self._pending_hand_rearrange = None
+                    self._pending_rearrange = None
+
+                elif stuck >= 8:
+                    # Buttons are permanently broken — restart Balatro
+                    print(f"[STUCK] State unchanged {stuck}x — "
+                          f"game desynced, restarting Balatro", flush=True)
+                    self._state_stuck_count = 0
+                    self._prev_state_fingerprint = None
+                    await self._restart_balatro()
+                    self.reward_calc.reset()
+                    self.game.reset()
+                    continue
+            else:
+                self._state_stuck_count = 0
+            self._prev_state_fingerprint = state_fingerprint
+
             # Reorder jokers before playing a hand (using actual cards)
             _intended_joker_order = None
-            if api_method == "play" and hasattr(self, '_pending_rearrange'):
+            if api_method == "play" and getattr(self, '_pending_rearrange', None) is not None:
                 hand_cards, deck_cards = self._pending_rearrange
-                del self._pending_rearrange
+                self._pending_rearrange = None
                 try:
                     _intended_joker_order = await self._auto_rearrange_jokers(
                         raw_state, hand_cards=hand_cards, deck_cards=deck_cards
@@ -930,12 +965,11 @@ class Trainer:
 
             # Rearrange hand cards for optimal scoring order (face card first
             # for Photograph, highest chips first for Hanging Chad, etc.)
-            if api_method == "play" and hasattr(self, '_pending_hand_rearrange'):
+            if api_method == "play" and getattr(self, '_pending_hand_rearrange', None) is not None:
                 new_hand_order = self._pending_hand_rearrange
                 fallback_cards = getattr(self, '_pending_hand_rearrange_fallback', None)
-                del self._pending_hand_rearrange
-                if hasattr(self, '_pending_hand_rearrange_fallback'):
-                    del self._pending_hand_rearrange_fallback
+                self._pending_hand_rearrange = None
+                self._pending_hand_rearrange_fallback = None
                 try:
                     await self.game.execute_action("rearrange", {"hand": new_hand_order})
                 except Exception as e:
@@ -951,12 +985,23 @@ class Trainer:
                     raw_state, _intended_joker_order
                 )
 
-            # Execute action
+            # Execute action (with retry on UI timing errors)
             action_succeeded = True
-            try:
-                await self.game.execute_action(api_method, api_params)
-            except Exception:
-                action_succeeded = False
+            max_retries = 3
+            for _attempt in range(max_retries):
+                try:
+                    await self.game.execute_action(api_method, api_params)
+                    break  # success
+                except Exception as exc:
+                    exc_str = str(exc)
+                    if ("buttons" in exc_str or "INVALID_STATE" in exc_str) and _attempt < max_retries - 1:
+                        # UI buttons not ready yet — wait and retry
+                        await asyncio.sleep(0.3 * (_attempt + 1))
+                        continue
+                    action_succeeded = False
+                    print(f"[WARN] execute_action({api_method}, {api_params}) "
+                          f"FAILED: {exc}", flush=True)
+                    break
 
             # Skip shop rearrange — joker order only matters before plays,
             # and we already rearrange at round start + before each play.
@@ -1046,26 +1091,31 @@ class Trainer:
                 self._round_eval_count = 0  # reset win-screen detector
                 if state == "SHOP":
                     self._shop_rerolls = 0
-                    # Log shop contents so we can see what the bot sees
-                    shop_cards_debug = raw.get("shop", {}).get("cards", [])
-                    shop_packs_debug = raw.get("packs", {}).get("cards", [])
+                    # ── RAW STATE DUMP — see exactly what the API returns ──
+                    import json as _json
+                    _raw_shop = raw.get("shop", {})
+                    _raw_packs = raw.get("packs", {})
                     _money = raw.get("money", 0)
                     _jcount = len(raw.get("jokers", {}).get("cards", []))
                     _jlimit = raw.get("joker_limit", 5)
+                    print(f"[SHOP-RAW] money=${_money} jokers={_jcount}/{_jlimit}",
+                          flush=True)
+                    print(f"[SHOP-RAW] shop={_json.dumps(_raw_shop, default=str)[:800]}",
+                          flush=True)
+                    print(f"[SHOP-RAW] packs={_json.dumps(_raw_packs, default=str)[:400]}",
+                          flush=True)
+                    # Also log parsed view
+                    from environment.action_space import _is_joker_card as _debug_ij
+                    shop_cards_debug = _raw_shop.get("cards", []) if isinstance(_raw_shop, dict) else []
                     shop_items = []
                     for sc in shop_cards_debug:
                         sc_set = sc.get("set", "")
                         sc_key = sc.get("key", "")
                         sc_cost = sc.get("cost", {}).get("buy", "?")
-                        shop_items.append(f"{sc_key}({sc_set})${sc_cost}")
-                    pack_items = []
-                    for pc in shop_packs_debug:
-                        pk = pc.get("key", "")
-                        pc_cost = pc.get("cost", {}).get("buy", "?")
-                        pack_items.append(f"{pk}${pc_cost}")
-                    print(f"[SHOP-ENTER] money=${_money} jokers={_jcount}/{_jlimit} "
-                          f"shop=[{', '.join(shop_items)}] "
-                          f"packs=[{', '.join(pack_items)}]", flush=True)
+                        is_j = _debug_ij(sc)
+                        shop_items.append(f"{sc_key}(set={sc_set},joker={is_j})${sc_cost}")
+                    print(f"[SHOP-ENTER] shop_cards({len(shop_cards_debug)})=[{', '.join(shop_items)}]",
+                          flush=True)
                 if state == "BLIND_SELECT":
                     # Auto-skip for Investment Tag (free money)
                     # At BLIND_SELECT, the offered blind has status "SELECT"
@@ -1195,6 +1245,45 @@ class Trainer:
 
                 # ── Pick best card from pack ──
                 pick_idx = 0
+
+                # ── SOUL CARD CHECK (all pack types) ──
+                # The Soul creates a Legendary joker — ALWAYS pick it.
+                # If joker slots are full, sell weakest to make room.
+                soul_idx = -1
+                for sc_idx, sc in enumerate(pack_cards):
+                    if sc.get("key", "") == "c_the_soul":
+                        soul_idx = sc_idx
+                        break
+                if soul_idx >= 0:
+                    jokers_info_soul = raw.get("jokers", {})
+                    soul_jcount = len(jokers_info_soul.get("cards", []))
+                    soul_jlimit = jokers_info_soul.get("limit", 5)
+                    if soul_jcount >= soul_jlimit:
+                        # Sell weakest joker to make room for Legendary
+                        weakest_soul_idx, _ = _find_weakest_sellable_joker(
+                            jokers_info_soul.get("cards", []), raw)
+                        if weakest_soul_idx >= 0:
+                            w_name = jokers_info_soul["cards"][weakest_soul_idx].get("label") or "?"
+                            print(f"[PACK] SOUL CARD! Selling {w_name} (idx {weakest_soul_idx}) "
+                                  f"to make room for Legendary joker", flush=True)
+                            try:
+                                await self.game.execute_action("sell", {"joker": weakest_soul_idx})
+                                await asyncio.sleep(0.5)
+                            except Exception as e:
+                                print(f"[PACK] Soul sell failed: {e}", flush=True)
+                        else:
+                            print(f"[PACK] SOUL CARD found but can't sell any joker — "
+                                  f"picking anyway (may fail)", flush=True)
+                    else:
+                        print(f"[PACK] SOUL CARD found! Picking Legendary joker", flush=True)
+                    pick_idx = soul_idx
+                    # Skip all other evaluation — go straight to pick logic
+                    try:
+                        await self.game.execute_action("pack", {"card": pick_idx})
+                    except Exception as e:
+                        print(f"[PACK] Soul pick failed: {e}", flush=True)
+                    await asyncio.sleep(cfg.api_poll_delay)
+                    continue
 
                 if card_set in ("PLANET", "SPECTRAL"):
                     # Joker-aware planet selection: pick the planet that gives
@@ -1333,7 +1422,7 @@ class Trainer:
                             # Sell the weakest joker then IMMEDIATELY pick
                             # the replacement in the same iteration.
                             try:
-                                worst_name = current_jokers[worst_idx].get("name", "?")
+                                worst_name = current_jokers[worst_idx].get("label") or current_jokers[worst_idx].get("key", "?")
                                 print(f"[PACK] selling joker {worst_idx} ({worst_name}) "
                                       f"to swap for pack card {best_swap}", flush=True)
                                 await self.game.execute_action("sell", {"joker": worst_idx})
@@ -1657,18 +1746,27 @@ class Trainer:
                 return "gamestate", None  # invalid index
 
             card = shop_cards[target_idx]
-            # Non-joker cards in shop slots (planets/tarots) can't be bought as jokers
-            card_set = card.get("set", "")
-            if card_set and card_set != "Joker":
-                return "gamestate", None
+            from environment.action_space import (
+                _estimate_joker_value, _joker_is_scoring, _joker_sell_value,
+                MUST_BUY_JOKERS, BAD_JOKERS, _api_key_to_name, _is_non_joker_card,
+            )
             cost = card.get("cost", {}).get("buy", 999)
             if cost > money:
                 return "gamestate", None  # can't afford
 
-            from environment.action_space import (
-                _estimate_joker_value, _joker_is_scoring, _joker_sell_value,
-                MUST_BUY_JOKERS, BAD_JOKERS, _api_key_to_name,
-            )
+            # Non-joker cards (planets/tarots/Hermit) — buy directly if mask allowed it
+            if _is_non_joker_card(card):
+                card_key = card.get("key", "")
+                card_set = card.get("set", "").upper()
+                cons_count = len(raw_state.get("consumables", {}).get("cards", []))
+                cons_limit = raw_state.get("consumables", {}).get("limit", 2)
+                if cons_count >= cons_limit:
+                    return "gamestate", None  # no consumable slots
+                card_label = card.get("label") or card_key
+                print(f"[SHOP] Buying consumable: {card_label} "
+                      f"(${cost}, {card_set})", flush=True)
+                return "buy", {"card": target_idx}
+
             joker_key = card.get("joker_key", "") or card.get("key", "")
             name = _api_key_to_name(joker_key)
 
@@ -1694,15 +1792,11 @@ class Trainer:
             if name in BAD_JOKERS:
                 return "gamestate", None
 
-            # Check negative edition (bypasses slot limit)
-            shop_mod = card.get("modifier", {})
-            is_negative = (isinstance(shop_mod, dict) and
-                           shop_mod.get("edition", "") == "NEGATIVE")
-
-            # Check if this is a high-value joker
+            # Check edition (negative bypasses slot limit, poly/holo = high value)
             from environment.action_space import HIGH_VALUE_JOKERS
             shop_mod = card.get("modifier", {})
             shop_edition = shop_mod.get("edition", "") if isinstance(shop_mod, dict) else ""
+            is_negative = shop_edition == "NEGATIVE"
             is_high_value = (name in HIGH_VALUE_JOKERS or
                              shop_edition in ("POLYCHROME", "HOLO", "NEGATIVE"))
 
@@ -1716,13 +1810,14 @@ class Trainer:
                         print(f"[SHOP] Buying HIGH_VALUE {name} despite low delta "
                               f"({delta:.0f}) — known strong joker", flush=True)
                     return "buy", {"card": target_idx}
-                elif delta == 0 and is_scoring:
-                    # Scoring joker with delta=0 — estimator can't model it but
-                    # it's better than an empty slot. Buy it.
-                    print(f"[SHOP] Buying {name or joker_key} (delta=0, scoring=True) "
-                          f"— filling empty slot", flush=True)
+                elif delta == 0:
+                    # Delta=0 joker (scoring or economy) — better than an
+                    # empty slot. Buy it when we have room.
+                    print(f"[SHOP] Buying {name or joker_key} (delta=0, "
+                          f"scoring={is_scoring}) — filling empty slot", flush=True)
                     return "buy", {"card": target_idx}
                 else:
+                    # Negative delta — block
                     print(f"[SHOP] BLOCKED buy {name or joker_key} "
                           f"(delta={delta:.0f}, scoring={is_scoring})", flush=True)
                     return "gamestate", None
@@ -1814,24 +1909,24 @@ class Trainer:
             p_idx = target_idx - 5 if target_idx >= 5 else target_idx
             shop_packs = raw_state.get("packs", {}).get("cards", [])
             if p_idx < 0 or p_idx >= len(shop_packs):
-                return "gamestate", None  # invalid target
+                return "gamestate", None
             cost = shop_packs[p_idx].get("cost", {}).get("buy", 999)
             if cost > money:
                 return "gamestate", None
 
-            # Guard: if there's a buyable joker in shop, buy that instead of a pack.
+            # Guard: if there's a buyable joker in shop, buy that instead
             pack_key = shop_packs[p_idx].get("key", "")
             is_free = cost <= 0
             if not is_free and joker_count < joker_limit:
                 from environment.action_space import (
                     _joker_is_scoring as _pack_jis,
                     _api_key_to_name as _pack_aktn,
+                    _is_non_joker_card as _pack_nonj,
                 )
                 shop_joker_cards = raw_state.get("shop", {}).get("cards", [])
                 best_joker_idx = -1
                 for sji, sjc in enumerate(shop_joker_cards):
-                    sj_set = sjc.get("set", "")
-                    if sj_set and sj_set != "Joker":
+                    if _pack_nonj(sjc):
                         continue
                     sj_cost = sjc.get("cost", {}).get("buy", 999)
                     if sj_cost > money:
@@ -1845,9 +1940,8 @@ class Trainer:
                     print(f"[SHOP] REDIRECT pack buy → joker buy: {sj_name}",
                           flush=True)
                     return "buy", {"card": best_joker_idx}
-                # No joker in shop — pack is fine, let it through
 
-            # Block standard packs — they add cards to deck, diluting draws
+            # Block standard packs
             if "standard" in pack_key:
                 return "gamestate", None
 
@@ -1865,37 +1959,42 @@ class Trainer:
 
             from environment.action_space import (
                 _estimate_joker_value, _api_key_to_name,
+                _joker_sell_value, _safe_modifier,
+                MUST_BUY_JOKERS,
             )
 
-            # Use shared sell guard — checks eternal, negative, MUST_BUY,
-            # retrigger, copy jokers
-            weakest_idx, _ = _find_weakest_sellable_joker(
-                jokers_raw, raw_state)
-
-            # Block if: target isn't the weakest sellable, or nothing is sellable
-            if weakest_idx < 0 or j_idx != weakest_idx:
-                return "gamestate", None
-
             joker = jokers_raw[j_idx]
+            mod = _safe_modifier(joker)
+
+            # Hard blocks: eternal, negative, MUST_BUY jokers
+            if mod.get("eternal", False):
+                return "gamestate", None
+            ed = mod.get("edition", "") if isinstance(mod, dict) else ""
+            if ed == "NEGATIVE":
+                return "gamestate", None
             joker_key = joker.get("joker_key", "") or joker.get("key", "")
             name = _api_key_to_name(joker_key) or joker_key
+            if name in MUST_BUY_JOKERS:
+                return "gamestate", None
 
-            # Check if there's a better joker available in shop
+            # Check if there's a better joker available in shop to replace
             shop_cards = raw_state.get("shop", {}).get("cards", [])
             has_upgrade = False
+            sell_price = _joker_sell_value(joker)
             for sc in shop_cards:
+                from environment.action_space import _is_non_joker_card
+                if _is_non_joker_card(sc):
+                    continue
                 sc_key = sc.get("joker_key", "") or sc.get("key", "")
                 sc_name = _api_key_to_name(sc_key)
                 if not sc_name:
                     continue
                 sc_cost = sc.get("cost", {}).get("buy", 999)
-                from environment.action_space import _joker_sell_value
-                sell_price = _joker_sell_value(joker)
                 if sc_cost <= money + sell_price:
                     swapped = [j for i, j in enumerate(jokers_raw) if i != j_idx]
                     swapped.append(sc)
                     swap_score = estimate_score_for_hand_type(swapped, raw_state)
-                    if swap_score > current_score * 1.15:
+                    if swap_score > current_score * 1.05:
                         has_upgrade = True
                         print(f"[SHOP] Selling {name} (idx {j_idx}) — "
                               f"shop has {sc_name} as upgrade "
@@ -1933,14 +2032,14 @@ class Trainer:
             from environment.action_space import (
                 _estimate_joker_value as _ejv, _joker_is_scoring as _jis,
                 HIGH_VALUE_JOKERS, _api_key_to_name as _aktn,
+                _is_non_joker_card as _reroll_nonj,
             )
             shop_cards = raw_state.get("shop", {}).get("cards", [])
             best_buy_idx = -1
             best_buy_delta = -999
             best_buy_name = ""
             for sci, sc in enumerate(shop_cards):
-                sc_set = sc.get("set", "")
-                if sc_set and sc_set != "Joker":
+                if _reroll_nonj(sc):
                     continue
                 sc_cost = sc.get("cost", {}).get("buy", 999)
                 if sc_cost > money:
@@ -2056,10 +2155,10 @@ class Trainer:
                 from environment.action_space import (
                     _estimate_joker_value, _joker_is_scoring, _api_key_to_name,
                     MUST_BUY_JOKERS, BAD_JOKERS, HIGH_VALUE_JOKERS,
+                    _is_non_joker_card as _end_nonj,
                 )
                 for i, sc in enumerate(shop_cards):
-                    sc_set = sc.get("set", "")
-                    if sc_set and sc_set != "Joker":
+                    if _end_nonj(sc):
                         continue
                     sc_cost = sc.get("cost", {}).get("buy", 999)
                     if sc_cost > money:

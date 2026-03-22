@@ -68,7 +68,7 @@ Balatron uses a **hybrid architecture** that combines neural network learning wi
 |-------|---------------|----------|
 | **Neural Network** | Strategic decisions under uncertainty | When to reroll, which jokers to prioritize, when to leave the shop, blind skip timing |
 | **Action Mask** | Logit biasing to guide exploration | Boost scoring jokers in shop, suppress bad jokers, penalize unaffordable items |
-| **Heuristic Guards** | Validate and override bad decisions | Block selling your only joker, prevent buying when it tanks interest, force-buy Blueprint/Brainstorm |
+| **Heuristic Guards** | Validate and override bad decisions | Block selling your only joker, prevent buying when it tanks interest, force-buy Blueprint/Brainstorm, auto-buy Hermit, Soul card priority in packs |
 | **Scoring Engine** | Full Balatro math for hand evaluation | Compute exact scores with joker effects, retriggers, editions, enhancements, boss debuffs |
 | **Strategic Advisor** | Optimal hand/discard selection | `plan_optimal_action()` — evaluates all possible plays against blind target with draw probability |
 
@@ -118,7 +118,7 @@ Actions are represented as a **14-element tensor**: `[action_type(1), card_selec
 |-------|--------|---------|
 | 0 | Play hand | SELECTING_HAND |
 | 1 | Discard | SELECTING_HAND |
-| 2 | Buy joker | SHOP |
+| 2 | Buy shop card (joker/planet/tarot) | SHOP |
 | 3 | Buy voucher | SHOP |
 | 4 | Buy pack | SHOP |
 | 5 | Sell joker | SHOP |
@@ -192,6 +192,8 @@ Score = (hand_chips + card_chips + joker_chips) x (hand_mult + joker_mult) x jok
 - Draw probabilities for completing better hands
 - Joker synergies with specific suits/ranks
 - Boss blind debuffs on specific suits
+- Chase target viability — only discards when the chase target can realistically beat the blind
+- Baseline scoring — uses actual expected hand value (planet levels + joker effects) for multi-hand projections
 
 ---
 
@@ -240,6 +242,8 @@ balatron/
 |
 |-- training/
 |   |-- train.py            # Main training loop, episode management, auto-play heuristics
+|
+|-- recorder.py             # Automated win recording via ffmpeg gdigrab
 |
 |-- scripts/
 |   |-- sim_bloodstone.py   # Simulation utilities
@@ -336,6 +340,14 @@ python -u -m training.train --total-timesteps 1500000 --device cuda --checkpoint
 ```
 
 Checkpoints are saved automatically during training.
+
+### Recording
+
+Wins are automatically recorded via ffmpeg screen capture. Use `--no-record` to disable recording (reduces CPU/disk overhead):
+
+```powershell
+python -u -m training.train --total-timesteps 1500000 --device cuda --checkpoint checkpoints/balatron_phase1_final.pt --no-record
+```
 
 ---
 

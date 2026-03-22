@@ -2799,18 +2799,35 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
                 best_chase = t
                 break  # already sorted by EV
 
+        # Estimate total scoring across remaining hands.
+        # Current hand: known exact score. Future hands: use realistic baseline
+        # from estimate_score_for_hand_type which computes expected value using
+        # actual planet levels, joker effects, and hand-type probabilities.
+        future_hands = max(hands_left - 1, 0)
+        baseline_score = estimate_score_for_hand_type(jokers, gamestate)
+        total_projected = effective_play_score + (baseline_score * future_hands)
+        comfort_ratio = total_projected / max(remaining, 1)
+
+        # ── VIABILITY CHECK: can ANY chase target actually help beat the blind?
+        # If the best chase EV across all remaining hands can't beat the target,
+        # discarding is pointless — just play immediately to score what we can.
+        if best_chase and remaining > 0:
+            # Best possible outcome: chase EV for one big hand + remaining hands
+            # of current-level play
+            chase_ev = best_chase["ev"]
+            best_outcome = chase_ev + baseline_score * max(hands_left - 1, 0)
+            if best_outcome < remaining * 0.5:
+                # Even the best chase can't get us close — don't waste discards
+                _round_strategy["committed_type"] = None
+                return {"action": "play", "cards": effective_play_cards,
+                        "reason": f"hopeless chase (best={best_outcome:.0f} < "
+                                  f"50% of {remaining:.0f}), play now",
+                        "play_score": effective_play_score, "discard_ev": 0,
+                        "target": remaining}
+
         # SMART MULTI-HAND CHECK: if the current hand is strong enough
         # to win across remaining hands AND no chase target's EV meaningfully
-        # beats it, just play it.  This prevents wasting discards when
-        # we already have a great joker-synergy hand (e.g. flush with
-        # Photograph + Walkie Talkie).
-        #
-        # The threshold scales with comfort level:
-        # - 3× overkill → chase must have EV 2× our score (almost never chase)
-        # - 2× overkill → chase must have EV 1.5× our score
-        # - barely winning → chase must have EV 1.2× our score
-        total_projected = effective_play_score * hands_left
-        comfort_ratio = total_projected / max(remaining, 1)
+        # beats it, just play it.
         if comfort_ratio >= 3.0:
             chase_threshold = 2.0
         elif comfort_ratio >= 2.0:
@@ -2818,9 +2835,6 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
         else:
             chase_threshold = 1.2
 
-        # Compare chase EV (probability-weighted), NOT raw projected_score.
-        # A Flush that projects 2000 but has 10% chance has EV ~350 — not
-        # worth chasing over a guaranteed 1600.
         chase_ev = best_chase["ev"] if best_chase else 0
         chase_beats_current = (best_chase and
                                chase_ev > effective_play_score * chase_threshold)
@@ -2835,15 +2849,27 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
                     "target": remaining}
 
         if chase_beats_current:
+            # Additional check: chase must also be viable against the blind
+            # Don't discard toward a Three of a Kind (3000) when target is 16000
+            chase_best_outcome = chase_ev + baseline_score * max(hands_left - 1, 0)
+            if chase_best_outcome < remaining * 0.7:
+                # Chase target is better than current but still can't win —
+                # play current hand to bank the score, don't waste discards
+                _round_strategy["committed_type"] = None
+                return {"action": "play", "cards": effective_play_cards,
+                        "reason": f"chase unviable ({best_chase['detail']} "
+                                  f"EV={chase_ev:.0f}, outcome={chase_best_outcome:.0f} "
+                                  f"< 70% of {remaining:.0f})",
+                        "play_score": effective_play_score, "discard_ev": 0,
+                        "target": remaining}
+
             _round_strategy["committed_type"] = best_chase["detail"]
             keep_set = set(best_chase["keep_indices"])
-            # Blue Seal cards should stay in hand if possible
             keep_set.update(i for i in blue_seal_indices if i not in keep_set)
             non_target = [i for i in range(n) if i not in keep_set]
             non_target = _order_discards(non_target)
             discard_set = non_target[:5]
             if not discard_set:
-                # All cards needed for chase target — play current hand
                 _round_strategy["committed_type"] = None
                 return {"action": "play", "cards": effective_play_cards,
                         "reason": f"no safe discards for chase "
@@ -2857,25 +2883,28 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
                     "play_score": effective_play_score, "discard_ev": best_chase["ev"],
                     "target": remaining}
 
-        # Can't one-shot and no great chase target.  Discard non-scoring
-        # cards if we can't even multi-hand win (need improvement), OR if the
-        # hand is genuinely weak (< 50% of target).  If we CAN multi-hand win,
-        # we already played above — this block only runs when we can't.
+        # Can't one-shot and no great chase target.  Only discard if
+        # there's a realistic chance of improvement toward the target.
         can_multihand = total_projected >= remaining
         if not can_multihand or effective_play_score < remaining * 0.5:
-            scoring_set = set(best_play["scoring_indices"]) if best_play else set()
-            keep_set = set(scoring_set)
-            if best_ready:
-                keep_set.update(best_ready["keep_indices"])
-            keep_set.update(i for i in blue_seal_indices if i not in keep_set)
-            non_scoring = [i for i in range(n) if i not in keep_set]
-            non_scoring = _order_discards(non_scoring)
-            if non_scoring:
-                return {"action": "discard", "cards": non_scoring[:5],
-                        "reason": f"fish (play={effective_play_score:.0f} < "
-                                  f"50% of {remaining:.0f})",
-                        "play_score": effective_play_score, "discard_ev": 0,
-                        "target": remaining}
+            # Check if fishing can plausibly help
+            best_possible_ev = best_chase["ev"] if best_chase else effective_play_score
+            fish_outcome = best_possible_ev + baseline_score * max(hands_left - 1, 0)
+            if fish_outcome >= remaining * 0.3:
+                # Fishing has some hope — discard non-scoring cards
+                scoring_set = set(best_play["scoring_indices"]) if best_play else set()
+                keep_set = set(scoring_set)
+                if best_ready:
+                    keep_set.update(best_ready["keep_indices"])
+                keep_set.update(i for i in blue_seal_indices if i not in keep_set)
+                non_scoring = [i for i in range(n) if i not in keep_set]
+                non_scoring = _order_discards(non_scoring)
+                if non_scoring:
+                    return {"action": "discard", "cards": non_scoring[:5],
+                            "reason": f"fish (play={effective_play_score:.0f}, "
+                                      f"fish_outcome={fish_outcome:.0f} vs {remaining:.0f})",
+                            "play_score": effective_play_score, "discard_ev": 0,
+                            "target": remaining}
 
         # Play current hand — it's either strong enough or there's nothing
         # better to chase

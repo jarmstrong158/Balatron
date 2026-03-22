@@ -35,6 +35,36 @@ PLANET_TO_HAND_TYPE = {
 }
 
 
+def _is_joker_card(card: dict) -> bool:
+    """Check if a shop card is a joker (not a planet/tarot in a shop slot).
+
+    The API may return cards with set='Joker', or empty set with a j_ key.
+    Accept BOTH patterns so we never miss a buyable joker.
+    """
+    card_set = card.get("set", "").upper()
+    if card_set == "JOKER":
+        return True
+    if card_set and card_set != "JOKER":
+        return False  # explicitly non-joker set
+    # Set is empty/missing — check key prefix
+    key = card.get("joker_key", "") or card.get("key", "")
+    if key.startswith("j_"):
+        return True
+    # Known non-joker prefixes
+    if key.startswith(("c_", "p_", "v_")):
+        return False
+    # Truly unknown — assume joker (don't miss buys)
+    return True
+
+
+def _is_non_joker_card(card: dict) -> bool:
+    """Check if a shop card is definitively NOT a joker (planet/tarot/etc).
+
+    Only returns True when we're confident it's non-joker.
+    """
+    return not _is_joker_card(card)
+
+
 def _safe_modifier(card: dict) -> dict:
     """Get card modifier as a dict (API may return [] for empty)."""
     mod = card.get("modifier", {})
@@ -379,9 +409,8 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             except Exception:
                 pass
 
-        # DISCARD-FIRST PRINCIPLE:
-        # If discards are available, ALWAYS discard unless the hand wins outright.
-        # This matches plan_optimal_action — use all discards to build one big hand.
+        # PLAY/DISCARD BIAS: let plan_optimal_action make the real decision,
+        # but bias the mask to match common cases so the NN learns faster.
         if discards_left > 0 and mask[ACTION_DISCARD] > 0:
             if remaining_target <= 0:
                 # Blind already beaten — play anything to end the round
@@ -392,11 +421,23 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 mask[ACTION_PLAY] = math.exp(HAND_BIAS_STRENGTH * 0.8)
                 mask[ACTION_DISCARD] = math.exp(-HAND_BIAS_STRENGTH * 0.5)
             else:
-                # Hand doesn't win — discard to improve
-                mask[ACTION_DISCARD] = math.exp(HAND_BIAS_STRENGTH * 0.8)
-                mask[ACTION_PLAY] = math.exp(-HAND_BIAS_STRENGTH * 0.8)
+                # Hand doesn't win — mild discard bias (not unconditional).
+                # plan_optimal_action does viability checks before discarding.
+                per_hand = remaining_target / max(hands_left, 1)
+                if current_score >= per_hand:
+                    # Hand is decent enough per-hand — slight play bias
+                    mask[ACTION_PLAY] = math.exp(HAND_BIAS_STRENGTH * 0.3)
+                    mask[ACTION_DISCARD] = math.exp(HAND_BIAS_STRENGTH * 0.2)
+                elif discard_ev > current_score * 1.3:
+                    # Discard EV is meaningfully better — bias toward discard
+                    mask[ACTION_DISCARD] = math.exp(HAND_BIAS_STRENGTH * 0.5)
+                    mask[ACTION_PLAY] = math.exp(-HAND_BIAS_STRENGTH * 0.3)
+                else:
+                    # Neutral — let plan_optimal_action decide
+                    mask[ACTION_PLAY] = 1.0
+                    mask[ACTION_DISCARD] = 1.0
         elif discards_left <= 0:
-            # No discards — must play (or cycle, but plan_optimal_action decides)
+            # No discards — must play
             if mask[ACTION_PLAY] > 0:
                 mask[ACTION_PLAY] = math.exp(HAND_BIAS_STRENGTH * 0.3)
 
@@ -509,11 +550,58 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
         upgrade_target_idx = -1  # index of shop joker to buy
         upgrade_sell_idx = -1    # index of owned joker to sell
 
+        # Check consumable slots for buying planets/tarots from shop
+        cons_cards = raw_state.get("consumables", {}).get("cards", [])
+        cons_count = len(cons_cards)
+        cons_limit = raw_state.get("consumables", {}).get("limit", 2)
+        has_cons_slot = cons_count < cons_limit
+
+        # Valuable consumables worth buying from shop
+        MUST_BUY_CONSUMABLES = {
+            "c_hermit",       # Doubles money — always buy
+        }
+        GOOD_PLANET_KEYS = {
+            "c_earth", "c_mercury", "c_venus", "c_mars", "c_jupiter",
+            "c_saturn", "c_uranus", "c_neptune", "c_pluto", "c_planet_x",
+            "c_ceres", "c_eris",
+        }
+        GOOD_TAROT_KEYS = {
+            "c_strength", "c_death", "c_empress", "c_justice",
+            "c_temperance",  # Earns money based on jokers
+        }
+
         for i, card in enumerate(shop_cards[:SHOP_JOKER_SLOTS]):
-            # Skip non-joker shop cards (planets/tarots in shop slots)
-            card_set = card.get("set", "")
-            if card_set and card_set != "Joker":
-                mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = 0.0
+            # Handle non-joker shop cards (planets/tarots)
+            if _is_non_joker_card(card):
+                card_key = card.get("key", "")
+                card_set = card.get("set", "").upper()
+                cost = card.get("cost", {}).get("buy", 999)
+
+                if cost > money:
+                    mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = 0.0
+                    continue
+
+                ip = _interest_penalty(money, cost)
+
+                if card_key in MUST_BUY_CONSUMABLES and has_cons_slot:
+                    # Hermit etc — always buy, very high priority
+                    mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.7) * ip
+                    any_buyable_joker = True  # prevents rerolling past it
+                    print(f"[SHOP-EVAL] {card_key}: MUST-BUY consumable cost=${cost}",
+                          flush=True)
+                elif card_set == "PLANET" and has_cons_slot and needs_upgrade:
+                    # Planet cards level up hand types — useful when we need more power
+                    mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.2) * ip
+                    print(f"[SHOP-EVAL] {card_key}: planet (needs_upgrade) cost=${cost}",
+                          flush=True)
+                elif card_set == "TAROT" and has_cons_slot and card_key in GOOD_TAROT_KEYS:
+                    # Good tarots — moderate priority
+                    mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.15) * ip
+                    print(f"[SHOP-EVAL] {card_key}: good tarot cost=${cost}",
+                          flush=True)
+                else:
+                    # Other consumables or no slot — block
+                    mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = 0.0
                 continue
 
             cost = card.get("cost", {}).get("buy", 999)
@@ -704,7 +792,6 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             mask[ACTION_BUY_VOUCHER] = 0.0
 
         # Shop packs — prioritize jokers first, then packs
-        # In early game (few jokers), jokers are almost always better than packs
         shop_packs = raw_state.get("packs", {}).get("cards", [])
         any_good_pack = False
         any_affordable_pack = False
@@ -722,30 +809,23 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 continue
 
             # If scoring jokers are available in shop, penalize packs heavily
-            # (jokers are almost always better value than packs)
             if has_scoring_joker_in_shop and has_joker_slot:
                 mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.4) * ip
                 continue
 
             if needs_upgrade and "celestial" in pack_key:
-                # Celestial packs level up hand types — useful but weaker than jokers.
-                # Only mildly boost; jokers should always win the priority contest.
                 mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.15) * ip
                 any_good_pack = True
             elif needs_upgrade and "buffoon" in pack_key and has_joker_slot:
-                # Buffoon packs give jokers — treat like a weaker joker buy
                 mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.2) * ip
                 any_good_pack = True
             elif needs_upgrade and "arcana" in pack_key:
-                # Arcana packs give tarots — situationally useful, low priority
                 mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.05) * ip
                 any_good_pack = True
             elif not needs_upgrade:
-                # Don't need upgrades — packs are low value, penalize
                 mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.3) * ip
             else:
                 mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.1) * ip
-        # Check if ANY pack target actually survived masking
         any_pack_target_valid = any(
             mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] > 0
             for i in range(min(len(shop_packs), SHOP_PACK_SLOTS))
@@ -753,21 +833,17 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
         if not any_affordable_pack or not any_pack_target_valid:
             mask[ACTION_BUY_PACK] = 0.0
         elif any_buyable_joker and has_joker_slot:
-            # Buyable joker in shop AND open slots — block ALL packs.
-            # A known $2-6 joker is always better than gambling $6-8 on a pack.
-            # Only exception: free packs (Astronomer).
             has_free_pack = any(
                 shop_packs[i].get("cost", {}).get("buy", 999) <= 0
                 for i in range(min(len(shop_packs), SHOP_PACK_SLOTS))
             )
             if has_free_pack:
-                mask[ACTION_BUY_PACK] = 1.0  # allow free packs, no boost
+                mask[ACTION_BUY_PACK] = 1.0
             else:
                 mask[ACTION_BUY_PACK] = 0.0
                 for i in range(min(len(shop_packs), SHOP_PACK_SLOTS)):
                     mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = 0.0
         elif has_joker_slot:
-            # Open slots but no buyable joker — allow packs mildly
             has_free_pack = any(
                 shop_packs[i].get("cost", {}).get("buy", 999) <= 0
                 for i in range(min(len(shop_packs), SHOP_PACK_SLOTS))
@@ -981,7 +1057,7 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                     any_good_card = True
                 else:
                     mask[target_offset + TARGET_PACK_CARD_OFFSET + i] = 1.0
-            elif card_set == "Joker":
+            elif _is_joker_card(card):
                 # Joker from buffoon pack
                 is_scoring = _joker_is_scoring(card)
                 joker_name = _api_key_to_name(card.get("key", ""))
@@ -1050,6 +1126,8 @@ def _is_action_feasible(action_type: int, raw_state: dict) -> bool:
                             _safe_modifier(j).get("edition", "") == "NEGATIVE")
                 )
             for c in shop_cards[:SHOP_JOKER_SLOTS]:
+                if _is_non_joker_card(c):
+                    continue
                 mod = c.get("modifier", {})
                 ed = mod.get("edition", "") if isinstance(mod, dict) else ""
                 cost = c.get("cost", {}).get("buy", 999)
@@ -1058,7 +1136,11 @@ def _is_action_feasible(action_type: int, raw_state: dict) -> bool:
                 if has_sellable and cost <= money + weakest_sell:
                     return True  # Can afford via sell-then-buy
             return False
-        return any(c.get("cost", {}).get("buy", 999) <= money for c in shop_cards[:SHOP_JOKER_SLOTS])
+        return any(
+            c.get("cost", {}).get("buy", 999) <= money
+            for c in shop_cards[:SHOP_JOKER_SLOTS]
+            if not _is_non_joker_card(c)
+        )
 
     elif action_type == ACTION_BUY_VOUCHER:
         shop_vouchers = raw_state.get("vouchers", {}).get("cards", [])
