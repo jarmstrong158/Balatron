@@ -184,7 +184,26 @@ def _estimate_joker_value(joker: dict, current_jokers: list[dict],
         # Score WITH this joker added — delta = with - baseline
         with_joker = list(current_jokers) + [joker]
         score_with = estimate_score_for_hand_type(with_joker, gamestate)
-        return (score_with - baseline) + edition_bonus
+        raw_delta = (score_with - baseline) + edition_bonus
+
+        # Floor: scoring jokers should NEVER return 0 when the estimator
+        # just can't model their effect. If the joker has score_effect in
+        # the DB, give it a minimum positive delta so it's always buyable.
+        if raw_delta <= 0 and name:
+            from data.jokers import JOKERS as _JDB
+            if name in _JDB:
+                schema = _JDB[name]
+                has_effect = (schema.get("score_effect") or
+                              schema.get("xmult") or schema.get("mult") or
+                              schema.get("chip") or schema.get("retrigger_effect") or
+                              schema.get("copy"))
+                if has_effect:
+                    # Minimum delta = 1% of baseline or 10, whichever is higher
+                    floor = max(baseline * 0.01, 10.0)
+                    if raw_delta < floor:
+                        raw_delta = floor
+
+        return raw_delta
 
 
 def _joker_sell_value(joker: dict) -> int:
@@ -592,12 +611,13 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 # Non-scoring but still positive (economy joker that helps)
                 any_buyable_joker = True
                 mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = 1.0 * ip
-            elif is_scoring and shop_delta == 0 and has_joker_slot:
-                # Scoring joker with delta=0 — estimator might not model it.
-                # If we have open slots, allow buying with slight penalty.
-                # Better to have a joker we can't model than an empty slot.
+            elif is_scoring and has_joker_slot:
+                # Scoring joker — estimator might undervalue it (delta=0 or slightly negative).
+                # If we have open slots, always allow buying. A joker we can't
+                # perfectly model is still better than an empty slot or a pack gamble.
                 any_buyable_joker = True
-                mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.15) * ip
+                has_scoring_joker_in_shop = True
+                mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.3) * ip
             elif not is_scoring and shop_delta == 0 and has_joker_slot:
                 # Economy jokers (Egg, Delayed Gratification, etc.) have delta=0
                 # because they don't affect scoring. Allow buying with slight penalty.
@@ -724,36 +744,35 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             for i in range(min(len(shop_packs), SHOP_PACK_SLOTS))
         )
         if not any_affordable_pack or not any_pack_target_valid:
-            # No affordable packs or all pack targets blocked — hard block
             mask[ACTION_BUY_PACK] = 0.0
-        elif has_joker_slot and num_jokers < JOKER_SLOTS:
-            # EARLY GAME: joker slots open — hard block packs, buy jokers first.
-            # Jokers are almost always higher value than packs when slots are
-            # available.  Exceptions: buffoon packs (give jokers), free packs
-            # (Astronomer makes celestial packs $0 — always grab free upgrades).
-            has_buffoon = any(
-                "buffoon" in shop_packs[i].get("key", "")
-                for i in range(min(len(shop_packs), SHOP_PACK_SLOTS))
-                if mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] > 0
-            )
+        elif any_buyable_joker and has_joker_slot:
+            # Buyable joker in shop AND open slots — block ALL packs.
+            # A known $2-6 joker is always better than gambling $6-8 on a pack.
+            # Only exception: free packs (Astronomer).
             has_free_pack = any(
                 shop_packs[i].get("cost", {}).get("buy", 999) <= 0
                 for i in range(min(len(shop_packs), SHOP_PACK_SLOTS))
             )
-            if not has_buffoon and not has_free_pack:
+            if has_free_pack:
+                mask[ACTION_BUY_PACK] = 1.0  # allow free packs, no boost
+            else:
                 mask[ACTION_BUY_PACK] = 0.0
-                # Also zero out the individual pack targets
                 for i in range(min(len(shop_packs), SHOP_PACK_SLOTS)):
                     mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = 0.0
-            elif has_free_pack:
-                # Free packs are always worth grabbing — strong boost
-                mask[ACTION_BUY_PACK] = math.exp(HAND_BIAS_STRENGTH * 0.5)
+        elif has_joker_slot:
+            # Open slots but no buyable joker — allow packs mildly
+            has_free_pack = any(
+                shop_packs[i].get("cost", {}).get("buy", 999) <= 0
+                for i in range(min(len(shop_packs), SHOP_PACK_SLOTS))
+            )
+            if has_free_pack:
+                mask[ACTION_BUY_PACK] = 1.5
             else:
-                mask[ACTION_BUY_PACK] = math.exp(HAND_BIAS_STRENGTH * 0.2)
+                mask[ACTION_BUY_PACK] = 1.0
         elif needs_upgrade and any_good_pack and mask[ACTION_BUY_PACK] > 0:
-            mask[ACTION_BUY_PACK] = math.exp(HAND_BIAS_STRENGTH * 0.1)
-        elif not needs_upgrade and mask[ACTION_BUY_PACK] > 0:
-            mask[ACTION_BUY_PACK] = math.exp(-HAND_BIAS_STRENGTH * 0.3)
+            mask[ACTION_BUY_PACK] = 1.0
+        elif mask[ACTION_BUY_PACK] > 0:
+            mask[ACTION_BUY_PACK] = 0.5
 
         # Owned jokers (for selling) — HARD block on scoring/negative jokers unless upgrading
         any_sellable = False

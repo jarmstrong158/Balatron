@@ -1804,16 +1804,39 @@ class Trainer:
             if cost > money:
                 return "gamestate", None
 
-            # Guard: don't buy packs when joker slots are open
-            # Jokers are almost always higher value than packs.
-            # Exceptions: buffoon packs (contain jokers), free packs (Astronomer
-            # makes celestial packs cost $0 — always grab free upgrades).
+            # Guard: don't buy packs when there's a buyable joker in shop.
+            # A known joker for $2-6 beats gambling $6-8 on a pack every time.
+            # Only exception: free packs (Astronomer makes celestial packs $0).
             pack_key = shop_packs[p_idx].get("key", "")
             is_free = cost <= 0
-            if joker_count < joker_limit and "buffoon" not in pack_key and not is_free:
-                print(f"[SHOP] BLOCKED pack buy ({pack_key}) — "
-                      f"{joker_limit - joker_count} joker slot(s) open", flush=True)
-                return "gamestate", None
+            if not is_free and joker_count < joker_limit:
+                # Check if there's ANY affordable joker in shop
+                from environment.action_space import (
+                    _joker_is_scoring as _pack_jis,
+                    _api_key_to_name as _pack_aktn,
+                )
+                shop_joker_cards = raw_state.get("shop", {}).get("cards", [])
+                best_joker_idx = -1
+                for sji, sjc in enumerate(shop_joker_cards):
+                    sj_set = sjc.get("set", "")
+                    if sj_set and sj_set != "Joker":
+                        continue
+                    sj_cost = sjc.get("cost", {}).get("buy", 999)
+                    if sj_cost > money:
+                        continue
+                    if _pack_jis(sjc):
+                        best_joker_idx = sji
+                        break
+                if best_joker_idx >= 0:
+                    sj_key = shop_joker_cards[best_joker_idx].get("key", "")
+                    sj_name = _pack_aktn(sj_key) or sj_key
+                    print(f"[SHOP] REDIRECT pack buy → joker buy: {sj_name}",
+                          flush=True)
+                    return "buy", {"card": best_joker_idx}
+                # No joker available — allow pack if it's a buffoon or we truly
+                # have nothing better
+                if "buffoon" not in pack_key:
+                    return "gamestate", None
 
             # Block standard packs — they add cards to deck, diluting draws
             if "standard" in pack_key:
