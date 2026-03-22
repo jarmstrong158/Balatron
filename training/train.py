@@ -50,6 +50,7 @@ from environment.hand_eval import (
     plan_consumable_use, optimize_play_order,
     evaluate_pack_tarot, pick_best_planet,
 )
+from recorder import RunRecorder
 
 
 def _get_blind_target_from_state(raw_state: dict) -> float:
@@ -102,6 +103,9 @@ class TrainConfig:
     api_poll_delay: float = 0.05        # Seconds to wait when game is resolving
     max_poll_attempts: int = 100        # Max polls before giving up
 
+    # Recording
+    record_wins: bool = True            # Record runs and save wins to recordings/wins/
+
     def to_ppo_config(self) -> PPOConfig:
         return PPOConfig(
             learning_rate=self.learning_rate,
@@ -145,6 +149,10 @@ class EpisodeTracker:
         self.session_highest_score = 0.0
         self.session_highest_score_round = ""
         self._prev_round_chips = 0.0
+
+        # Per-episode highest hand (reset each run)
+        self._episode_highest_hand = 0.0
+        self._episode_highest_hand_type = ""
 
         # Load lifetime stats from disk
         self._lifetime_wins = 0
@@ -206,6 +214,18 @@ class EpisodeTracker:
             round_chips = raw_state.get("round", {}).get("chips", 0)
             if round_chips > self._prev_round_chips and self._prev_round_chips >= 0:
                 hand_score = round_chips - self._prev_round_chips
+                # Per-episode tracking
+                if hand_score > self._episode_highest_hand:
+                    self._episode_highest_hand = hand_score
+                    # Try to get hand type from the [HAND] log context
+                    blind_name = ""
+                    blinds_ep = raw_state.get("blinds", {})
+                    if isinstance(blinds_ep, dict):
+                        for b in blinds_ep.values():
+                            if isinstance(b, dict) and b.get("status") == "CURRENT":
+                                blind_name = b.get("name", "")
+                                break
+                    self._episode_highest_hand_type = f"Ante {ante} ({blind_name})" if blind_name else f"Ante {ante}"
                 if hand_score > self.session_highest_score:
                     self.session_highest_score = hand_score
                     blind_name = ""
@@ -282,6 +302,9 @@ class EpisodeTracker:
                 win_record["money"] = raw_state.get("money", 0)
                 win_record["deck"] = raw_state.get("deck_name", "")
                 win_record["stake"] = raw_state.get("stake", "")
+                if self._episode_highest_hand > 0:
+                    win_record["highest_hand"] = round(self._episode_highest_hand)
+                    win_record["highest_hand_context"] = self._episode_highest_hand_type
             print(f"{'='*50}\n")
             self._append_win_log(win_record)
         else:
@@ -299,6 +322,8 @@ class EpisodeTracker:
         self.current_length = 0
         self.current_ante = 1
         self._prev_round_chips = 0.0
+        self._episode_highest_hand = 0.0
+        self._episode_highest_hand_type = ""
 
     def get_recent_stats(self, window: int = 20) -> dict:
         """Get statistics over the last N episodes."""
@@ -498,6 +523,7 @@ class Trainer:
         self.action_decoder = ActionDecoder()
         self.episode_tracker = EpisodeTracker()
         self.joker_logger = JokerOrderLogger()
+        self.recorder = RunRecorder(enabled=config.record_wins)
 
         # Training state
         self.global_step = 0
@@ -624,6 +650,10 @@ class Trainer:
                 if self.num_updates % cfg.checkpoint_interval == 0:
                     self._save_checkpoint()
 
+                # Check recording file size every 5 updates (~10k steps)
+                if self.num_updates % 5 == 0:
+                    self.recorder.check_file_size()
+
         except KeyboardInterrupt:
             print("\nTraining interrupted by user")
         except Exception as e:
@@ -632,6 +662,7 @@ class Trainer:
         finally:
             # Final checkpoint
             self._save_checkpoint(tag="final")
+            self.recorder.cleanup()
             await self.game.disconnect()
             print("Disconnected from BalatroBot")
 
@@ -675,12 +706,32 @@ class Trainer:
             # Detect win via API 'won' flag (endless mode auto-continues)
             # The Lua mod auto-dismisses the win screen, so GAME_OVER may
             # never fire. Record the win when we first see won=True.
-            if raw_state.get("won") and not getattr(self, '_win_recorded', False):
+            #
+            # IMPORTANT: Only trust 'won' when we're in a safe state (SHOP,
+            # BLIND_SELECT, ROUND_EVAL) — NOT during SELECTING_HAND where
+            # the bot could still die on the boss blind.  The API may set
+            # won=True after beating ante 8's small/big blind, before the
+            # boss is beaten.
+            api_won = raw_state.get("won", False)
+            safe_won_states = {"SHOP", "BLIND_SELECT", "ROUND_EVAL"}
+            if (api_won and not getattr(self, '_win_recorded', False)
+                    and game_state_name in safe_won_states):
                 self._win_recorded = True
                 ante = raw_state.get("ante_num", 1)
+                print(f"[WIN] Won flag detected in state={game_state_name} "
+                      f"ante={ante}", flush=True)
                 self.episode_tracker.end_episode(True, raw_state)
-                pass  # win recorded via episode_tracker
-            elif not raw_state.get("won"):
+                self.recorder.end_run(
+                    won=True,
+                    ante_reached=ante,
+                    final_score=int(raw_state.get("round", {}).get("chips", 0)),
+                    checkpoint_path=os.path.join(
+                        self.config.checkpoint_dir,
+                        f"balatron_phase{self.config.phase}_step{self.global_step}.pt",
+                    ),
+                    total_steps=self.global_step,
+                )
+            elif not api_won:
                 self._win_recorded = False  # reset for new run
 
             # Handle GAME_OVER — end episode, start new one
@@ -688,6 +739,10 @@ class Trainer:
                 self.joker_logger.round_end()  # flush any pending round data
                 ante = raw_state.get("ante_num", 1)
                 won = ante > 8
+                already_recorded = getattr(self, '_win_recorded', False)
+                print(f"[GAME_OVER] ante={ante} won={won} "
+                      f"already_recorded={already_recorded} "
+                      f"api_won={raw_state.get('won', False)}", flush=True)
 
                 # Compute terminal reward
                 reward = self.reward_calc.step(prev_raw, raw_state)
@@ -695,6 +750,19 @@ class Trainer:
                 # Only call end_episode if win wasn't already recorded
                 if not getattr(self, '_win_recorded', False):
                     self.episode_tracker.end_episode(won, raw_state)
+                # End recording — save if won, discard if lost
+                if not already_recorded:
+                    self.recorder.end_run(
+                        won=won,
+                        ante_reached=ante,
+                        final_score=int(raw_state.get("round", {}).get("chips", 0)),
+                        checkpoint_path=os.path.join(
+                            self.config.checkpoint_dir,
+                            f"balatron_phase{self.config.phase}_step{self.global_step}.pt",
+                        ),
+                        total_steps=self.global_step,
+                    )
+
                 self.reward_calc.reset()
                 self.game.reset()
                 prev_raw = None
@@ -734,11 +802,23 @@ class Trainer:
             if game_state_name == "SHOP":
                 from environment.action_space import ACTION_REROLL
                 rerolls = getattr(self, '_shop_rerolls', 0)
-                if rerolls >= 3:
-                    # Normal cap is 3; desperate mode allows up to 8 but the
-                    # mask conservatively blocks at 3. If desperate mode fires,
-                    # the hard guard still allows it — but the NN shouldn't
-                    # over-invest in rerolls either way.
+                money_now = raw_state.get("money", 0)
+                reroll_cost = raw_state.get("round", {}).get("reroll_cost", 5)
+                joker_cards = raw_state.get("jokers", {}).get("cards", [])
+                joker_limit_now = raw_state.get("joker_limit", 5)
+                has_empty_slots = len(joker_cards) < joker_limit_now
+
+                # Scale reroll cap based on surplus money above interest floor.
+                # Interest floor = $25 (or higher with vouchers).
+                # Each reroll = $5 by default.  With $100 surplus, allow ~6-8 rerolls.
+                interest_floor = 25  # default; vouchers handled in hard guard
+                surplus = max(money_now - interest_floor, 0)
+                affordable_rerolls = max(surplus // max(reroll_cost, 1), 0)
+                # Minimum 2 rerolls if we can afford them, scale up with surplus
+                base_cap = 3 if has_empty_slots else 2
+                reroll_cap = max(base_cap, min(affordable_rerolls, 8))
+
+                if rerolls >= reroll_cap:
                     action_mask[ACTION_REROLL] = 0.0
 
             # Check if any actions are valid
@@ -781,8 +861,11 @@ class Trainer:
                     noop_target = int(action_np[13])
                     if self._shop_noop_count <= 3:
                         money = raw_state.get("money", 0)
+                        # Debug: show mask value for the selected action type
+                        mask_val = action_mask[noop_action_type] if noop_action_type < len(action_mask) else -1
                         print(f"[SHOP-NOOP] action_type={noop_action_type} "
                               f"target={noop_target} money=${money} "
+                              f"mask[{noop_action_type}]={mask_val:.4f} "
                               f"(noop #{self._shop_noop_count})", flush=True)
                     if self._shop_noop_count > 5:
                         print(f"[SHOP] Forcing next_round after {self._shop_noop_count} "
@@ -946,10 +1029,25 @@ class Trainer:
                                 break  # first upcoming = next in line
 
                     if select_blind and select_blind.get("tag_name") == "Investment Tag":
+                        ante_num = raw.get("ante_num", 1)
                         jokers_raw = raw.get("jokers", {}).get("cards", [])
                         scoring = estimate_score_for_hand_type(jokers_raw, raw) * 4
-                        # Can we beat the next blind (the one after the skipped one)?
-                        if next_blind_score > 0 and scoring > next_blind_score * 1.5:
+                        # Investment Tag = $25 when boss blind is beaten.
+                        # That's MASSIVE value — almost always worth skipping.
+                        # Only don't skip if we can't even beat the next blind.
+                        should_skip = False
+                        if ante_num <= 4:
+                            # Early-mid game: always skip for $25 payout.
+                            # Blinds are very beatable through ante 4.
+                            should_skip = True
+                        elif next_blind_score > 0 and scoring > next_blind_score * 0.8:
+                            # Late game: skip even if we're only at 80% of the
+                            # next blind's score — the $25 is worth the risk.
+                            should_skip = True
+                        elif next_blind_score == 0:
+                            # Can't determine next blind — skip anyway
+                            should_skip = True
+                        if should_skip:
                             try:
                                 await self.game.execute_action("skip")
                             except Exception:
@@ -1323,6 +1421,8 @@ class Trainer:
 
             # MENU — start a new run with random seed
             if state == "MENU":
+                # Start recording the new run
+                self.recorder.start_run()
                 seed = ''.join(random.choices(string.ascii_uppercase, k=8))
                 try:
                     await self.game.execute_action(
@@ -1543,15 +1643,26 @@ class Trainer:
             is_negative = (isinstance(shop_mod, dict) and
                            shop_mod.get("edition", "") == "NEGATIVE")
 
+            # Check if this is a high-value joker
+            from environment.action_space import HIGH_VALUE_JOKERS
+            shop_mod = card.get("modifier", {})
+            shop_edition = shop_mod.get("edition", "") if isinstance(shop_mod, dict) else ""
+            is_high_value = (name in HIGH_VALUE_JOKERS or
+                             shop_edition in ("POLYCHROME", "HOLO", "NEGATIVE"))
+
             if joker_count < joker_limit or is_negative:
                 # Open slot — buy if it adds positive value
                 delta = _estimate_joker_value(card, jokers_raw, raw_state)
-                if delta > 0:
+                if delta > 0 or is_high_value:
+                    # High-value jokers get bought even if estimator undervalues them
+                    if is_high_value and delta <= 0:
+                        print(f"[SHOP] Buying HIGH_VALUE {name} despite low delta "
+                              f"({delta:.0f}) — known strong joker", flush=True)
                     return "buy", {"card": target_idx}
                 else:
                     return "gamestate", None
             else:
-                # Slots full — only buy if it's a >10% upgrade over weakest
+                # Slots full — only buy if it's a meaningful upgrade over weakest
                 weakest_idx, _ = _find_weakest_sellable_joker(
                     jokers_raw, raw_state)
 
@@ -1567,7 +1678,9 @@ class Trainer:
                 if cost > money + sell_price:
                     return "gamestate", None  # can't afford even after sell
 
-                if swap_score > current_score * 1.1:
+                # High-value jokers use a lower swap threshold (5% vs 10%)
+                swap_threshold = 1.05 if is_high_value else 1.1
+                if swap_score > current_score * swap_threshold:
                     # Sell weakest joker first to make room, then buy on next step
                     weak_name = jokers_raw[weakest_idx].get("label", "?")
                     shop_name = name or joker_key
@@ -1585,6 +1698,50 @@ class Trainer:
         # Buy voucher (target 3-4 -> voucher index 0-1)
         if action_type == 3:
             v_idx = target_idx - 3 if target_idx >= 3 else target_idx
+            shop_vouchers = raw_state.get("vouchers", {}).get("cards", [])
+            if v_idx < 0 or v_idx >= len(shop_vouchers):
+                return "gamestate", None
+            vcost = shop_vouchers[v_idx].get("cost", {}).get("buy", 999)
+            if vcost > money:
+                return "gamestate", None
+
+            # Voucher tiers — must match auto_buy_vouchers logic
+            CRITICAL_VOUCHERS = {
+                "v_grabber", "v_nacho_tong",       # +1 hand
+                "v_wasteful", "v_recyclomancy",     # +1 discard
+                "v_paint_brush", "v_palette",       # +1 hand size
+                "v_seed_money", "v_money_tree",     # interest cap
+                "v_antimatter",                     # +1 joker slot
+            }
+            GOOD_VOUCHERS = {
+                "v_hieroglyph", "v_petroglyph",     # -1 ante (nice but not critical)
+                "v_overstock", "v_overstock_plus",  # +1 shop slot
+                "v_directors_cut",                  # reroll boss blind
+            }
+            vkey = shop_vouchers[v_idx].get("key", "")
+
+            if vkey not in CRITICAL_VOUCHERS and vkey not in GOOD_VOUCHERS:
+                print(f"[SHOP] BLOCKED voucher buy ({vkey}, ${vcost}) — "
+                      f"not valuable", flush=True)
+                return "gamestate", None
+
+            # Economy check: don't buy if it drops an interest tier
+            # (critical vouchers bypass this)
+            remaining_after = money - vcost
+            current_tiers = min(money // 5, 5)
+            after_tiers = min(max(remaining_after, 0) // 5, 5)
+            if after_tiers < current_tiers and vkey not in CRITICAL_VOUCHERS:
+                print(f"[SHOP] BLOCKED voucher buy ({vkey}, ${vcost}) — "
+                      f"would lose interest tier ({current_tiers} → {after_tiers})",
+                      flush=True)
+                return "gamestate", None
+
+            # GOOD (non-critical) vouchers need $10 cushion
+            if vkey in GOOD_VOUCHERS and money < vcost + 10:
+                print(f"[SHOP] BLOCKED voucher buy ({vkey}, ${vcost}) — "
+                      f"not enough cushion (${money})", flush=True)
+                return "gamestate", None
+
             return "buy", {"voucher": v_idx}
 
         # Buy pack (target 5-6 -> pack index 0-1)
@@ -1597,29 +1754,16 @@ class Trainer:
             if cost > money:
                 return "gamestate", None
 
-            # Guard: don't buy packs when there's a good joker available
-            # Jokers are almost always better than packs early game
+            # Guard: don't buy packs when joker slots are open
+            # Jokers are almost always higher value than packs.
+            # Exceptions: buffoon packs (contain jokers), free packs (Astronomer
+            # makes celestial packs cost $0 — always grab free upgrades).
             pack_key = shop_packs[p_idx].get("key", "")
-            if joker_count < joker_limit:
-                from environment.action_space import (
-                    _estimate_joker_value, _api_key_to_name, BAD_JOKERS,
-                )
-                shop_cards = raw_state.get("shop", {}).get("cards", [])
-                for sc in shop_cards:
-                    sc_set = sc.get("set", "")
-                    if sc_set and sc_set != "Joker":
-                        continue
-                    sc_cost = sc.get("cost", {}).get("buy", 999)
-                    if sc_cost > money:
-                        continue
-                    sc_key = sc.get("joker_key", "") or sc.get("key", "")
-                    sc_name = _api_key_to_name(sc_key)
-                    if sc_name and sc_name not in BAD_JOKERS:
-                        delta = _estimate_joker_value(sc, jokers_raw, raw_state)
-                        if delta > 0:
-                            print(f"[SHOP] BLOCKED pack buy — joker {sc_name} "
-                                  f"available (+{delta:.0f})", flush=True)
-                            return "gamestate", None  # buy joker instead
+            is_free = cost <= 0
+            if joker_count < joker_limit and "buffoon" not in pack_key and not is_free:
+                print(f"[SHOP] BLOCKED pack buy ({pack_key}) — "
+                      f"{joker_limit - joker_count} joker slot(s) open", flush=True)
+                return "gamestate", None
 
             # Block standard packs — they add cards to deck, diluting draws
             if "standard" in pack_key:
@@ -1702,6 +1846,37 @@ class Trainer:
             if money < reroll_cost:
                 return "gamestate", None
 
+            # HARD GUARD: Block reroll when there's a good buyable joker in shop.
+            # This prevents the bot from rerolling past Photograph, Hanging Chad, etc.
+            from environment.action_space import (
+                _estimate_joker_value as _ejv, _joker_is_scoring as _jis,
+                HIGH_VALUE_JOKERS, _api_key_to_name as _aktn,
+            )
+            shop_cards = raw_state.get("shop", {}).get("cards", [])
+            for sc in shop_cards:
+                sc_set = sc.get("set", "")
+                if sc_set and sc_set != "Joker":
+                    continue
+                sc_cost = sc.get("cost", {}).get("buy", 999)
+                if sc_cost > money:
+                    continue  # can't afford
+                sc_key = sc.get("joker_key", "") or sc.get("key", "")
+                sc_name = _aktn(sc_key)
+                sc_mod = sc.get("modifier", {})
+                sc_edition = sc_mod.get("edition", "") if isinstance(sc_mod, dict) else ""
+                is_high = (sc_name in HIGH_VALUE_JOKERS or
+                           sc_edition in ("POLYCHROME", "HOLO", "NEGATIVE"))
+                if is_high or _jis(sc):
+                    # Check delta — is this joker actually good for us?
+                    delta = _ejv(sc, jokers_raw, raw_state)
+                    if delta > 0 or is_high:
+                        # Good joker available and affordable — block reroll!
+                        jlabel = sc_name or sc_key
+                        print(f"[SHOP] BLOCKED reroll — buyable joker: {jlabel} "
+                              f"(delta={delta:.0f}, high_value={is_high})",
+                              flush=True)
+                        return "gamestate", None
+
             # Check if we're desperate: scoring power vs next blind
             # If we can't beat the next blind with 4 hands, we need jokers badly
             desperate = False
@@ -1719,9 +1894,12 @@ class Trainer:
                     desperate = True
 
             if desperate:
-                # Desperate mode: relax interest guards but still protect some
-                # Don't spend below $5 (preserve at least 1 interest tier)
-                if money - reroll_cost < 5:
+                # Desperate mode: relax interest guards
+                # Only spend below $5 when we're desperate AND have empty joker
+                # slots — we need the scoring power to survive
+                if joker_count < joker_limit and money - reroll_cost >= 0:
+                    pass  # allow rerolling to $0 when desperate + slots open
+                elif money - reroll_cost < 5:
                     return "gamestate", None
                 self._shop_rerolls = getattr(self, '_shop_rerolls', 0) + 1
                 if self._shop_rerolls > 4:
@@ -1751,8 +1929,14 @@ class Trainer:
 
             # Track rerolls per shop (reset in _get_actionable_state on SHOP entry)
             self._shop_rerolls = getattr(self, '_shop_rerolls', 0) + 1
-            if self._shop_rerolls > 3:
-                # print(f"[SHOP] BLOCKED reroll (cap of 3 reached)", flush=True)
+            # Scale reroll cap based on surplus money.
+            # With $100 and $25 interest floor, surplus=$75, affordable=15 → cap=8.
+            # With $30 and $25 floor, surplus=$5, affordable=1 → cap=3.
+            surplus = max(money - interest_floor, 0)
+            affordable = max(surplus // max(reroll_cost, 1), 0)
+            base_cap = 3 if joker_count < joker_limit else 2
+            max_rerolls = max(base_cap, min(affordable, 8))
+            if self._shop_rerolls > max_rerolls:
                 return "gamestate", None
 
             return "reroll", None
@@ -2087,33 +2271,14 @@ class Trainer:
             if after_tiers < current_tiers and key not in CRITICAL_VOUCHERS:
                 continue
 
-            # ── Purchase timing optimization ──
-            # If more shops are coming this ante and the voucher isn't
-            # critical, check if deferring would earn more interest.
-            # Interest = $1 per $5 held, capped at interest_cap.
-            if shops_remaining > 0 and key not in CRITICAL_VOUCHERS:
-                interest_now = min(money // 5, interest_cap)
-                interest_after_buy = min(remaining_after // 5, interest_cap)
-                lost_interest = interest_now - interest_after_buy
-
-                if lost_interest > 0:
-                    # Each remaining shop = one interest payout we'd lose.
-                    # Deferring costs nothing (voucher stays in shop next
-                    # round... actually vouchers DON'T persist between shops,
-                    # so we can only defer if the same voucher will be
-                    # available next shop — which it won't be).
-                    # However, the voucher slot refreshes each shop, so
-                    # the real question is: is it worth losing interest
-                    # for a non-critical voucher?
-                    #
-                    # Decision: if buying would cost us >= $2 in interest
-                    # over the remaining shops, skip non-critical vouchers.
-                    total_lost = lost_interest * shops_remaining
-                    if total_lost >= 2:
-                        # print(f"[SHOP] DEFER voucher {key} (${cost}) — would lose "
-                        #       f"${total_lost} interest over {shops_remaining} shops",
-                        #       flush=True)
-                        continue
+            # ── Economy guard for non-critical vouchers ──
+            # Vouchers are unique per shop visit (don't persist), so we
+            # can't defer. But we CAN refuse to buy non-critical vouchers
+            # that cost us too much economy.  Only buy if we keep $10+
+            # after purchase (preserve interest and shop flexibility).
+            if key not in CRITICAL_VOUCHERS:
+                if remaining_after < 10:
+                    continue
 
             # Buy it
             try:
@@ -2254,6 +2419,8 @@ def parse_args() -> TrainConfig:
                         help="Log every N updates")
     parser.add_argument("--checkpoint-interval", type=int, default=10,
                         help="Save checkpoint every N updates")
+    parser.add_argument("--no-record", action="store_true",
+                        help="Disable ffmpeg win recording")
 
     args = parser.parse_args()
 
@@ -2266,6 +2433,7 @@ def parse_args() -> TrainConfig:
         checkpoint_dir=args.checkpoint_dir,
         log_interval=args.log_interval,
         checkpoint_interval=args.checkpoint_interval,
+        record_wins=not args.no_record,
     )
 
     return config, args.checkpoint

@@ -998,7 +998,7 @@ JOKERS: dict[str, dict[str, Any]] = {
     "Smiley Face": make_joker(
         name="Smiley Face",
         mult=True,
-        mult_value=4.0,
+        mult_value=5.0,  # +5 Mult per face card (patched in 1.0.1f from 4)
         triggers=["face_card"],
         score_effect=["mult"],
         scoring_timing="during_card",
@@ -1653,7 +1653,7 @@ JOKERS: dict[str, dict[str, Any]] = {
         score_effect=["xmult"],
         scoring_timing="during_card",
         per_card_instance=True,
-        effect_probability=0.333,
+        effect_probability=0.5,  # 1 in 2 chance (patched in 1.0.1f from 1/3)
     ),
 
     "Arrowhead": make_joker(

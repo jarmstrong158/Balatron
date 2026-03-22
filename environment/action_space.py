@@ -82,6 +82,36 @@ MUST_BUY_JOKERS = {
     "Blueprint", "Brainstorm",       # copy another joker = doubles scoring
 }
 
+# High-value jokers — not quite "must buy" but FAR too strong to reroll past.
+# These get a minimum delta floor and the bot MUST buy before rerolling.
+HIGH_VALUE_JOKERS = {
+    # Retrigger jokers — multiply everything else
+    "Hanging Chad",      # retrigger first scored card 2x (insane with xmult jokers)
+    "Sock and Buskin",   # retrigger face cards (face card builds dominate)
+    "Hack",              # retrigger 2-5 rank cards
+    "Seltzer",           # retrigger all scored cards for 10 rounds
+    # Face card synergy — strongest archetype in Balatro
+    "Photograph",        # x2 mult on first played face card
+    "Smiley Face",       # +5 mult per face card scored
+    "Scary Face",        # +30 chips per face card scored
+    # Strong unconditional xmult
+    "Triboulet",         # x2 on Kings and Queens
+    "The Duo",           # x2 if hand contains Pair
+    "The Trio",          # x2 if hand contains Three of a Kind
+    "The Family",        # x2 if hand contains Four of a Kind
+    "The Order",         # x2 if hand contains Straight
+    "The Tribe",         # x2 if hand contains Flush
+    # Economy + scaling powerhouses
+    "Vampire",           # xmult that grows by eating enhanced cards
+    "Campfire",          # xmult that grows when selling jokers
+    "Hologram",          # xmult that grows with added cards
+    # Other high-impact
+    "Perkeo",            # duplicates a consumable on shop entry (insane value)
+    "Fibonacci",         # +8 mult on Ace/2/3/5/8 (common ranks)
+    "Bloodstone",        # 1 in 2 chance of x1.5 on Hearts
+    "Ancient Joker",     # x1.5 on a random suit (rotates)
+}
+
 # Jokers that look good on paper but are traps — penalize buying
 BAD_JOKERS = {
     "Flower Pot",    # x3 but requires ALL 4 suits scored — nearly impossible
@@ -399,10 +429,11 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
         elif boss_name in ("The Club", "The Goad", "The Head", "The Window"):
             boss_debuff = 0.7  # debuffs one suit
 
-        # Future-looking target
-        future_factor = 1.0 + (ante * 0.5)
+        # Future-looking target — conservative multiplier so needs_upgrade
+        # doesn't fire too eagerly (which over-prioritises packs / planets).
+        future_factor = 1.0 + (ante * 0.25)
         if next_is_boss:
-            future_factor = max(future_factor, 2.0)  # prepare harder for boss
+            future_factor = max(future_factor, 1.5)  # prepare harder for boss
         forward_target = next_blind_score * future_factor
 
         # Can we beat upcoming challenges with 4 hands of our best hand type?
@@ -490,15 +521,20 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = 0.0
                 continue
 
+            # Check for high-value jokers — these get strong buy bias
+            is_high_value = joker_name in HIGH_VALUE_JOKERS
+            # Also treat any Polychrome/Holographic joker as high value
+            shop_mod = _safe_modifier(card)
+            shop_edition = shop_mod.get("edition", "") if isinstance(shop_mod, dict) else ""
+            if shop_edition in ("POLYCHROME", "HOLO"):
+                is_high_value = True
+
             # Delta evaluation: how much does adding this joker improve scoring?
             # If slots full, simulate swapping out the weakest joker.
             # Exception: Negative edition jokers bypass the slot limit entirely.
             is_scoring = _joker_is_scoring(card)
             ip = _interest_penalty(money, cost)
 
-            # Check if this shop joker is Negative edition
-            shop_mod = _safe_modifier(card)
-            shop_edition = shop_mod.get("edition", "") if isinstance(shop_mod, dict) else ""
             is_negative = shop_edition == "NEGATIVE"
 
             if not has_joker_slot and not is_negative:
@@ -509,14 +545,17 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                                   if idx != weakest_owned_idx]
                 swapped_jokers.append(card)
                 swap_score = estimate_score_for_hand_type(swapped_jokers, raw_state)
-                if swap_score > best_hand_score * 1.1:
-                    # Swap is a meaningful upgrade (>10% improvement)
+                # High-value jokers use a lower swap threshold (5% instead of 10%)
+                swap_threshold = 1.05 if is_high_value else 1.1
+                if swap_score > best_hand_score * swap_threshold:
+                    # Swap is a meaningful upgrade
                     any_buyable_joker = True
                     has_scoring_joker_in_shop = True
                     # Scale boost by improvement magnitude
                     improvement = swap_score / max(best_hand_score, 1.0)
                     boost = min(improvement - 1.0, 1.0)  # cap at 1.0
-                    mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * (0.2 + boost * 0.4))
+                    base_boost = 0.4 if is_high_value else 0.2
+                    mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * (base_boost + boost * 0.4))
                     upgrade_target_idx = i
                     upgrade_sell_idx = weakest_owned_idx
                 continue
@@ -527,12 +566,23 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             if shop_delta > 0 and is_scoring:
                 any_buyable_joker = True
                 has_scoring_joker_in_shop = True
-                # Scale boost by how much this joker improves scoring
-                relative_gain = shop_delta / max(best_hand_score, 1.0)
-                if needs_upgrade or relative_gain > 0.2:
-                    mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.6) * ip
+                # High-value jokers ALWAYS get the strong boost regardless of relative gain
+                if is_high_value:
+                    mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.7) * ip
                 else:
-                    mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.3) * ip
+                    # Scale boost by how much this joker improves scoring
+                    relative_gain = shop_delta / max(best_hand_score, 1.0)
+                    if needs_upgrade or relative_gain > 0.2:
+                        mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.6) * ip
+                    else:
+                        mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.3) * ip
+            elif is_high_value and is_scoring:
+                # High-value joker with delta <= 0 (estimator might undervalue it)
+                # Give it a floor — these jokers are proven strong in practice.
+                # Trust the tier list over the estimator for known-good jokers.
+                any_buyable_joker = True
+                has_scoring_joker_in_shop = True
+                mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.4) * ip
             elif shop_delta > 0:
                 # Non-scoring but still positive (economy joker that helps)
                 any_buyable_joker = True
@@ -567,12 +617,53 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
         elif needs_upgrade and any_buyable_joker and mask[ACTION_BUY_JOKER] > 0:
             mask[ACTION_BUY_JOKER] = math.exp(HAND_BIAS_STRENGTH * 0.3)
 
-        # Shop vouchers — factor interest cost
+        # Shop vouchers — only buy high-value vouchers that directly improve
+        # scoring power or economy.  Most vouchers are traps that drain early
+        # money that should go toward jokers.
+        # Critical vouchers: bypass interest protection, always worth buying
+        CRITICAL_VOUCHERS = {
+            "v_grabber",        # +1 hand per round
+            "v_wasteful",       # +1 discard per round
+            "v_paint_brush",    # +1 hand size
+            "v_nacho_tong",     # +1 hand (tier 2 of Grabber)
+            "v_recyclomancy",   # +1 discard (tier 2 of Wasteful)
+            "v_palette",        # +1 hand size (tier 2 of Paint Brush)
+            "v_seed_money",     # Interest cap $25 (pays for itself)
+            "v_money_tree",     # Interest cap $50
+            "v_antimatter",     # +1 joker slot
+        }
+        # Good vouchers: only buy with $10+ cushion after purchase
+        GOOD_VOUCHERS = {
+            "v_hieroglyph",     # -1 ante requirement (nice, not critical)
+            "v_petroglyph",     # -1 ante (tier 2)
+            "v_overstock",      # +1 shop slot
+            "v_overstock_plus", # +1 more shop slot
+            "v_directors_cut",  # Reroll boss blind
+        }
+        any_good_voucher = False
         shop_vouchers = raw_state.get("vouchers", {}).get("cards", [])
         for i, card in enumerate(shop_vouchers[:SHOP_VOUCHER_SLOTS]):
             vcost = card.get("cost", {}).get("buy", 999)
-            if vcost <= money:
-                mask[target_offset + TARGET_SHOP_VOUCHER_OFFSET + i] = 1.0 * _interest_penalty(money, vcost)
+            if vcost > money:
+                continue
+            ip = _interest_penalty(money, vcost)
+            vkey = card.get("key", "")
+
+            if vkey in CRITICAL_VOUCHERS:
+                # Critical — mild boost, but still below jokers in priority
+                mask[target_offset + TARGET_SHOP_VOUCHER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.15) * ip
+                any_good_voucher = True
+            elif vkey in GOOD_VOUCHERS and money >= vcost + 10:
+                # Good but need $10+ cushion to preserve econ
+                mask[target_offset + TARGET_SHOP_VOUCHER_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.1) * ip
+                any_good_voucher = True
+            else:
+                # Bad/unknown voucher or can't afford comfortably — block
+                mask[target_offset + TARGET_SHOP_VOUCHER_OFFSET + i] = 0.0
+
+        # Block voucher action entirely if nothing worth buying
+        if not any_good_voucher and mask[ACTION_BUY_VOUCHER] > 0:
+            mask[ACTION_BUY_VOUCHER] = 0.0
 
         # Shop packs — prioritize jokers first, then packs
         # In early game (few jokers), jokers are almost always better than packs
@@ -599,25 +690,59 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 continue
 
             if needs_upgrade and "celestial" in pack_key:
-                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.5) * ip
+                # Celestial packs level up hand types — useful but weaker than jokers.
+                # Only mildly boost; jokers should always win the priority contest.
+                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.15) * ip
                 any_good_pack = True
             elif needs_upgrade and "buffoon" in pack_key and has_joker_slot:
-                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.3) * ip
-                any_good_pack = True
-            elif needs_upgrade and "arcana" in pack_key:
+                # Buffoon packs give jokers — treat like a weaker joker buy
                 mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.2) * ip
                 any_good_pack = True
+            elif needs_upgrade and "arcana" in pack_key:
+                # Arcana packs give tarots — situationally useful, low priority
+                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.05) * ip
+                any_good_pack = True
             elif not needs_upgrade:
-                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.2) * ip
+                # Don't need upgrades — packs are low value, penalize
+                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.3) * ip
             else:
-                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = 1.0 * ip
-        if not any_affordable_pack and mask[ACTION_BUY_PACK] > 0:
-            # No affordable packs — hard block
+                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.1) * ip
+        # Check if ANY pack target actually survived masking
+        any_pack_target_valid = any(
+            mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] > 0
+            for i in range(min(len(shop_packs), SHOP_PACK_SLOTS))
+        )
+        if not any_affordable_pack or not any_pack_target_valid:
+            # No affordable packs or all pack targets blocked — hard block
             mask[ACTION_BUY_PACK] = 0.0
+        elif has_joker_slot and num_jokers < JOKER_SLOTS:
+            # EARLY GAME: joker slots open — hard block packs, buy jokers first.
+            # Jokers are almost always higher value than packs when slots are
+            # available.  Exceptions: buffoon packs (give jokers), free packs
+            # (Astronomer makes celestial packs $0 — always grab free upgrades).
+            has_buffoon = any(
+                "buffoon" in shop_packs[i].get("key", "")
+                for i in range(min(len(shop_packs), SHOP_PACK_SLOTS))
+                if mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] > 0
+            )
+            has_free_pack = any(
+                shop_packs[i].get("cost", {}).get("buy", 999) <= 0
+                for i in range(min(len(shop_packs), SHOP_PACK_SLOTS))
+            )
+            if not has_buffoon and not has_free_pack:
+                mask[ACTION_BUY_PACK] = 0.0
+                # Also zero out the individual pack targets
+                for i in range(min(len(shop_packs), SHOP_PACK_SLOTS)):
+                    mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = 0.0
+            elif has_free_pack:
+                # Free packs are always worth grabbing — strong boost
+                mask[ACTION_BUY_PACK] = math.exp(HAND_BIAS_STRENGTH * 0.5)
+            else:
+                mask[ACTION_BUY_PACK] = math.exp(HAND_BIAS_STRENGTH * 0.2)
         elif needs_upgrade and any_good_pack and mask[ACTION_BUY_PACK] > 0:
-            mask[ACTION_BUY_PACK] = math.exp(HAND_BIAS_STRENGTH * 0.3)
+            mask[ACTION_BUY_PACK] = math.exp(HAND_BIAS_STRENGTH * 0.1)
         elif not needs_upgrade and mask[ACTION_BUY_PACK] > 0:
-            mask[ACTION_BUY_PACK] = math.exp(-HAND_BIAS_STRENGTH * 0.2)
+            mask[ACTION_BUY_PACK] = math.exp(-HAND_BIAS_STRENGTH * 0.3)
 
         # Owned jokers (for selling) — HARD block on scoring/negative jokers unless upgrading
         any_sellable = False
@@ -679,7 +804,7 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             else:
                 mask[target_offset + TARGET_CONSUMABLE_OFFSET + i] = 1.0
 
-        # Reroll — consider when needing upgrades, penalize otherwise
+        # Reroll — scale with available surplus money and joker slot needs
         if mask[ACTION_REROLL] > 0:
             reroll_cost = raw_state.get("round", {}).get("reroll_cost", 5)
             if money < reroll_cost:
@@ -687,11 +812,34 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 mask[ACTION_REROLL] = 0.0
             else:
                 reroll_ip = _interest_penalty(money, reroll_cost)
-                if needs_upgrade and not any_buyable_joker and not any_good_pack:
+                empty_joker_slots = JOKER_SLOTS - num_jokers
+
+                # Surplus = money above interest floor ($25 default).
+                # High surplus = rerolling is basically free.
+                interest_floor = 25
+                surplus = max(money - interest_floor, 0)
+                # Cash-rich bonus: if surplus > $20, boost reroll incentive
+                # (spending $5 from $100 is trivial)
+                cash_rich = surplus > 20
+
+                if has_scoring_joker_in_shop and any_buyable_joker:
+                    # GOOD JOKER AVAILABLE — strongly penalize rerolling!
+                    # The bot MUST buy the joker before even considering reroll.
+                    # This is the #1 fix for "passing over Photograph/Hanging Chad".
+                    mask[ACTION_REROLL] = math.exp(-HAND_BIAS_STRENGTH * 0.5)
+                elif empty_joker_slots >= 1 and not any_buyable_joker and needs_upgrade:
+                    # EMPTY JOKER SLOTS, nothing buyable, AND we need scoring power
+                    # — reroll aggressively to find jokers.
+                    mask[ACTION_REROLL] = math.exp(HAND_BIAS_STRENGTH * 0.4)
+                elif cash_rich and not any_buyable_joker:
+                    # Fat stacks but nothing good in shop — spend freely to find value.
+                    # No interest penalty since we're well above the floor.
+                    mask[ACTION_REROLL] = math.exp(HAND_BIAS_STRENGTH * 0.25)
+                elif needs_upgrade and not any_buyable_joker and not any_good_pack:
                     # Need power but nothing good in shop — reroll to find something
                     mask[ACTION_REROLL] = math.exp(HAND_BIAS_STRENGTH * 0.15) * reroll_ip
-                elif not needs_upgrade:
-                    # Not urgent — penalize rerolling, save money
+                elif not needs_upgrade and not cash_rich:
+                    # Not urgent AND not flush with cash — penalize rerolling
                     mask[ACTION_REROLL] = math.exp(-HAND_BIAS_STRENGTH * 0.2) * reroll_ip
                 else:
                     mask[ACTION_REROLL] = reroll_ip  # just the interest penalty

@@ -2276,6 +2276,20 @@ def _enumerate_targets(hand_cards: list[dict], deck_cards: list[dict],
         have = len(indices)
         in_deck = deck_ranks.get(rank, 0)
 
+        # Chase PAIR from a single card (most common chase in Balatro!)
+        if have == 1 and in_deck >= 1:
+            kept = [hand_cards[i] for i in indices]
+            projected = _project_hand_score(
+                "Pair", 2, kept, jokers, gamestate, 0.0,
+                deck_cards=deck_cards, target_ranks=[rank]
+            )
+            discard_count = min(n - have, 5)
+            targets.append({
+                "hand_type": "Pair", "detail": f"Pair:{rank}",
+                "keep_indices": list(indices), "needed": 1, "outs": in_deck,
+                "cards_per_discard": discard_count, "projected_score": projected,
+            })
+
         if have == 2 and in_deck >= 1:
             kept = [hand_cards[i] for i in indices]
             projected = _project_hand_score(
@@ -2302,8 +2316,36 @@ def _enumerate_targets(hand_cards: list[dict], deck_cards: list[dict],
                 "cards_per_discard": discard_count, "projected_score": projected,
             })
 
-    # --- FULL HOUSE ---
+    # --- TWO PAIR from single pair + singles ---
+    # If we have exactly 1 pair and some singles, chase a second pair
     rank_counts = Counter(card_rank(hand_cards[i]) for i in range(n))
+    single_ranks_for_2p = [r for r, c in rank_counts.items() if c == 1]
+    pair_ranks_for_2p = [r for r, c in rank_counts.items() if c == 2]
+
+    if len(pair_ranks_for_2p) == 1 and single_ranks_for_2p:
+        existing_pair_rank = pair_ranks_for_2p[0]
+        existing_pair_idx = rank_groups[existing_pair_rank]
+        # Sum outs for all single ranks in hand that have matches in deck
+        second_pair_outs = sum(deck_ranks.get(r, 0) for r in single_ranks_for_2p)
+        if second_pair_outs > 0:
+            # Keep the existing pair + best single (highest chip value)
+            best_single_rank = max(single_ranks_for_2p,
+                                    key=lambda r: CARD_CHIP_VALUES.get(r, 0))
+            keep_idx = list(existing_pair_idx) + rank_groups.get(best_single_rank, [])[:1]
+            non_keep = [i for i in range(n) if i not in keep_idx]
+            kept = [hand_cards[i] for i in keep_idx]
+            projected = _project_hand_score(
+                "Two Pair", 4, kept, jokers, gamestate, 0.0,
+                deck_cards=deck_cards, target_ranks=single_ranks_for_2p[:3]
+            )
+            discard_count = min(len(non_keep), 5)
+            targets.append({
+                "hand_type": "Two Pair", "detail": f"TwoPair:{existing_pair_rank}+?",
+                "keep_indices": keep_idx, "needed": 1, "outs": second_pair_outs,
+                "cards_per_discard": discard_count, "projected_score": projected,
+            })
+
+    # --- FULL HOUSE ---
     trip_ranks = [r for r, c in rank_counts.items() if c >= 3]
     pair_ranks = [r for r, c in rank_counts.items() if c == 2]
 
@@ -2593,6 +2635,22 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
     best_hand_type = best_play["hand_type"] if best_play else "?"
     play_cards = list(best_play["card_indices"]) if best_play else [0]
 
+    # Debug: log top 3 hands for diagnostics
+    if top_hands:
+        hand_summary = []
+        for h in top_hands[:3]:
+            cards_desc = []
+            for ci in h["card_indices"]:
+                if ci < len(hand_cards):
+                    c = hand_cards[ci]
+                    r = card_rank(c)
+                    s = card_suit(c)[:1]
+                    cards_desc.append(f"{r}{s}")
+            hand_summary.append(f"{h['hand_type']}({','.join(cards_desc)})={h['estimated_score']:.0f}")
+        print(f"[HAND] Top: {' | '.join(hand_summary)} | "
+              f"target={remaining:.0f} hands={hands_left} disc={discards_left}",
+              flush=True)
+
     # Effective draws: real discards + spare hands (play weak to cycle cards)
     # Each hand played draws ~5 new cards, just like a discard does.
     # Play-cycling is weaker than real discards: costs a hand, less flexible
@@ -2732,28 +2790,51 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
     # Also: Blue Seal cards should be in keep_set when possible
     # (they generate Planet cards when held at end of round)
 
-    # ── DISCARDS AVAILABLE: always discard unless hand wins ──
+    # ── DISCARDS AVAILABLE: discard toward better hands, or play strong ones ──
     if discards_left > 0:
-        # MULTI-HAND WIN CHECK: if repeating the current hand across remaining
-        # hands is enough to win, just play it — no need to risk discarding.
-        total_projected = effective_play_score * hands_left
-        if total_projected >= remaining and remaining > 0 and hands_left >= 2:
-            _round_strategy["committed_type"] = None
-            return {"action": "play", "cards": effective_play_cards,
-                    "reason": f"multi-hand win ({effective_play_score:.0f} × "
-                              f"{hands_left} = {total_projected:.0f} >= {remaining:.0f})",
-                    "play_score": effective_play_score, "discard_ev": 0,
-                    "target": remaining}
-
-        # Find best chase target (any target that needs cards)
+        # Find best chase target (any target that needs cards drawn)
         best_chase = None
         for t in scored_targets:
             if t["needed"] > 0:
                 best_chase = t
                 break  # already sorted by EV
 
-        if best_chase and best_chase["projected_score"] > effective_play_score:
-            # Chase target scores higher than current hand — discard toward it
+        # SMART MULTI-HAND CHECK: if the current hand is strong enough
+        # to win across remaining hands AND no chase target's EV meaningfully
+        # beats it, just play it.  This prevents wasting discards when
+        # we already have a great joker-synergy hand (e.g. flush with
+        # Photograph + Walkie Talkie).
+        #
+        # The threshold scales with comfort level:
+        # - 3× overkill → chase must have EV 2× our score (almost never chase)
+        # - 2× overkill → chase must have EV 1.5× our score
+        # - barely winning → chase must have EV 1.2× our score
+        total_projected = effective_play_score * hands_left
+        comfort_ratio = total_projected / max(remaining, 1)
+        if comfort_ratio >= 3.0:
+            chase_threshold = 2.0
+        elif comfort_ratio >= 2.0:
+            chase_threshold = 1.5
+        else:
+            chase_threshold = 1.2
+
+        # Compare chase EV (probability-weighted), NOT raw projected_score.
+        # A Flush that projects 2000 but has 10% chance has EV ~350 — not
+        # worth chasing over a guaranteed 1600.
+        chase_ev = best_chase["ev"] if best_chase else 0
+        chase_beats_current = (best_chase and
+                               chase_ev > effective_play_score * chase_threshold)
+
+        if total_projected >= remaining and remaining > 0 and not chase_beats_current:
+            _round_strategy["committed_type"] = None
+            return {"action": "play", "cards": effective_play_cards,
+                    "reason": f"strong hand ({effective_play_score:.0f} × "
+                              f"{hands_left} = {total_projected:.0f} >= {remaining:.0f}, "
+                              f"comfort={comfort_ratio:.1f}×)",
+                    "play_score": effective_play_score, "discard_ev": 0,
+                    "target": remaining}
+
+        if chase_beats_current:
             _round_strategy["committed_type"] = best_chase["detail"]
             keep_set = set(best_chase["keep_indices"])
             # Blue Seal cards should stay in hand if possible
@@ -2762,8 +2843,7 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
             non_target = _order_discards(non_target)
             discard_set = non_target[:5]
             if not discard_set:
-                # All cards needed for chase target — play current hand instead
-                # of discarding a needed card
+                # All cards needed for chase target — play current hand
                 _round_strategy["committed_type"] = None
                 return {"action": "play", "cards": effective_play_cards,
                         "reason": f"no safe discards for chase "
@@ -2772,33 +2852,36 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
                         "target": remaining}
             return {"action": "discard", "cards": discard_set,
                     "reason": f"chase {best_chase['detail']} "
-                              f"(P={best_chase['p']:.0%}, proj={best_chase['projected_score']:.0f})",
+                              f"(P={best_chase['p']:.0%}, EV={best_chase['ev']:.0f}, "
+                              f"proj={best_chase['projected_score']:.0f})",
                     "play_score": effective_play_score, "discard_ev": best_chase["ev"],
                     "target": remaining}
 
-        # No chase target beats current hand — but if current hand doesn't win,
-        # still discard non-scoring cards to fish for improvements
-        if effective_play_score < remaining:
+        # Can't one-shot and no great chase target.  Discard non-scoring
+        # cards if we can't even multi-hand win (need improvement), OR if the
+        # hand is genuinely weak (< 50% of target).  If we CAN multi-hand win,
+        # we already played above — this block only runs when we can't.
+        can_multihand = total_projected >= remaining
+        if not can_multihand or effective_play_score < remaining * 0.5:
             scoring_set = set(best_play["scoring_indices"]) if best_play else set()
-            # Keep scoring cards + any cards that match the best ready target
             keep_set = set(scoring_set)
             if best_ready:
                 keep_set.update(best_ready["keep_indices"])
-            # Blue Seal cards should stay if possible
             keep_set.update(i for i in blue_seal_indices if i not in keep_set)
             non_scoring = [i for i in range(n) if i not in keep_set]
             non_scoring = _order_discards(non_scoring)
             if non_scoring:
                 return {"action": "discard", "cards": non_scoring[:5],
-                        "reason": f"improve hand (play={effective_play_score:.0f}, "
-                                  f"remaining={remaining:.0f})",
+                        "reason": f"fish (play={effective_play_score:.0f} < "
+                                  f"50% of {remaining:.0f})",
                         "play_score": effective_play_score, "discard_ev": 0,
                         "target": remaining}
 
-        # Current hand wins — play it (shouldn't reach here, instant-win above catches it)
+        # Play current hand — it's either strong enough or there's nothing
+        # better to chase
         _round_strategy["committed_type"] = None
         return {"action": "play", "cards": effective_play_cards,
-                "reason": f"best with discards ({effective_play_score:.0f})",
+                "reason": f"best available ({effective_play_score:.0f})",
                 "play_score": effective_play_score, "discard_ev": 0,
                 "target": remaining}
 
