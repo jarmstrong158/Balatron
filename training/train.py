@@ -811,12 +811,12 @@ class Trainer:
                 # Scale reroll cap based on surplus money above interest floor.
                 # Interest floor = $25 (or higher with vouchers).
                 # Each reroll = $5 by default.  With $100 surplus, allow ~6-8 rerolls.
+                # With $24 and $25 floor, surplus=0 → only 1 reroll allowed.
                 interest_floor = 25  # default; vouchers handled in hard guard
                 surplus = max(money_now - interest_floor, 0)
                 affordable_rerolls = max(surplus // max(reroll_cost, 1), 0)
-                # Minimum 2 rerolls if we can afford them, scale up with surplus
-                base_cap = 3 if has_empty_slots else 2
-                reroll_cap = max(base_cap, min(affordable_rerolls, 8))
+                # Cap = what you can afford from surplus, minimum 1 peek, max 8
+                reroll_cap = max(1, min(affordable_rerolls, 8))
 
                 if rerolls >= reroll_cap:
                     action_mask[ACTION_REROLL] = 0.0
@@ -1651,15 +1651,24 @@ class Trainer:
                              shop_edition in ("POLYCHROME", "HOLO", "NEGATIVE"))
 
             if joker_count < joker_limit or is_negative:
-                # Open slot — buy if it adds positive value
+                # Open slot — buy if it adds value
                 delta = _estimate_joker_value(card, jokers_raw, raw_state)
+                is_scoring = _joker_is_scoring(card)
                 if delta > 0 or is_high_value:
-                    # High-value jokers get bought even if estimator undervalues them
+                    # Positive delta or known high-value — buy it
                     if is_high_value and delta <= 0:
                         print(f"[SHOP] Buying HIGH_VALUE {name} despite low delta "
                               f"({delta:.0f}) — known strong joker", flush=True)
                     return "buy", {"card": target_idx}
+                elif delta == 0 and is_scoring:
+                    # Scoring joker with delta=0 — estimator can't model it but
+                    # it's better than an empty slot. Buy it.
+                    print(f"[SHOP] Buying {name or joker_key} (delta=0, scoring=True) "
+                          f"— filling empty slot", flush=True)
+                    return "buy", {"card": target_idx}
                 else:
+                    print(f"[SHOP] BLOCKED buy {name or joker_key} "
+                          f"(delta={delta:.0f}, scoring={is_scoring})", flush=True)
                     return "gamestate", None
             else:
                 # Slots full — only buy if it's a meaningful upgrade over weakest
@@ -1929,13 +1938,12 @@ class Trainer:
 
             # Track rerolls per shop (reset in _get_actionable_state on SHOP entry)
             self._shop_rerolls = getattr(self, '_shop_rerolls', 0) + 1
-            # Scale reroll cap based on surplus money.
-            # With $100 and $25 interest floor, surplus=$75, affordable=15 → cap=8.
-            # With $30 and $25 floor, surplus=$5, affordable=1 → cap=3.
+            # Scale reroll cap based on surplus money above interest floor.
+            # With $100 and $25 floor, surplus=$75, affordable=15 → cap=8.
+            # With $24 and $25 floor, surplus=0, affordable=0 → cap=1 (one peek).
             surplus = max(money - interest_floor, 0)
             affordable = max(surplus // max(reroll_cost, 1), 0)
-            base_cap = 3 if joker_count < joker_limit else 2
-            max_rerolls = max(base_cap, min(affordable, 8))
+            max_rerolls = max(1, min(affordable, 8))
             if self._shop_rerolls > max_rerolls:
                 return "gamestate", None
 

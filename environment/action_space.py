@@ -563,6 +563,12 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             # Open slot available — evaluate via delta
             shop_delta = _estimate_joker_value(card, joker_cards, raw_state)
 
+            # Debug: log delta evaluation for every shop joker
+            _jlabel = joker_name or joker_key
+            print(f"[SHOP-EVAL] {_jlabel}: delta={shop_delta:.0f} scoring={is_scoring} "
+                  f"high_value={is_high_value} cost=${cost} slots_open={has_joker_slot}",
+                  flush=True)
+
             if shop_delta > 0 and is_scoring:
                 any_buyable_joker = True
                 has_scoring_joker_in_shop = True
@@ -576,10 +582,9 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                         mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.6) * ip
                     else:
                         mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.3) * ip
-            elif is_high_value and is_scoring:
-                # High-value joker with delta <= 0 (estimator might undervalue it)
-                # Give it a floor — these jokers are proven strong in practice.
-                # Trust the tier list over the estimator for known-good jokers.
+            elif is_high_value:
+                # High-value joker — buy regardless of delta (estimator undervalues
+                # retrigger/synergy effects). Trust the tier list.
                 any_buyable_joker = True
                 has_scoring_joker_in_shop = True
                 mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.4) * ip
@@ -587,13 +592,19 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 # Non-scoring but still positive (economy joker that helps)
                 any_buyable_joker = True
                 mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = 1.0 * ip
+            elif is_scoring and shop_delta == 0 and has_joker_slot:
+                # Scoring joker with delta=0 — estimator might not model it.
+                # If we have open slots, allow buying with slight penalty.
+                # Better to have a joker we can't model than an empty slot.
+                any_buyable_joker = True
+                mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.15) * ip
             elif not is_scoring and shop_delta == 0 and has_joker_slot:
                 # Economy jokers (Egg, Delayed Gratification, etc.) have delta=0
                 # because they don't affect scoring. Allow buying with slight penalty.
                 any_buyable_joker = True
                 mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.3) * ip
             else:
-                # Delta <= 0 — hard block (heuristic will always reject)
+                # Delta < 0 and not high-value — hard block
                 mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = 0.0
 
         if not any_buyable_joker and mask[ACTION_BUY_JOKER] > 0:
@@ -825,21 +836,23 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 if has_scoring_joker_in_shop and any_buyable_joker:
                     # GOOD JOKER AVAILABLE — strongly penalize rerolling!
                     # The bot MUST buy the joker before even considering reroll.
-                    # This is the #1 fix for "passing over Photograph/Hanging Chad".
                     mask[ACTION_REROLL] = math.exp(-HAND_BIAS_STRENGTH * 0.5)
-                elif empty_joker_slots >= 1 and not any_buyable_joker and needs_upgrade:
-                    # EMPTY JOKER SLOTS, nothing buyable, AND we need scoring power
+                elif surplus <= 0:
+                    # NO SURPLUS — rerolling eats into interest tiers.
+                    # Heavily penalize. The bot should not be spending $5 from $24.
+                    mask[ACTION_REROLL] = math.exp(-HAND_BIAS_STRENGTH * 0.4) * reroll_ip
+                elif cash_rich and empty_joker_slots >= 1 and not any_buyable_joker and needs_upgrade:
+                    # Cash rich + empty slots + nothing buyable + need power
                     # — reroll aggressively to find jokers.
                     mask[ACTION_REROLL] = math.exp(HAND_BIAS_STRENGTH * 0.4)
                 elif cash_rich and not any_buyable_joker:
                     # Fat stacks but nothing good in shop — spend freely to find value.
-                    # No interest penalty since we're well above the floor.
                     mask[ACTION_REROLL] = math.exp(HAND_BIAS_STRENGTH * 0.25)
-                elif needs_upgrade and not any_buyable_joker and not any_good_pack:
+                elif needs_upgrade and not any_buyable_joker and not any_good_pack and surplus > 0:
                     # Need power but nothing good in shop — reroll to find something
                     mask[ACTION_REROLL] = math.exp(HAND_BIAS_STRENGTH * 0.15) * reroll_ip
-                elif not needs_upgrade and not cash_rich:
-                    # Not urgent AND not flush with cash — penalize rerolling
+                elif not needs_upgrade:
+                    # Not urgent — penalize rerolling
                     mask[ACTION_REROLL] = math.exp(-HAND_BIAS_STRENGTH * 0.2) * reroll_ip
                 else:
                     mask[ACTION_REROLL] = reroll_ip  # just the interest penalty
