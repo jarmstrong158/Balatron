@@ -872,39 +872,34 @@ class Trainer:
                             _api_key_to_name as _noop_aktn,
                             HIGH_VALUE_JOKERS as _noop_hv,
                         )
+                        # Try to buy ANY affordable shop card that could be a joker
                         noop_shop = raw_state.get("shop", {}).get("cards", [])
                         noop_jokers = raw_state.get("jokers", {}).get("cards", [])
                         noop_jcount = len(noop_jokers)
                         noop_jlimit = raw_state.get("joker_limit", 5)
                         best_noop_buy = -1
-                        best_noop_score = -999
+                        # Log what we see so we can debug
                         for ni, nc in enumerate(noop_shop):
+                            nc_key = nc.get("key", "")
                             nc_set = nc.get("set", "")
-                            if nc_set and nc_set != "Joker":
-                                continue
                             nc_cost = nc.get("cost", {}).get("buy", 999)
+                            print(f"[SHOP-NOOP-SCAN] slot {ni}: "
+                                  f"key={nc_key} set={nc_set} cost=${nc_cost}",
+                                  flush=True)
+                            # Buy ANY joker-type card we can afford with open slots
                             if nc_cost > noop_money:
                                 continue
                             if noop_jcount >= noop_jlimit:
-                                continue  # can't fit more jokers
-                            nc_key = nc.get("joker_key", "") or nc.get("key", "")
-                            nc_name = _noop_aktn(nc_key)
-                            nc_delta = _noop_ejv(nc, noop_jokers, raw_state)
-                            nc_scoring = _noop_jis(nc)
-                            nc_mod = nc.get("modifier", {})
-                            nc_ed = nc_mod.get("edition", "") if isinstance(nc_mod, dict) else ""
-                            nc_high = (nc_name in _noop_hv or
-                                       nc_ed in ("POLYCHROME", "HOLO", "NEGATIVE"))
-                            # Buy if positive delta, high value, or any scoring
-                            # joker when we have open slots
-                            if (nc_delta > best_noop_score and
-                                    (nc_delta > 0 or nc_high or nc_scoring)):
-                                best_noop_score = nc_delta
+                                continue
+                            # Accept if set is Joker OR key starts with j_
+                            is_joker = (nc_set == "Joker" or
+                                        nc_key.startswith("j_"))
+                            if is_joker and best_noop_buy < 0:
                                 best_noop_buy = ni
                         if best_noop_buy >= 0:
-                            print(f"[SHOP] NOOP recovery: force-buying shop card "
-                                  f"{best_noop_buy} (delta={best_noop_score:.0f})",
-                                  flush=True)
+                            bk = noop_shop[best_noop_buy].get("key", "?")
+                            print(f"[SHOP] NOOP recovery: force-buying {bk} "
+                                  f"(slot {best_noop_buy})", flush=True)
                             api_method = "buy"
                             api_params = {"card": best_noop_buy}
                             self._shop_noop_count = 0
@@ -1050,7 +1045,27 @@ class Trainer:
                 unknown_state_count = 0  # reset stuck counter
                 self._round_eval_count = 0  # reset win-screen detector
                 if state == "SHOP":
-                    self._shop_rerolls = 0  # reset reroll counter per shop visit
+                    self._shop_rerolls = 0
+                    # Log shop contents so we can see what the bot sees
+                    shop_cards_debug = raw.get("shop", {}).get("cards", [])
+                    shop_packs_debug = raw.get("packs", {}).get("cards", [])
+                    _money = raw.get("money", 0)
+                    _jcount = len(raw.get("jokers", {}).get("cards", []))
+                    _jlimit = raw.get("joker_limit", 5)
+                    shop_items = []
+                    for sc in shop_cards_debug:
+                        sc_set = sc.get("set", "")
+                        sc_key = sc.get("key", "")
+                        sc_cost = sc.get("cost", {}).get("buy", "?")
+                        shop_items.append(f"{sc_key}({sc_set})${sc_cost}")
+                    pack_items = []
+                    for pc in shop_packs_debug:
+                        pk = pc.get("key", "")
+                        pc_cost = pc.get("cost", {}).get("buy", "?")
+                        pack_items.append(f"{pk}${pc_cost}")
+                    print(f"[SHOP-ENTER] money=${_money} jokers={_jcount}/{_jlimit} "
+                          f"shop=[{', '.join(shop_items)}] "
+                          f"packs=[{', '.join(pack_items)}]", flush=True)
                 if state == "BLIND_SELECT":
                     # Auto-skip for Investment Tag (free money)
                     # At BLIND_SELECT, the offered blind has status "SELECT"
@@ -1804,13 +1819,10 @@ class Trainer:
             if cost > money:
                 return "gamestate", None
 
-            # Guard: don't buy packs when there's a buyable joker in shop.
-            # A known joker for $2-6 beats gambling $6-8 on a pack every time.
-            # Only exception: free packs (Astronomer makes celestial packs $0).
+            # Guard: if there's a buyable joker in shop, buy that instead of a pack.
             pack_key = shop_packs[p_idx].get("key", "")
             is_free = cost <= 0
             if not is_free and joker_count < joker_limit:
-                # Check if there's ANY affordable joker in shop
                 from environment.action_space import (
                     _joker_is_scoring as _pack_jis,
                     _api_key_to_name as _pack_aktn,
@@ -1833,10 +1845,7 @@ class Trainer:
                     print(f"[SHOP] REDIRECT pack buy → joker buy: {sj_name}",
                           flush=True)
                     return "buy", {"card": best_joker_idx}
-                # No joker available — allow pack if it's a buffoon or we truly
-                # have nothing better
-                if "buffoon" not in pack_key:
-                    return "gamestate", None
+                # No joker in shop — pack is fine, let it through
 
             # Block standard packs — they add cards to deck, diluting draws
             if "standard" in pack_key:
