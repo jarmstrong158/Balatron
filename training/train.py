@@ -804,22 +804,20 @@ class Trainer:
                 rerolls = getattr(self, '_shop_rerolls', 0)
                 money_now = raw_state.get("money", 0)
                 reroll_cost = raw_state.get("round", {}).get("reroll_cost", 5)
-                joker_cards = raw_state.get("jokers", {}).get("cards", [])
-                joker_limit_now = raw_state.get("joker_limit", 5)
-                has_empty_slots = len(joker_cards) < joker_limit_now
+                min_joker_cost = 4
+                money_after = money_now - reroll_cost
 
-                # Scale reroll cap based on surplus money above interest floor.
-                # Interest floor = $25 (or higher with vouchers).
-                # Each reroll = $5 by default.  With $100 surplus, allow ~6-8 rerolls.
-                # With $24 and $25 floor, surplus=0 → only 1 reroll allowed.
-                interest_floor = 25  # default; vouchers handled in hard guard
-                surplus = max(money_now - interest_floor, 0)
-                affordable_rerolls = max(surplus // max(reroll_cost, 1), 0)
-                # Cap = what you can afford from surplus, minimum 1 peek, max 8
-                reroll_cap = max(1, min(affordable_rerolls, 8))
-
-                if rerolls >= reroll_cap:
+                # Hard block: can't afford reroll or can't buy anything after
+                if money_now < reroll_cost or money_after < min_joker_cost:
                     action_mask[ACTION_REROLL] = 0.0
+                else:
+                    # Cap based on surplus above interest floor
+                    interest_floor = 25
+                    surplus = max(money_now - interest_floor, 0)
+                    affordable_rerolls = surplus // max(reroll_cost, 1)
+                    reroll_cap = max(1, min(affordable_rerolls, 8))
+                    if rerolls >= reroll_cap:
+                        action_mask[ACTION_REROLL] = 0.0
 
             # Check if any actions are valid
             if action_mask[:14].sum() == 0:
@@ -1886,63 +1884,29 @@ class Trainer:
                               flush=True)
                         return "gamestate", None
 
-            # Check if we're desperate: scoring power vs next blind
-            # If we can't beat the next blind with 4 hands, we need jokers badly
-            desperate = False
-            blinds = raw_state.get("blinds", {})
-            next_blind_score = 0
-            if isinstance(blinds, dict):
-                for b in blinds.values():
-                    if isinstance(b, dict) and b.get("status") in ("UPCOMING", "SELECT"):
-                        candidate = b.get("score", 0)
-                        if candidate > next_blind_score:
-                            next_blind_score = candidate
-            if next_blind_score > 0:
-                total_scoring_power = current_score * 4  # 4 hands
-                if total_scoring_power < next_blind_score:
-                    desperate = True
+            # SIMPLE RULE: after rerolling, can you still buy a joker?
+            # Cheapest jokers cost ~$2. If money after reroll < $4, don't bother.
+            min_joker_cost = 4
+            money_after = money - reroll_cost
+            if money_after < min_joker_cost:
+                return "gamestate", None
 
-            if desperate:
-                # Desperate mode: relax interest guards
-                # Only spend below $5 when we're desperate AND have empty joker
-                # slots — we need the scoring power to survive
-                if joker_count < joker_limit and money - reroll_cost >= 0:
-                    pass  # allow rerolling to $0 when desperate + slots open
-                elif money - reroll_cost < 5:
-                    return "gamestate", None
-                self._shop_rerolls = getattr(self, '_shop_rerolls', 0) + 1
-                if self._shop_rerolls > 4:
-                    return "gamestate", None
-                return "reroll", None
+            # Track rerolls per shop
+            self._shop_rerolls = getattr(self, '_shop_rerolls', 0) + 1
 
-            # Normal mode: protect interest tiers
-            # Interest = $1 per $5, capped at $5 (or $10/$25 with vouchers)
+            # Reroll cap: only spend surplus above interest floor.
+            # Interest floor = $25 base, $50 with Seed Money, $125 with Money Tree.
             vouchers = raw_state.get("vouchers", {}).get("owned", [])
             v_set = set(vouchers) if isinstance(vouchers, list) else set()
             if "v_money_tree" in v_set:
-                interest_cap_money = 125  # $25 interest from $125
+                interest_floor = 125
             elif "v_seed_money" in v_set:
-                interest_cap_money = 50   # $10 interest from $50
+                interest_floor = 50
             else:
-                interest_cap_money = 25   # $5 interest from $25
-            # Floor is the amount we want to protect for max interest
-            interest_floor = min((money // 5) * 5, interest_cap_money)
-            safe_money = money - interest_floor
-            if safe_money < reroll_cost and money > 5:
-                # Rerolling would drop an interest tier — only allow if
-                # we have empty joker slots (filling slots is critical)
-                if joker_count >= joker_limit:
-                    # print(f"[SHOP] BLOCKED reroll (would lose interest tier, "
-                    #       f"${money} -> ${money - reroll_cost})", flush=True)
-                    return "gamestate", None
-
-            # Track rerolls per shop (reset in _get_actionable_state on SHOP entry)
-            self._shop_rerolls = getattr(self, '_shop_rerolls', 0) + 1
-            # Scale reroll cap based on surplus money above interest floor.
-            # With $100 and $25 floor, surplus=$75, affordable=15 → cap=8.
-            # With $24 and $25 floor, surplus=0, affordable=0 → cap=1 (one peek).
+                interest_floor = 25
             surplus = max(money - interest_floor, 0)
-            affordable = max(surplus // max(reroll_cost, 1), 0)
+            affordable = surplus // max(reroll_cost, 1)
+            # Allow 1 peek reroll even with 0 surplus, but cap at 8
             max_rerolls = max(1, min(affordable, 8))
             if self._shop_rerolls > max_rerolls:
                 return "gamestate", None
