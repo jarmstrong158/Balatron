@@ -851,26 +851,69 @@ class Trainer:
             )
 
             # Shop spin detection: if the NN keeps choosing no-op actions
-            # (gamestate) while in SHOP, force next_round to prevent freezing
+            # (gamestate) while in SHOP, try to force a buy before leaving
             if game_state_name == "SHOP":
                 if api_method == "gamestate":
                     self._shop_noop_count = getattr(self, '_shop_noop_count', 0) + 1
                     noop_action_type = int(action_np[0])
                     noop_target = int(action_np[13])
+                    noop_money = raw_state.get("money", 0)
                     if self._shop_noop_count <= 3:
-                        money = raw_state.get("money", 0)
-                        # Debug: show mask value for the selected action type
                         mask_val = action_mask[noop_action_type] if noop_action_type < len(action_mask) else -1
                         print(f"[SHOP-NOOP] action_type={noop_action_type} "
-                              f"target={noop_target} money=${money} "
+                              f"target={noop_target} money=${noop_money} "
                               f"mask[{noop_action_type}]={mask_val:.4f} "
                               f"(noop #{self._shop_noop_count})", flush=True)
-                    if self._shop_noop_count > 5:
-                        print(f"[SHOP] Forcing next_round after {self._shop_noop_count} "
-                              f"no-op actions (last: type={noop_action_type})", flush=True)
-                        api_method = "next_round"
-                        api_params = None
-                        self._shop_noop_count = 0
+                    if self._shop_noop_count >= 3:
+                        # Before forcing leave, try to buy the best affordable joker
+                        from environment.action_space import (
+                            _estimate_joker_value as _noop_ejv,
+                            _joker_is_scoring as _noop_jis,
+                            _api_key_to_name as _noop_aktn,
+                            HIGH_VALUE_JOKERS as _noop_hv,
+                        )
+                        noop_shop = raw_state.get("shop", {}).get("cards", [])
+                        noop_jokers = raw_state.get("jokers", {}).get("cards", [])
+                        noop_jcount = len(noop_jokers)
+                        noop_jlimit = raw_state.get("joker_limit", 5)
+                        best_noop_buy = -1
+                        best_noop_score = -999
+                        for ni, nc in enumerate(noop_shop):
+                            nc_set = nc.get("set", "")
+                            if nc_set and nc_set != "Joker":
+                                continue
+                            nc_cost = nc.get("cost", {}).get("buy", 999)
+                            if nc_cost > noop_money:
+                                continue
+                            if noop_jcount >= noop_jlimit:
+                                continue  # can't fit more jokers
+                            nc_key = nc.get("joker_key", "") or nc.get("key", "")
+                            nc_name = _noop_aktn(nc_key)
+                            nc_delta = _noop_ejv(nc, noop_jokers, raw_state)
+                            nc_scoring = _noop_jis(nc)
+                            nc_mod = nc.get("modifier", {})
+                            nc_ed = nc_mod.get("edition", "") if isinstance(nc_mod, dict) else ""
+                            nc_high = (nc_name in _noop_hv or
+                                       nc_ed in ("POLYCHROME", "HOLO", "NEGATIVE"))
+                            # Buy if positive delta, high value, or any scoring
+                            # joker when we have open slots
+                            if (nc_delta > best_noop_score and
+                                    (nc_delta > 0 or nc_high or nc_scoring)):
+                                best_noop_score = nc_delta
+                                best_noop_buy = ni
+                        if best_noop_buy >= 0:
+                            print(f"[SHOP] NOOP recovery: force-buying shop card "
+                                  f"{best_noop_buy} (delta={best_noop_score:.0f})",
+                                  flush=True)
+                            api_method = "buy"
+                            api_params = {"card": best_noop_buy}
+                            self._shop_noop_count = 0
+                        elif self._shop_noop_count > 5:
+                            print(f"[SHOP] Forcing next_round after "
+                                  f"{self._shop_noop_count} no-ops", flush=True)
+                            api_method = "next_round"
+                            api_params = None
+                            self._shop_noop_count = 0
                 else:
                     self._shop_noop_count = 0
             else:
@@ -1853,36 +1896,45 @@ class Trainer:
             if money < reroll_cost:
                 return "gamestate", None
 
-            # HARD GUARD: Block reroll when there's a good buyable joker in shop.
-            # This prevents the bot from rerolling past Photograph, Hanging Chad, etc.
+            # HARD GUARD: When there's a good buyable joker in shop, BUY IT
+            # instead of rerolling. Don't just block — force the buy action.
             from environment.action_space import (
                 _estimate_joker_value as _ejv, _joker_is_scoring as _jis,
                 HIGH_VALUE_JOKERS, _api_key_to_name as _aktn,
             )
             shop_cards = raw_state.get("shop", {}).get("cards", [])
-            for sc in shop_cards:
+            best_buy_idx = -1
+            best_buy_delta = -999
+            best_buy_name = ""
+            for sci, sc in enumerate(shop_cards):
                 sc_set = sc.get("set", "")
                 if sc_set and sc_set != "Joker":
                     continue
                 sc_cost = sc.get("cost", {}).get("buy", 999)
                 if sc_cost > money:
-                    continue  # can't afford
+                    continue
                 sc_key = sc.get("joker_key", "") or sc.get("key", "")
                 sc_name = _aktn(sc_key)
                 sc_mod = sc.get("modifier", {})
                 sc_edition = sc_mod.get("edition", "") if isinstance(sc_mod, dict) else ""
                 is_high = (sc_name in HIGH_VALUE_JOKERS or
                            sc_edition in ("POLYCHROME", "HOLO", "NEGATIVE"))
-                if is_high or _jis(sc):
-                    # Check delta — is this joker actually good for us?
+                is_scoring = _jis(sc)
+                if is_high or is_scoring:
                     delta = _ejv(sc, jokers_raw, raw_state)
-                    if delta > 0 or is_high:
-                        # Good joker available and affordable — block reroll!
-                        jlabel = sc_name or sc_key
-                        print(f"[SHOP] BLOCKED reroll — buyable joker: {jlabel} "
-                              f"(delta={delta:.0f}, high_value={is_high})",
-                              flush=True)
-                        return "gamestate", None
+                    # Buy if positive delta, or high-value, or scoring with open slot
+                    should_buy = (delta > 0 or is_high or
+                                  (is_scoring and joker_count < joker_limit))
+                    if should_buy and delta > best_buy_delta:
+                        best_buy_delta = delta
+                        best_buy_idx = sci
+                        best_buy_name = sc_name or sc_key
+
+            if best_buy_idx >= 0 and joker_count < joker_limit:
+                # FORCE BUY instead of rerolling — don't waste the joker
+                print(f"[SHOP] OVERRIDE reroll → buying {best_buy_name} "
+                      f"(delta={best_buy_delta:.0f})", flush=True)
+                return "buy", {"card": best_buy_idx}
 
             # SIMPLE RULE: after rerolling, can you still buy a joker?
             # Cheapest jokers cost ~$2. If money after reroll < $4, don't bother.
@@ -1971,10 +2023,9 @@ class Trainer:
                 shop_cards = raw_state.get("shop", {}).get("cards", [])
                 from environment.action_space import (
                     _estimate_joker_value, _joker_is_scoring, _api_key_to_name,
-                    MUST_BUY_JOKERS, BAD_JOKERS,
+                    MUST_BUY_JOKERS, BAD_JOKERS, HIGH_VALUE_JOKERS,
                 )
                 for i, sc in enumerate(shop_cards):
-                    # Only consider actual jokers, not tarots/planets/etc.
                     sc_set = sc.get("set", "")
                     if sc_set and sc_set != "Joker":
                         continue
@@ -1983,15 +2034,23 @@ class Trainer:
                         continue
                     sc_key = sc.get("joker_key", "") or sc.get("key", "")
                     sc_name = _api_key_to_name(sc_key)
-                    if not sc_name:
+                    if sc_name and sc_name in BAD_JOKERS:
                         continue
-                    if sc_name in BAD_JOKERS:
-                        continue
+                    sc_mod = sc.get("modifier", {})
+                    sc_ed = sc_mod.get("edition", "") if isinstance(sc_mod, dict) else ""
+                    is_high = (sc_name in HIGH_VALUE_JOKERS if sc_name else False) or \
+                              sc_ed in ("POLYCHROME", "HOLO", "NEGATIVE")
+                    is_scoring = _joker_is_scoring(sc)
                     delta = _estimate_joker_value(sc, jokers_raw, raw_state)
-                    if delta > 0 or sc_name in MUST_BUY_JOKERS:
+                    # Force-buy if: positive delta, must-buy, high-value,
+                    # or ANY scoring joker when we have open slots
+                    if delta > 0 or (sc_name and sc_name in MUST_BUY_JOKERS) or \
+                       is_high or is_scoring:
                         self._shop_block_count = shop_block_count + 1
-                        print(f"[SHOP] BLOCKED leaving — buyable joker: {sc_name} "
-                              f"(+{delta:.0f}, cost=${sc_cost})", flush=True)
+                        label = sc_name or sc_key or f"slot{i}"
+                        print(f"[SHOP] BLOCKED leaving → buying {label} "
+                              f"(delta={delta:.0f}, cost=${sc_cost}, "
+                              f"scoring={is_scoring}, high={is_high})", flush=True)
                         return "buy", {"card": i}
             self._shop_block_count = 0
 

@@ -834,9 +834,9 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 cash_rich = surplus > 20
 
                 if has_scoring_joker_in_shop and any_buyable_joker:
-                    # GOOD JOKER AVAILABLE — strongly penalize rerolling!
-                    # The bot MUST buy the joker before even considering reroll.
-                    mask[ACTION_REROLL] = math.exp(-HAND_BIAS_STRENGTH * 0.5)
+                    # GOOD JOKER AVAILABLE — hard block rerolling.
+                    # The bot MUST buy the joker first. No exceptions.
+                    mask[ACTION_REROLL] = 0.0
                 elif surplus <= 0:
                     # NO SURPLUS — rerolling eats into interest tiers.
                     mask[ACTION_REROLL] = math.exp(-HAND_BIAS_STRENGTH * 0.4) * reroll_ip
