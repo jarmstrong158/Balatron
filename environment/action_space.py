@@ -815,45 +815,30 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             else:
                 mask[target_offset + TARGET_CONSUMABLE_OFFSET + i] = 1.0
 
-        # Reroll — only if you can still buy something after rerolling
+        # Reroll — conservative. Only reroll when nothing to buy and money to spare.
         if mask[ACTION_REROLL] > 0:
             reroll_cost = raw_state.get("round", {}).get("reroll_cost", 5)
-            min_joker_cost = 4  # cheapest jokers cost ~$2-4
+            min_joker_cost = 4
             money_after_reroll = money - reroll_cost
 
             if money < reroll_cost or money_after_reroll < min_joker_cost:
-                # Can't afford reroll OR can't buy anything after — hard block
+                mask[ACTION_REROLL] = 0.0
+            elif any_buyable_joker:
+                # Something worth buying exists — don't reroll past it
                 mask[ACTION_REROLL] = 0.0
             else:
-                reroll_ip = _interest_penalty(money, reroll_cost)
-                empty_joker_slots = JOKER_SLOTS - num_jokers
-
-                # Surplus = money above interest floor ($25 default).
+                # Nothing buyable — allow reroll but keep it mild
                 interest_floor = 25
                 surplus = max(money - interest_floor, 0)
-                cash_rich = surplus > 20
-
-                if has_scoring_joker_in_shop and any_buyable_joker:
-                    # GOOD JOKER AVAILABLE — hard block rerolling.
-                    # The bot MUST buy the joker first. No exceptions.
-                    mask[ACTION_REROLL] = 0.0
-                elif surplus <= 0:
-                    # NO SURPLUS — rerolling eats into interest tiers.
-                    mask[ACTION_REROLL] = math.exp(-HAND_BIAS_STRENGTH * 0.4) * reroll_ip
-                elif cash_rich and empty_joker_slots >= 1 and not any_buyable_joker and needs_upgrade:
-                    # Cash rich + empty slots + nothing buyable + need power
-                    mask[ACTION_REROLL] = math.exp(HAND_BIAS_STRENGTH * 0.4)
-                elif cash_rich and not any_buyable_joker:
-                    # Fat stacks but nothing good in shop — spend freely.
-                    mask[ACTION_REROLL] = math.exp(HAND_BIAS_STRENGTH * 0.25)
-                elif needs_upgrade and not any_buyable_joker and not any_good_pack and surplus > 0:
-                    # Need power but nothing good — reroll to find something
-                    mask[ACTION_REROLL] = math.exp(HAND_BIAS_STRENGTH * 0.15) * reroll_ip
-                elif not needs_upgrade:
-                    # Not urgent — penalize rerolling
-                    mask[ACTION_REROLL] = math.exp(-HAND_BIAS_STRENGTH * 0.2) * reroll_ip
+                if surplus <= 0:
+                    # No surplus — penalize hard
+                    mask[ACTION_REROLL] = 0.3
+                elif surplus > 20:
+                    # Plenty of spare cash — light nudge to reroll
+                    mask[ACTION_REROLL] = 1.5
                 else:
-                    mask[ACTION_REROLL] = reroll_ip  # just the interest penalty
+                    # Some surplus — neutral
+                    mask[ACTION_REROLL] = 1.0
 
         # END_SHOP bias — guide but don't override
         if mask[ACTION_END_SHOP] > 0:
