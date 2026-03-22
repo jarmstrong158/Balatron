@@ -215,13 +215,20 @@ def _joker_sell_value(joker: dict) -> int:
 
 
 def _get_blind_target(raw_state: dict) -> float:
-    """Extract the current blind's target score."""
+    """Extract the next blind's target score.
+
+    During SHOP, no blind is "CURRENT" — we need the UPCOMING blind.
+    Returns the highest upcoming/current blind score found.
+    """
     blinds = raw_state.get("blinds", {})
+    best = 0.0
     if isinstance(blinds, dict):
         for b in blinds.values():
-            if isinstance(b, dict) and b.get("status") == "CURRENT":
-                return b.get("score", 300)
-    return 300.0
+            if isinstance(b, dict) and b.get("status") in ("CURRENT", "UPCOMING", "SELECT"):
+                score = b.get("score", 0)
+                if score > best:
+                    best = score
+    return best if best > 0 else 300.0
 
 
 # Logit bias strength for hand-aware card selection.
