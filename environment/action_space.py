@@ -815,25 +815,39 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = 0.0
                 continue
 
-            # If scoring jokers are available in shop, penalize packs heavily
-            if has_scoring_joker_in_shop and has_joker_slot:
+            # If scoring jokers are available in shop WITH open slots, penalize packs
+            # But celestial packs are always useful (planet leveling scales forever)
+            if has_scoring_joker_in_shop and has_joker_slot and "celestial" not in pack_key:
                 mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.4) * ip
                 continue
 
-            if needs_upgrade and "celestial" in pack_key:
-                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.15) * ip
+            if "celestial" in pack_key:
+                # Celestial packs are ALWAYS good — planet leveling compounds with jokers.
+                # Slightly higher boost when needing upgrade, but never penalize.
+                boost = HAND_BIAS_STRENGTH * 0.25 if needs_upgrade else HAND_BIAS_STRENGTH * 0.15
+                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(boost) * ip
                 any_good_pack = True
-            elif needs_upgrade and "buffoon" in pack_key and has_joker_slot:
-                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.2) * ip
-                any_good_pack = True
-            elif needs_upgrade and "arcana" in pack_key:
-                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.05) * ip
-                any_good_pack = True
-            elif not needs_upgrade:
-                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.3) * ip
+            elif "buffoon" in pack_key and has_joker_slot:
+                if needs_upgrade:
+                    mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.2) * ip
+                    any_good_pack = True
+                else:
+                    mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.1) * ip
+            elif "arcana" in pack_key:
+                if needs_upgrade:
+                    mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.05) * ip
+                    any_good_pack = True
+                else:
+                    mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.15) * ip
             else:
                 mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.1) * ip
         any_pack_target_valid = any(
+            mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] > 0
+            for i in range(min(len(shop_packs), SHOP_PACK_SLOTS))
+        )
+        # Check if any celestial pack survived masking
+        has_celestial_pack = any(
+            "celestial" in shop_packs[i].get("key", "") and
             mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] > 0
             for i in range(min(len(shop_packs), SHOP_PACK_SLOTS))
         )
@@ -844,8 +858,15 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 shop_packs[i].get("cost", {}).get("buy", 999) <= 0
                 for i in range(min(len(shop_packs), SHOP_PACK_SLOTS))
             )
-            if has_free_pack:
+            if has_free_pack or has_celestial_pack:
+                # Allow free packs and celestial packs even with buyable jokers
                 mask[ACTION_BUY_PACK] = 1.0
+                # Only block non-celestial, non-free pack targets
+                for i in range(min(len(shop_packs), SHOP_PACK_SLOTS)):
+                    pk = shop_packs[i].get("key", "")
+                    pc = shop_packs[i].get("cost", {}).get("buy", 999)
+                    if "celestial" not in pk and pc > 0:
+                        mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = 0.0
             else:
                 mask[ACTION_BUY_PACK] = 0.0
                 for i in range(min(len(shop_packs), SHOP_PACK_SLOTS)):
