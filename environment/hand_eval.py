@@ -3792,37 +3792,55 @@ def _resolve_copy_target(jokers: list[dict], order: list[int],
     if direction == "right":
         # Blueprint: scan rightward from pos+1
         scan_range = range(pos + 1, len(order))
+        for scan_pos in scan_range:
+            idx = order[scan_pos]
+            if idx in visited or idx < 0 or idx >= len(jokers):
+                continue
+            visited.add(idx)
+            jk = jokers[idx].get("joker_key", "") or jokers[idx].get("key", "")
+            jn = _api_key_to_name(jk)
+            if jn not in COPY_NAMES:
+                return idx
+            # Follow Blueprint chain rightward
+            if jn == "Blueprint":
+                continue  # keep scanning right
+            # Brainstorm in a Blueprint chain: Brainstorm copies leftmost,
+            # which is already being resolved — skip to avoid infinite loop
+        return None
     else:
-        # Brainstorm: start from leftmost (position 0) and scan right
-        scan_range = range(0, len(order))
+        # Brainstorm: always targets the LEFTMOST joker (order[0]).
+        # If Brainstorm IS the leftmost, it copies itself → no effect.
+        if len(order) == 0:
+            return None
+        leftmost_idx = order[0]
+        if leftmost_idx < 0 or leftmost_idx >= len(jokers):
+            return None
 
-    for scan_pos in scan_range:
-        idx = order[scan_pos]
-        if idx in visited or idx < 0 or idx >= len(jokers):
-            continue
-        visited.add(idx)
+        # Check if the leftmost joker is Brainstorm itself
+        lk = jokers[leftmost_idx].get("joker_key", "") or jokers[leftmost_idx].get("key", "")
+        ln = _api_key_to_name(lk)
+        if ln == "Brainstorm":
+            return None  # Brainstorm copies itself — no effect
 
-        jk = jokers[idx].get("joker_key", "") or jokers[idx].get("key", "")
-        jn = _api_key_to_name(jk)
+        if ln not in COPY_NAMES:
+            return leftmost_idx  # Normal joker — copy it directly
 
-        if jn not in COPY_NAMES:
-            return idx  # Found a real joker to copy
-
-        # It's another copy joker — follow its chain
-        if jn == "Blueprint":
-            # Blueprint copies to its right, so continue scanning right from here
-            for inner_pos in range(scan_pos + 1, len(order)):
-                inner_idx = order[inner_pos]
-                if inner_idx in visited or inner_idx < 0 or inner_idx >= len(jokers):
+        # Leftmost is Blueprint — follow Blueprint's copy chain (rightward)
+        if ln == "Blueprint":
+            for scan_pos in range(1, len(order)):
+                idx = order[scan_pos]
+                if idx in visited or idx < 0 or idx >= len(jokers):
                     continue
-                visited.add(inner_idx)
-                ik = jokers[inner_idx].get("joker_key", "") or jokers[inner_idx].get("key", "")
-                inn = _api_key_to_name(ik)
-                if inn not in COPY_NAMES:
-                    return inner_idx
-            return None  # No valid target in chain
+                visited.add(idx)
+                jk = jokers[idx].get("joker_key", "") or jokers[idx].get("key", "")
+                jn = _api_key_to_name(jk)
+                if jn not in COPY_NAMES:
+                    return idx
+                if jn == "Blueprint":
+                    continue  # keep following chain right
+            return None
 
-    return None
+        return None
 
 
 def _score_joker_order_with_cards(jokers: list[dict], order: list[int],
