@@ -1624,6 +1624,16 @@ class Trainer:
                 "PLAY_TAROT", "HAND_PLAYED", "DRAW_TO_HAND", "NEW_ROUND",
                 "TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK",
                 "STANDARD_PACK", "BUFFOON_PACK",
+                # Pack opening transitions
+                "SMODS_BOOSTER_OPENING", "BOOSTER_PACK",
+                # Scoring animations
+                "SCORING", "EVAL_HAND",
+                # Consumable use animations
+                "USE_CONSUMABLE", "PLAY_SPECTRAL",
+                # Sell/buy transitions
+                "SELLING_CARD",
+                # Blind selection transitions
+                "SKIP_BLIND",
             }
             if state in TRANSIENT_STATES:
                 # These resolve on their own — give extra time
@@ -1641,6 +1651,8 @@ class Trainer:
 
             # Unknown/unrecognized state — wait briefly
             unknown_state_count += 1
+            if unknown_state_count == 1 or unknown_state_count % 10 == 0:
+                print(f"[UNKNOWN-STATE] '{state}' (poll #{unknown_state_count})", flush=True)
             if unknown_state_count > 30:
                 print(f"[CRASH-RECOVERY] Stuck in unknown state '{state}' for {unknown_state_count} polls — triggering restart", flush=True)
                 await self._restart_balatro()
