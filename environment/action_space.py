@@ -426,19 +426,28 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 mask[ACTION_PLAY] = math.exp(HAND_BIAS_STRENGTH * 0.8)
                 mask[ACTION_DISCARD] = math.exp(-HAND_BIAS_STRENGTH * 0.5)
             else:
-                # Hand doesn't win — mild discard bias (not unconditional).
-                # plan_optimal_action does viability checks before discarding.
+                # Hand doesn't win — decide play vs discard based on gap.
                 per_hand = remaining_target / max(hands_left, 1)
+                score_ratio = current_score / max(per_hand, 1)
                 if current_score >= per_hand:
-                    # Hand is decent enough per-hand — slight play bias
+                    # Hand meets per-hand target — slight play bias
                     mask[ACTION_PLAY] = math.exp(HAND_BIAS_STRENGTH * 0.3)
                     mask[ACTION_DISCARD] = math.exp(HAND_BIAS_STRENGTH * 0.2)
+                elif score_ratio < 0.3:
+                    # Hand is terrible (< 30% of per-hand needed) — strong discard
+                    # Playing a 2K High Card into a 5.5K per-hand target is suicide
+                    mask[ACTION_DISCARD] = math.exp(HAND_BIAS_STRENGTH * 0.7)
+                    mask[ACTION_PLAY] = math.exp(-HAND_BIAS_STRENGTH * 0.5)
+                elif score_ratio < 0.6:
+                    # Hand is weak but not hopeless — moderate discard bias
+                    mask[ACTION_DISCARD] = math.exp(HAND_BIAS_STRENGTH * 0.5)
+                    mask[ACTION_PLAY] = math.exp(-HAND_BIAS_STRENGTH * 0.3)
                 elif discard_ev > current_score * 1.3:
                     # Discard EV is meaningfully better — bias toward discard
                     mask[ACTION_DISCARD] = math.exp(HAND_BIAS_STRENGTH * 0.5)
                     mask[ACTION_PLAY] = math.exp(-HAND_BIAS_STRENGTH * 0.3)
                 else:
-                    # Neutral — let plan_optimal_action decide
+                    # Hand is close to per-hand but doesn't win — neutral
                     mask[ACTION_PLAY] = 1.0
                     mask[ACTION_DISCARD] = 1.0
         elif discards_left <= 0:
@@ -926,11 +935,20 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             elif any_buyable_joker:
                 # Something worth buying exists — don't reroll past it
                 mask[ACTION_REROLL] = 0.0
+            elif not has_joker_slot and not needs_upgrade:
+                # Slots full and we don't need an upgrade — stop wasting money
+                mask[ACTION_REROLL] = 0.0
             else:
                 # Nothing buyable — allow reroll but keep it mild
                 interest_floor = 25
                 surplus = max(money - interest_floor, 0)
-                if surplus <= 0:
+                # Full slots: only reroll if desperate (needs_upgrade) and have surplus
+                if not has_joker_slot:
+                    if surplus > 10:
+                        mask[ACTION_REROLL] = 0.5  # very mild, looking for swap
+                    else:
+                        mask[ACTION_REROLL] = 0.0
+                elif surplus <= 0:
                     # No surplus — penalize hard
                     mask[ACTION_REROLL] = 0.3
                 elif surplus > 20:
