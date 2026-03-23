@@ -1217,6 +1217,55 @@ class Trainer:
                         joker_keys=joker_keys,
                     )
 
+                    # ── BOSS-SPECIFIC AUTO-ACTIONS ──
+                    # Verdant Leaf: sell weakest joker immediately to un-debuff cards
+                    if current_blind_name == "Verdant Leaf":
+                        joker_cards_vl = raw.get("jokers", {}).get("cards", [])
+                        if len(joker_cards_vl) > 1:
+                            # Check if cards are still debuffed (first hand only)
+                            round_chips = raw.get("round", {}).get("chips", 0)
+                            hands_played = raw.get("round", {}).get("hands_left", 0)
+                            total_hands = raw.get("round", {}).get("hands", 0)
+                            if round_chips == 0 and hands_played == total_hands:
+                                # Find weakest joker by delta
+                                from environment.action_space import (
+                                    _estimate_joker_value as _vl_est,
+                                    _joker_is_scoring as _vl_scoring,
+                                    _api_key_to_name as _vl_name,
+                                )
+                                weakest_idx = -1
+                                weakest_delta = float('inf')
+                                for vi, vj in enumerate(joker_cards_vl):
+                                    vmod = vj.get("modifier", {})
+                                    if isinstance(vmod, dict) and vmod.get("eternal", False):
+                                        continue
+                                    ved = vmod.get("edition", "") if isinstance(vmod, dict) else ""
+                                    if ved == "NEGATIVE":
+                                        continue  # never sell negative
+                                    vdelta = _vl_est(vj, joker_cards_vl, raw)
+                                    if vdelta < weakest_delta:
+                                        weakest_delta = vdelta
+                                        weakest_idx = vi
+                                if weakest_idx >= 0:
+                                    vk = joker_cards_vl[weakest_idx].get("key", "")
+                                    vn = _vl_name(vk) or vk
+                                    print(f"[BOSS] Verdant Leaf — selling {vn} "
+                                          f"(idx {weakest_idx}) to un-debuff cards",
+                                          flush=True)
+                                    try:
+                                        await self.game.execute_action(
+                                            "sell", {"joker": weakest_idx})
+                                        await asyncio.sleep(0.3)
+                                        raw = await self._fetch_state()
+                                    except Exception as e:
+                                        print(f"[BOSS] Verdant Leaf sell failed: {e}",
+                                              flush=True)
+
+                    # Amber Acorn: jokers are shuffled — re-arrange immediately
+                    if current_blind_name == "Amber Acorn":
+                        print(f"[BOSS] Amber Acorn — re-arranging shuffled jokers",
+                              flush=True)
+
                     # Auto-rearrange jokers at start of each hand round
                     await self._auto_rearrange_jokers(raw)
                     # Auto-use consumables (Planet cards, well-timed Tarots, etc.)

@@ -2536,6 +2536,19 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
     boss_one_hand_type = False  # The Mouth: can only play 1 hand type all round
     boss_no_repeat_type = False  # The Eye: can't repeat hand types
     boss_must_play_5 = False  # The Psychic: must play exactly 5 cards
+    boss_halve_base = False  # The Flint: halves base chips AND mult
+    boss_one_hand_only = False  # The Needle: only 1 hand allowed
+    boss_no_discards = False  # The Water: start with 0 discards
+    boss_lose_money = False  # The Tooth: lose $1 per card played
+    boss_hook = False  # The Hook: discards 2 random cards after each hand
+    boss_ox_hand = ""  # The Ox: playing this hand type sets money to $0
+    boss_verdant = False  # Verdant Leaf: all cards debuffed until joker sold
+    boss_crimson = False  # Crimson Heart: random joker disabled each hand
+    boss_amber = False  # Amber Acorn: jokers flipped and shuffled
+    boss_cerulean = False  # Cerulean Bell: 1 card forced selected
+    boss_serpent = False  # The Serpent: always draw 3 cards after play/discard
+    boss_manacle = False  # The Manacle: -1 hand size
+    boss_pillar = False  # The Pillar: previously played cards debuffed
 
     blinds = gamestate.get("blinds", {})
     if isinstance(blinds, dict):
@@ -2561,9 +2574,45 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
         boss_one_hand_type = True
     if boss_name == "The Eye":
         boss_no_repeat_type = True
+    if boss_name == "The Flint":
+        boss_halve_base = True
+    if boss_name == "The Needle":
+        boss_one_hand_only = True
+    if boss_name == "The Water":
+        boss_no_discards = True
+    if boss_name == "The Tooth":
+        boss_lose_money = True
+    if boss_name == "The Hook":
+        boss_hook = True
+    if boss_name == "The Ox":
+        # Find most played hand type
+        hand_usage = gamestate.get("hands", {})
+        most_played = ""
+        most_count = 0
+        for ht, info in hand_usage.items():
+            if isinstance(info, dict):
+                played = info.get("played", 0)
+                if played > most_count:
+                    most_count = played
+                    most_played = ht
+        boss_ox_hand = most_played
+    if boss_name == "Verdant Leaf":
+        boss_verdant = True
+    if boss_name == "Crimson Heart":
+        boss_crimson = True
+    if boss_name == "Amber Acorn":
+        boss_amber = True
+    if boss_name == "Cerulean Bell":
+        boss_cerulean = True
+    if boss_name == "The Serpent":
+        boss_serpent = True
+    if boss_name == "The Manacle":
+        boss_manacle = True
+    if boss_name == "The Pillar":
+        boss_pillar = True
 
-    if boss_name and chips_scored == 0 and hands_left >= 3:
-        pass  # Boss detected — handled silently via state vector encoding
+    if boss_name:
+        print(f"[BOSS] {boss_name} detected", flush=True)
 
     # ================================================================
     # SCALING JOKER AWARENESS — avoid resetting accumulated value
@@ -2630,6 +2679,42 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
         # Re-sort
         top_hands.sort(key=lambda h: -h["estimated_score"])
 
+    # ── BOSS-SPECIFIC SCORE ADJUSTMENTS ──
+
+    # The Flint: base chips AND mult are halved → scores drop ~75%
+    if boss_halve_base:
+        for h in top_hands:
+            h["estimated_score"] *= 0.25  # halved chips × halved mult = 25%
+
+    # Verdant Leaf: ALL cards debuffed (0 chips, no triggers) unless joker sold
+    # Only joker-native effects contribute. Scores drop to near-zero.
+    if boss_verdant:
+        for h in top_hands:
+            h["estimated_score"] *= 0.05  # almost nothing scores
+
+    # Crimson Heart: 1 random joker disabled per hand
+    # Estimate ~20% score loss per hand on average (1 of 5 jokers gone)
+    if boss_crimson and len(jokers) > 0:
+        joker_penalty = 1.0 - (1.0 / max(len(jokers), 1))
+        for h in top_hands:
+            h["estimated_score"] *= joker_penalty
+
+    # The Ox: playing most-played hand sets money to $0 — avoid that hand type
+    if boss_ox_hand:
+        for h in top_hands:
+            if h["hand_type"] == boss_ox_hand:
+                h["estimated_score"] *= 0.1  # heavily penalize, don't play it
+
+    # The Pillar: previously played cards are debuffed
+    # Later hands score less as more cards get debuffed. Estimate ~15% penalty.
+    if boss_pillar:
+        for h in top_hands:
+            h["estimated_score"] *= 0.85
+
+    # Re-sort after adjustments
+    if boss_halve_base or boss_verdant or boss_crimson or boss_ox_hand or boss_pillar:
+        top_hands.sort(key=lambda h: -h["estimated_score"])
+
     best_play = top_hands[0] if top_hands else None
     best_play_score = best_play["estimated_score"] if best_play else 0.0
     best_hand_type = best_play["hand_type"] if best_play else "?"
@@ -2683,6 +2768,37 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
 
     targets = _enumerate_targets(hand_cards, deck_cards, jokers, gamestate,
                                     debuffed_suit=debuffed_suit)
+
+    # ── BOSS FILTERS: restrict targets based on boss effects ──
+    # The Eye: can't repeat hand types this round
+    if boss_no_repeat_type:
+        played_types = set()
+        hand_usage = gamestate.get("hands", {})
+        for ht, info in hand_usage.items():
+            if isinstance(info, dict) and info.get("round_played", 0) > 0:
+                played_types.add(ht)
+        if played_types:
+            targets = [t for t in targets if t.get("detail", "") not in played_types]
+            top_hands = [h for h in top_hands if h["hand_type"] not in played_types]
+            if top_hands:
+                best_play = top_hands[0]
+                best_play_score = best_play["estimated_score"]
+                best_hand_type = best_play["hand_type"]
+                play_cards = list(best_play["card_indices"])
+
+    # The Mouth: only one hand type can be played this round
+    if boss_one_hand_type and committed_type:
+        targets = [t for t in targets if t.get("detail", "") == committed_type]
+        top_hands = [h for h in top_hands if h["hand_type"] == committed_type]
+        if top_hands:
+            best_play = top_hands[0]
+            best_play_score = best_play["estimated_score"]
+            best_hand_type = best_play["hand_type"]
+            play_cards = list(best_play["card_indices"])
+
+    # The Needle: only 1 hand — make it count, never discard
+    if boss_one_hand_only:
+        discards_left = 0  # treat as no discards available
 
     # Score each target with multi-discard probability
     scored_targets: list[dict] = []
