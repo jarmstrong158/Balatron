@@ -744,6 +744,30 @@ class Trainer:
                       f"already_recorded={already_recorded} "
                       f"api_won={raw_state.get('won', False)}", flush=True)
 
+                # Append to game history log (rolling buffer)
+                try:
+                    import json as _json
+                    from datetime import datetime as _dt
+                    _hist_path = os.path.join("logs", "game_history.jsonl")
+                    _entry = _json.dumps({
+                        "ante": ante, "won": won,
+                        "ts": _dt.now().isoformat(timespec="seconds"),
+                        "episode": getattr(self, 'episode_count', 0),
+                        "jokers": [j.get("label", "?") for j in
+                                   raw_state.get("jokers", {}).get("cards", [])],
+                    })
+                    with open(_hist_path, "a") as _hf:
+                        _hf.write(_entry + "\n")
+                    # Rotate: keep last 5000 entries
+                    _MAX_HIST = 5000
+                    with open(_hist_path, "r") as _hf:
+                        _lines = _hf.readlines()
+                    if len(_lines) > _MAX_HIST:
+                        with open(_hist_path, "w") as _hf:
+                            _hf.writelines(_lines[-_MAX_HIST:])
+                except Exception:
+                    pass  # never crash training for logging
+
                 # Compute terminal reward
                 reward = self.reward_calc.step(prev_raw, raw_state)
                 self.episode_tracker.step(reward, ante, raw_state)
