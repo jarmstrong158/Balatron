@@ -909,7 +909,7 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             pass
         # Also protect planet cards (always useful) and Hermit (timing-dependent)
         for i, c in enumerate(consumable_cards[:CONSUMABLE_SLOTS]):
-            c_set = c.get("set", "")
+            c_set = c.get("set", "").upper()
             c_key = c.get("key", "")
             if c_set == "PLANET" or c_key in ("c_hermit", "c_temperance") or i in _useful_cons:
                 # Hard block sell — these are always valuable
@@ -946,21 +946,30 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
         if mask[ACTION_END_SHOP] > 0:
             can_buy_something = (any_buyable_joker or any_good_pack)
             empty_slots = JOKER_SLOTS - num_jokers
-            if has_scoring_joker_in_shop and empty_slots >= 1 and any_buyable_joker:
+            shop_empty = len(shop_cards) == 0
+
+            if shop_empty and not any_good_pack:
+                if needs_upgrade and money >= 5:
+                    # Shop empty but we can't beat the next blind — reroll for better jokers
+                    mask[ACTION_END_SHOP] = math.exp(-HAND_BIAS_STRENGTH * 0.3)
+                else:
+                    # Shop empty and we're strong enough (or broke) — leave
+                    mask[ACTION_END_SHOP] = math.exp(HAND_BIAS_STRENGTH * 0.5)
+            elif has_scoring_joker_in_shop and empty_slots >= 1 and any_buyable_joker:
                 # Scoring joker available with empty slots — strongly penalize leaving
                 mask[ACTION_END_SHOP] = math.exp(-HAND_BIAS_STRENGTH * 0.5)
             elif needs_upgrade and can_buy_something:
                 # We need power and can buy it — penalize leaving
                 mask[ACTION_END_SHOP] = math.exp(-HAND_BIAS_STRENGTH * 0.4)
             elif needs_upgrade and not can_buy_something:
-                # Need upgrade but nothing good — slight nudge to leave
-                mask[ACTION_END_SHOP] = math.exp(HAND_BIAS_STRENGTH * 0.15)
+                # Need upgrade but nothing good — nudge to leave
+                mask[ACTION_END_SHOP] = math.exp(HAND_BIAS_STRENGTH * 0.3)
             elif has_scoring_joker_in_shop:
                 # Don't urgently need upgrade but good joker available — neutral
                 mask[ACTION_END_SHOP] = 1.0
             else:
-                # Don't need upgrades and nothing great — slight nudge to leave
-                mask[ACTION_END_SHOP] = math.exp(HAND_BIAS_STRENGTH * 0.15)
+                # Don't need upgrades and nothing great — nudge to leave
+                mask[ACTION_END_SHOP] = math.exp(HAND_BIAS_STRENGTH * 0.3)
 
     elif game_state == "SELECTING_HAND":
         # Owned jokers (for selling during hand selection)
@@ -1044,7 +1053,7 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             card_set = card.get("set", "")
             card_key = card.get("key", "")
 
-            if card_set == "Planet":
+            if card_set == "PLANET":
                 # Planet card — check if it upgrades our best hand type
                 target_ht = PLANET_TO_HAND_TYPE.get(card_key)
                 if target_ht == best_hand_type:
@@ -1069,7 +1078,7 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                     any_good_card = True
                 else:
                     mask[target_offset + TARGET_PACK_CARD_OFFSET + i] = 1.0
-            elif card_set == "Tarot":
+            elif card_set == "TAROT":
                 # Tarot from arcana pack — generally useful
                 mask[target_offset + TARGET_PACK_CARD_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.2)
                 any_good_card = True

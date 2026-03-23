@@ -4394,7 +4394,7 @@ def plan_consumable_use(gamestate: dict) -> Optional[dict]:
 
         # ── PLANET CARDS ──
         # Always use planet cards — they level up hand types permanently
-        if "Planet" in card_set or key in PLANET_TO_HAND_TYPE:
+        if "PLANET" in card_set.upper() or key in PLANET_TO_HAND_TYPE:
             return {"consumable": cons_idx}
 
         # ── THE HERMIT ──

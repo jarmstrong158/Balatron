@@ -873,7 +873,7 @@ class Trainer:
                         noop_shop = raw_state.get("shop", {}).get("cards", [])
                         noop_jokers = raw_state.get("jokers", {}).get("cards", [])
                         noop_jcount = len(noop_jokers)
-                        noop_jlimit = raw_state.get("joker_limit", 5)
+                        noop_jlimit = raw_state.get("jokers", {}).get("limit", 5)
                         best_noop_buy = -1
                         for ni, nc in enumerate(noop_shop):
                             nc_key = nc.get("key", "")
@@ -934,6 +934,14 @@ class Trainer:
                     api_params = {"cards": forced_cards}
                     self._pending_hand_rearrange = None
                     self._pending_rearrange = None
+
+                elif stuck >= 4 and game_state_name == "SHOP":
+                    # Shop loop — force leave instead of restarting
+                    print(f"[STUCK] Shop unchanged {stuck}x — "
+                          f"forcing next_round", flush=True)
+                    api_method = "next_round"
+                    api_params = None
+                    self._state_stuck_count = 0
 
                 elif stuck >= 8:
                     # Buttons are permanently broken — restart Balatro
@@ -1097,7 +1105,7 @@ class Trainer:
                     _raw_packs = raw.get("packs", {})
                     _money = raw.get("money", 0)
                     _jcount = len(raw.get("jokers", {}).get("cards", []))
-                    _jlimit = raw.get("joker_limit", 5)
+                    _jlimit = raw.get("jokers", {}).get("limit", 5)
                     print(f"[SHOP-RAW] money=${_money} jokers={_jcount}/{_jlimit}",
                           flush=True)
                     print(f"[SHOP-RAW] shop={_json.dumps(_raw_shop, default=str)[:800]}",
@@ -1341,7 +1349,7 @@ class Trainer:
                         "j_blueprint", "j_brainstorm",
                     }
                     jokers_info = raw.get("jokers", {})
-                    joker_count = jokers_info.get("count", 0)
+                    joker_count = len(jokers_info.get("cards", []))
                     joker_limit = jokers_info.get("limit", 5)
                     current_jokers = jokers_info.get("cards", [])
 
@@ -1801,25 +1809,61 @@ class Trainer:
                              shop_edition in ("POLYCHROME", "HOLO", "NEGATIVE"))
 
             if joker_count < joker_limit or is_negative:
-                # Open slot — buy if it adds value
-                delta = _estimate_joker_value(card, jokers_raw, raw_state)
-                is_scoring = _joker_is_scoring(card)
-                if delta > 0 or is_high_value:
-                    # Positive delta or known high-value — buy it
-                    if is_high_value and delta <= 0:
-                        print(f"[SHOP] Buying HIGH_VALUE {name} despite low delta "
-                              f"({delta:.0f}) — known strong joker", flush=True)
-                    return "buy", {"card": target_idx}
-                elif delta == 0:
-                    # Delta=0 joker (scoring or economy) — better than an
-                    # empty slot. Buy it when we have room.
-                    print(f"[SHOP] Buying {name or joker_key} (delta=0, "
-                          f"scoring={is_scoring}) — filling empty slot", flush=True)
-                    return "buy", {"card": target_idx}
+                # Open slot — scan ALL shop jokers and buy the best one,
+                # not just whichever one the NN happened to pick.
+                shop_cards_all = raw_state.get("shop", {}).get("cards", [])
+                best_idx = -1
+                best_delta = -999999
+                best_is_high = False
+                best_is_scoring = False
+                best_name = ""
+                for si, sc in enumerate(shop_cards_all):
+                    if _is_non_joker_card(sc):
+                        continue
+                    sc_cost = sc.get("cost", {}).get("buy", 999)
+                    if sc_cost > money:
+                        continue
+                    sc_key = sc.get("joker_key", "") or sc.get("key", "")
+                    sc_name = _api_key_to_name(sc_key)
+                    if sc_name and sc_name in BAD_JOKERS:
+                        continue
+                    sc_mod = sc.get("modifier", {})
+                    sc_ed = sc_mod.get("edition", "") if isinstance(sc_mod, dict) else ""
+                    sc_high = (sc_name in HIGH_VALUE_JOKERS if sc_name else False) or \
+                              sc_ed in ("POLYCHROME", "HOLO", "NEGATIVE")
+                    sc_scoring = _joker_is_scoring(sc)
+                    sc_delta = _estimate_joker_value(sc, jokers_raw, raw_state)
+                    # Priority: must-buy > high-value > highest delta > scoring > economy
+                    sc_priority = sc_delta
+                    if sc_name and sc_name in MUST_BUY_JOKERS:
+                        sc_priority = 999999
+                    elif sc_high:
+                        sc_priority = max(sc_priority, 10000)
+                    elif sc_scoring and sc_delta <= 0:
+                        sc_priority = max(sc_priority, 1)  # scoring beats economy
+                    if sc_priority > best_delta:
+                        best_delta = sc_priority
+                        best_idx = si
+                        best_is_high = sc_high
+                        best_is_scoring = sc_scoring
+                        best_name = sc_name or sc_key
+
+                if best_idx >= 0 and (best_delta > 0 or best_is_high or best_is_scoring):
+                    if best_idx != target_idx:
+                        print(f"[SHOP] Redirecting buy → {best_name} "
+                              f"(delta={best_delta:.0f}, better than NN pick)",
+                              flush=True)
+                    return "buy", {"card": best_idx}
+                elif best_idx >= 0 and best_delta == 0:
+                    # Economy joker, better than empty slot
+                    print(f"[SHOP] Buying {best_name} (delta=0, "
+                          f"scoring={best_is_scoring}) — filling empty slot",
+                          flush=True)
+                    return "buy", {"card": best_idx}
                 else:
-                    # Negative delta — block
+                    # Nothing worth buying
                     print(f"[SHOP] BLOCKED buy {name or joker_key} "
-                          f"(delta={delta:.0f}, scoring={is_scoring})", flush=True)
+                          f"(no viable joker in shop)", flush=True)
                     return "gamestate", None
             else:
                 # Slots full — only buy if it's a meaningful upgrade over weakest
@@ -2149,8 +2193,12 @@ class Trainer:
             # Guard: don't leave shop with empty joker slots if there's a
             # buyable scoring joker. Only check actual jokers (not tarots/planets).
             # Use a counter to prevent infinite loops.
+            # Re-read joker count fresh to avoid stale data after buys
+            _fresh_jokers = raw_state.get("jokers", {}).get("cards", [])
+            _fresh_jcount = len(_fresh_jokers)
+            _fresh_jlimit = raw_state.get("jokers", {}).get("limit", 5)
             shop_block_count = getattr(self, '_shop_block_count', 0)
-            if joker_count < joker_limit and money >= 2 and shop_block_count < 3:
+            if _fresh_jcount < _fresh_jlimit and money >= 2 and shop_block_count < 3:
                 shop_cards = raw_state.get("shop", {}).get("cards", [])
                 from environment.action_space import (
                     _estimate_joker_value, _joker_is_scoring, _api_key_to_name,

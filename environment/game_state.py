@@ -573,12 +573,12 @@ class EventDetector:
             # Determine consumable type from previous state
             for c in prev.get("consumables", {}).get("cards", []):
                 if c["id"] in used:
-                    card_set = c.get("set", "")
-                    if "Tarot" in card_set:
+                    card_set = c.get("set", "").upper()
+                    if "TAROT" in card_set:
                         events.append("per_tarot_used")
-                    elif "Planet" in card_set:
+                    elif "PLANET" in card_set:
                         events.append("per_planet_used")
-                    elif "Spectral" in card_set:
+                    elif "SPECTRAL" in card_set:
                         events.append("per_spectral_used")
 
         # Booster pack opened
@@ -1436,13 +1436,13 @@ class GameStateManager:
             slot_offset = offset + slot_idx * CONSUMABLE_SIZE
             if slot_idx < len(consumable_cards):
                 card = consumable_cards[slot_idx]
-                card_set = card.get("set", "")
+                card_set = card.get("set", "").upper()
                 # Type (1)
-                if "Tarot" in card_set:
+                if "TAROT" in card_set:
                     vec[slot_offset] = 0.33
-                elif "Planet" in card_set:
+                elif "PLANET" in card_set:
                     vec[slot_offset] = 0.67
-                elif "Spectral" in card_set:
+                elif "SPECTRAL" in card_set:
                     vec[slot_offset] = 1.0
                 # Key as normalized hash (1)
                 key = card.get("key", "")
@@ -1454,11 +1454,11 @@ class GameStateManager:
                 vec[slot_offset + 3] = _clamp_norm(_as_dict(card.get("cost", {})).get("buy", 0), 10.0)
                 # Tarot value signal (1) — expected value given joker lineup + deck
                 # 0.0 = worthless, 1.0 = extremely valuable
-                if "Tarot" in card_set:
+                if "TAROT" in card_set:
                     vec[slot_offset + 4] = compute_tarot_value(
                         key, joker_cards, deck_cards
                     )
-                elif "Planet" in card_set:
+                elif "PLANET" in card_set:
                     vec[slot_offset + 4] = 0.8  # Planets are always valuable
                 else:
                     vec[slot_offset + 4] = 0.5  # Spectral — moderate default
