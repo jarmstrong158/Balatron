@@ -429,13 +429,25 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 # Hand doesn't win — decide play vs discard based on gap.
                 per_hand = remaining_target / max(hands_left, 1)
                 score_ratio = current_score / max(per_hand, 1)
+
+                # Can we even win by playing average hands?
+                # If best hand * remaining hands can't reach target, we MUST
+                # discard to find better hands (unless out of discards).
+                total_projected = current_score * hands_left
+                hopeless = total_projected < remaining_target * 0.5
+
                 if current_score >= per_hand:
                     # Hand meets per-hand target — slight play bias
                     mask[ACTION_PLAY] = math.exp(HAND_BIAS_STRENGTH * 0.3)
                     mask[ACTION_DISCARD] = math.exp(HAND_BIAS_STRENGTH * 0.2)
+                elif hopeless and hands_left > 1:
+                    # HARD BLOCK play — hand is so weak that playing it
+                    # wastes a hand and guarantees a loss. Force discard.
+                    # e.g. 9K High Card × 5 hands = 45K < 100K × 0.5 = 50K
+                    mask[ACTION_PLAY] = 0.0
+                    mask[ACTION_DISCARD] = math.exp(HAND_BIAS_STRENGTH * 0.8)
                 elif score_ratio < 0.3:
                     # Hand is terrible (< 30% of per-hand needed) — strong discard
-                    # Playing a 2K High Card into a 5.5K per-hand target is suicide
                     mask[ACTION_DISCARD] = math.exp(HAND_BIAS_STRENGTH * 0.7)
                     mask[ACTION_PLAY] = math.exp(-HAND_BIAS_STRENGTH * 0.5)
                 elif score_ratio < 0.6:
