@@ -1050,7 +1050,7 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
 
         any_good_card = False
         for i, card in enumerate(pack_cards[:PACK_CARD_SLOTS]):
-            card_set = card.get("set", "")
+            card_set = card.get("set", "").upper()
             card_key = card.get("key", "")
 
             if card_set == "PLANET":
@@ -1471,7 +1471,7 @@ class ActionDecoder:
         pack_cards = raw_state.get("pack", {}).get("cards", [])
         if pack_cards and idx < len(pack_cards):
             card_set = pack_cards[idx].get("set", "")
-            if card_set in ("TAROT", "SPECTRAL", "Tarot", "Spectral"):
+            if card_set.upper() in ("TAROT", "SPECTRAL"):
                 params["targets"] = [0]
         return "pack", params, info
 

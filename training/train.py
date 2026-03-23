@@ -1279,6 +1279,9 @@ class Trainer:
                                 await asyncio.sleep(0.5)
                             except Exception as e:
                                 print(f"[PACK] Soul sell failed: {e}", flush=True)
+                                # Sell failed — skip picking, can't make room
+                                await asyncio.sleep(cfg.api_poll_delay)
+                                continue
                         else:
                             print(f"[PACK] SOUL CARD found but can't sell any joker — "
                                   f"picking anyway (may fail)", flush=True)
@@ -2220,7 +2223,7 @@ class Trainer:
                     is_high = (sc_name in HIGH_VALUE_JOKERS if sc_name else False) or \
                               sc_ed in ("POLYCHROME", "HOLO", "NEGATIVE")
                     is_scoring = _joker_is_scoring(sc)
-                    delta = _estimate_joker_value(sc, jokers_raw, raw_state)
+                    delta = _estimate_joker_value(sc, _fresh_jokers, raw_state)
                     # Force-buy if: positive delta, must-buy, high-value,
                     # or ANY scoring joker when we have open slots
                     if delta > 0 or (sc_name and sc_name in MUST_BUY_JOKERS) or \

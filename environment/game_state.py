@@ -1607,7 +1607,7 @@ class GameStateManager:
                 elif "spectral" in key:
                     pack_value = 0.5  # Spectrals are situational
                 elif "buffoon" in key:
-                    joker_count = raw.get("jokers", {}).get("count", 0)
+                    joker_count = len(raw.get("jokers", {}).get("cards", []))
                     joker_limit = raw.get("jokers", {}).get("limit", 5)
                     if joker_count < joker_limit:
                         pack_value = 0.8  # Joker packs with open slots
