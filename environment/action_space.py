@@ -112,6 +112,11 @@ MUST_BUY_JOKERS = {
     "Blueprint", "Brainstorm",       # copy another joker = doubles scoring
 }
 
+# Consumables that should ALWAYS be bought if affordable + slot available
+MUST_BUY_CONSUMABLES = {
+    "c_hermit",       # Doubles money — always buy
+}
+
 # High-value jokers — not quite "must buy" but FAR too strong to reroll past.
 # These get a minimum delta floor and the bot MUST buy before rerolling.
 HIGH_VALUE_JOKERS = {
@@ -557,14 +562,6 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
         has_cons_slot = cons_count < cons_limit
 
         # Valuable consumables worth buying from shop
-        MUST_BUY_CONSUMABLES = {
-            "c_hermit",       # Doubles money — always buy
-        }
-        GOOD_PLANET_KEYS = {
-            "c_earth", "c_mercury", "c_venus", "c_mars", "c_jupiter",
-            "c_saturn", "c_uranus", "c_neptune", "c_pluto", "c_planet_x",
-            "c_ceres", "c_eris",
-        }
         GOOD_TAROT_KEYS = {
             "c_strength", "c_death", "c_empress", "c_justice",
             "c_temperance",  # Earns money based on jokers
@@ -589,10 +586,11 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                     any_buyable_joker = True  # prevents rerolling past it
                     print(f"[SHOP-EVAL] {card_key}: MUST-BUY consumable cost=${cost}",
                           flush=True)
-                elif card_set == "PLANET" and has_cons_slot and needs_upgrade:
-                    # Planet cards level up hand types — useful when we need more power
-                    mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.2) * ip
-                    print(f"[SHOP-EVAL] {card_key}: planet (needs_upgrade) cost=${cost}",
+                elif card_set == "PLANET" and has_cons_slot:
+                    # Planet cards level up hand types — always useful for scaling
+                    boost = HAND_BIAS_STRENGTH * 0.25 if needs_upgrade else HAND_BIAS_STRENGTH * 0.15
+                    mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(boost) * ip
+                    print(f"[SHOP-EVAL] {card_key}: planet cost=${cost}",
                           flush=True)
                 elif card_set == "TAROT" and has_cons_slot and card_key in GOOD_TAROT_KEYS:
                     # Good tarots — moderate priority

@@ -869,25 +869,29 @@ class Trainer:
                         from environment.action_space import (
                             _is_joker_card as _noop_ij,
                         )
-                        # Try to buy ANY affordable joker in shop
+                        # Try to buy ANY affordable card in shop (joker or consumable)
                         noop_shop = raw_state.get("shop", {}).get("cards", [])
                         noop_jokers = raw_state.get("jokers", {}).get("cards", [])
                         noop_jcount = len(noop_jokers)
                         noop_jlimit = raw_state.get("jokers", {}).get("limit", 5)
+                        noop_cons = raw_state.get("consumables", {}).get("cards", [])
+                        noop_climit = raw_state.get("consumables", {}).get("limit", 2)
                         best_noop_buy = -1
                         for ni, nc in enumerate(noop_shop):
                             nc_key = nc.get("key", "")
-                            nc_set = nc.get("set", "")
+                            nc_set = nc.get("set", "").upper()
                             nc_cost = nc.get("cost", {}).get("buy", 999)
                             print(f"[SHOP-NOOP-SCAN] slot {ni}: "
                                   f"key={nc_key} set={nc_set} cost=${nc_cost}",
                                   flush=True)
                             if nc_cost > noop_money:
                                 continue
-                            if noop_jcount >= noop_jlimit:
-                                continue
-                            if _noop_ij(nc) and best_noop_buy < 0:
-                                best_noop_buy = ni
+                            if _noop_ij(nc):
+                                if noop_jcount < noop_jlimit and best_noop_buy < 0:
+                                    best_noop_buy = ni
+                            elif nc_set in ("PLANET", "TAROT") and len(noop_cons) < noop_climit:
+                                if best_noop_buy < 0:
+                                    best_noop_buy = ni
                         if best_noop_buy >= 0:
                             bk = noop_shop[best_noop_buy].get("key", "?")
                             print(f"[SHOP] NOOP recovery: force-buying {bk} "
@@ -2208,13 +2212,25 @@ class Trainer:
                     MUST_BUY_JOKERS, BAD_JOKERS, HIGH_VALUE_JOKERS,
                     _is_non_joker_card as _end_nonj,
                 )
+                # Also check for must-buy consumables (Hermit, etc.)
+                from environment.action_space import MUST_BUY_CONSUMABLES
+                _end_cons = raw_state.get("consumables", {}).get("cards", [])
+                _end_climit = raw_state.get("consumables", {}).get("limit", 2)
                 for i, sc in enumerate(shop_cards):
-                    if _end_nonj(sc):
-                        continue
                     sc_cost = sc.get("cost", {}).get("buy", 999)
                     if sc_cost > money:
                         continue
                     sc_key = sc.get("joker_key", "") or sc.get("key", "")
+                    # Check consumables first (Hermit etc.)
+                    if _end_nonj(sc):
+                        card_key = sc.get("key", "")
+                        if card_key in MUST_BUY_CONSUMABLES and len(_end_cons) < _end_climit:
+                            self._shop_block_count = shop_block_count + 1
+                            label = sc.get("label") or card_key
+                            print(f"[SHOP] BLOCKED leaving → buying consumable {label} "
+                                  f"(cost=${sc_cost})", flush=True)
+                            return "buy", {"card": i}
+                        continue
                     sc_name = _api_key_to_name(sc_key)
                     if sc_name and sc_name in BAD_JOKERS:
                         continue
@@ -2389,8 +2405,7 @@ class Trainer:
                 await self.game.execute_action("rearrange", {"jokers": new_order})
                 return joker_names
         except Exception as e:
-            print(f"[WARN] Joker rearrange failed: {e}")
-            raise
+            print(f"[WARN] Joker rearrange failed: {e}", flush=True)
         return None
 
     async def _auto_buy_vouchers(self, raw_state: dict) -> dict:
