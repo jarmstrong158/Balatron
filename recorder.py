@@ -23,7 +23,7 @@ class RunRecorder:
     WINS_LOG = os.path.join("recordings", "wins.log")
     MAX_TEMP_SIZE_MB = 500
     NOTABLE_ANTE_THRESHOLD = 7  # Save runs that reach this ante even on loss
-    MAX_NOTABLE_FILES = 20  # Keep only the N most recent notable recordings
+    MAX_NOTABLE_FILES = 10  # Keep only the N best notable recordings
 
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
@@ -206,16 +206,24 @@ class RunRecorder:
             flush=True,
         )
 
-        # Enforce max notable files — delete oldest when over limit
+        # Enforce max notable files — delete weakest runs (lowest ante, then lowest score)
         try:
-            files = sorted(
-                Path(self.NOTABLE_DIR).glob("*.mp4"),
-                key=lambda f: f.stat().st_mtime,
-            )
-            while len(files) > self.MAX_NOTABLE_FILES:
-                oldest = files.pop(0)
-                oldest.unlink()
-                print(f"[RECORDER] Deleted old notable: {oldest.name}", flush=True)
+            import re as _re
+            files = list(Path(self.NOTABLE_DIR).glob("*.mp4"))
+            if len(files) > self.MAX_NOTABLE_FILES:
+                def _parse_quality(f):
+                    """Extract (ante, score) from filename for sorting."""
+                    m = _re.search(r"ante(\d+).*score(\d+)", f.name)
+                    if m:
+                        return (int(m.group(1)), int(m.group(2)))
+                    return (0, 0)
+                # Sort by quality ascending — weakest first
+                files.sort(key=_parse_quality)
+                while len(files) > self.MAX_NOTABLE_FILES:
+                    weakest = files.pop(0)
+                    weakest.unlink()
+                    print(f"[RECORDER] Deleted weaker notable: {weakest.name}",
+                          flush=True)
         except OSError:
             pass
 
