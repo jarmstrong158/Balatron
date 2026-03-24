@@ -85,6 +85,7 @@ class RunRecorder:
                 "-framerate", "30",
                 "-i", "desktop",
                 "-vcodec", "libx264",
+                "-pix_fmt", "yuv420p",  # Windows-compatible pixel format
                 "-crf", "23",
                 "-preset", "ultrafast",
                 "-an",  # no audio
