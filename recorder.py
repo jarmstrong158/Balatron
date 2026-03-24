@@ -84,6 +84,7 @@ class RunRecorder:
                 "-f", "gdigrab",
                 "-framerate", "30",
                 "-i", "title=Balatro",
+                "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",  # ensure even dimensions for libx264
                 "-vcodec", "libx264",
                 "-pix_fmt", "yuv420p",  # Windows-compatible pixel format
                 "-crf", "28",
