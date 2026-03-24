@@ -731,8 +731,9 @@ class Trainer:
                     ),
                     total_steps=self.global_step,
                 )
-            elif not api_won:
-                self._win_recorded = False  # reset for new run
+            # Don't reset _win_recorded here — it gets reset at GAME_OVER
+            # Resetting on api_won=False was causing wins to be missed when
+            # the API briefly clears the flag during boss blind transitions
 
             # Handle GAME_OVER — end episode, start new one
             if game_state_name == "GAME_OVER":
@@ -791,6 +792,7 @@ class Trainer:
 
                 self.reward_calc.reset()
                 self.game.reset()
+                self._win_recorded = False  # reset for next run
                 prev_raw = None
 
                 # Store terminal transition

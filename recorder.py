@@ -19,8 +19,11 @@ class RunRecorder:
 
     TEMP_DIR = os.path.join("recordings", "temp")
     WINS_DIR = os.path.join("recordings", "wins")
+    NOTABLE_DIR = os.path.join("recordings", "notable")
     WINS_LOG = os.path.join("recordings", "wins.log")
     MAX_TEMP_SIZE_MB = 500
+    NOTABLE_ANTE_THRESHOLD = 7  # Save runs that reach this ante even on loss
+    MAX_NOTABLE_FILES = 20  # Keep only the N most recent notable recordings
 
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
@@ -47,6 +50,7 @@ class RunRecorder:
         # Create directories
         os.makedirs(self.TEMP_DIR, exist_ok=True)
         os.makedirs(self.WINS_DIR, exist_ok=True)
+        os.makedirs(self.NOTABLE_DIR, exist_ok=True)
 
         # Clean up leftover temp files from crashed sessions
         self._cleanup_temp()
@@ -118,6 +122,8 @@ class RunRecorder:
 
         if won:
             self._save_win(ante_reached, final_score, checkpoint_path, total_steps)
+        elif ante_reached >= self.NOTABLE_ANTE_THRESHOLD:
+            self._save_notable(ante_reached, final_score)
         else:
             print(
                 f"[RECORDER] Run ended (Ante {ante_reached}) — recording discarded",
@@ -180,6 +186,38 @@ class RunRecorder:
             f"[RECORDER] WIN SAVED — ante{ante} — {win_path}",
             flush=True,
         )
+
+    def _save_notable(self, ante: int, score: int):
+        """Save a notable run (reached high ante but lost) for review."""
+        ts = datetime.now().strftime("%Y%m%dT%H%M%S_%f")[:-3]
+        name = f"ante{ante}_died_score{score}_{ts}.mp4"
+        path = os.path.join(self.NOTABLE_DIR, name)
+
+        try:
+            shutil.move(self._temp_path, path)
+        except OSError as e:
+            print(f"[RECORDER] Failed to save notable recording: {e}", flush=True)
+            self._delete_temp()
+            return
+
+        self._temp_path = None
+        print(
+            f"[RECORDER] NOTABLE RUN SAVED — Ante {ante} (died) — {path}",
+            flush=True,
+        )
+
+        # Enforce max notable files — delete oldest when over limit
+        try:
+            files = sorted(
+                Path(self.NOTABLE_DIR).glob("*.mp4"),
+                key=lambda f: f.stat().st_mtime,
+            )
+            while len(files) > self.MAX_NOTABLE_FILES:
+                oldest = files.pop(0)
+                oldest.unlink()
+                print(f"[RECORDER] Deleted old notable: {oldest.name}", flush=True)
+        except OSError:
+            pass
 
     def _stop_ffmpeg(self):
         """Cleanly stop the ffmpeg process."""
