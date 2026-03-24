@@ -82,7 +82,7 @@ class RunRecorder:
             cmd = [
                 "ffmpeg",
                 "-f", "gdigrab",
-                "-framerate", "15",
+                "-framerate", "30",
                 "-i", "title=Balatro",
                 "-vcodec", "libx264",
                 "-pix_fmt", "yuv420p",  # Windows-compatible pixel format
