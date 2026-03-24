@@ -2611,8 +2611,14 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
     if boss_name == "The Pillar":
         boss_pillar = True
 
-    if boss_name:
+    # Only log actual boss blinds (not Small/Big Blind)
+    from environment.game_state import BOSS_BLIND_INFO as _BBI
+    is_actual_boss = boss_name in _BBI
+    if boss_name and is_actual_boss:
         print(f"[BOSS] {boss_name} detected", flush=True)
+    elif boss_name and boss_name not in ("Small Blind", "Big Blind"):
+        # Unknown boss — log for diagnosis
+        print(f"[BOSS] Unknown blind: {boss_name}", flush=True)
 
     # ================================================================
     # SCALING JOKER AWARENESS — avoid resetting accumulated value
