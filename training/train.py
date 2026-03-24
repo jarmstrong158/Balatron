@@ -721,19 +721,8 @@ class Trainer:
                 print(f"[WIN] Won flag detected in state={game_state_name} "
                       f"ante={ante}", flush=True)
                 self.episode_tracker.end_episode(True, raw_state)
-                self.recorder.end_run(
-                    won=True,
-                    ante_reached=ante,
-                    final_score=int(raw_state.get("round", {}).get("chips", 0)),
-                    checkpoint_path=os.path.join(
-                        self.config.checkpoint_dir,
-                        f"balatron_phase{self.config.phase}_step{self.global_step}.pt",
-                    ),
-                    total_steps=self.global_step,
-                )
-            # Don't reset _win_recorded here — it gets reset at GAME_OVER
-            # Resetting on api_won=False was causing wins to be missed when
-            # the API briefly clears the flag during boss blind transitions
+                # DON'T end recording here — let GAME_OVER handle it so the
+                # winning hand, scoring animation, and win screen get captured
 
             # Handle GAME_OVER — end episode, start new one
             if game_state_name == "GAME_OVER":
@@ -778,17 +767,20 @@ class Trainer:
                 if not getattr(self, '_win_recorded', False):
                     self.episode_tracker.end_episode(won, raw_state)
                 # End recording — save if won, discard if lost
-                if not already_recorded:
-                    self.recorder.end_run(
-                        won=won,
-                        ante_reached=ante,
-                        final_score=int(raw_state.get("round", {}).get("chips", 0)),
-                        checkpoint_path=os.path.join(
-                            self.config.checkpoint_dir,
-                            f"balatron_phase{self.config.phase}_step{self.global_step}.pt",
-                        ),
-                        total_steps=self.global_step,
-                    )
+                # Wait a moment on wins so the win screen / final scoring
+                # animation gets captured before ffmpeg stops
+                if won:
+                    await asyncio.sleep(3.0)
+                self.recorder.end_run(
+                    won=won,
+                    ante_reached=ante,
+                    final_score=int(raw_state.get("round", {}).get("chips", 0)),
+                    checkpoint_path=os.path.join(
+                        self.config.checkpoint_dir,
+                        f"balatron_phase{self.config.phase}_step{self.global_step}.pt",
+                    ),
+                    total_steps=self.global_step,
+                )
 
                 self.reward_calc.reset()
                 self.game.reset()
