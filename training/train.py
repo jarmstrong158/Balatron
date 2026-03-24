@@ -713,7 +713,7 @@ class Trainer:
             # won=True after beating ante 8's small/big blind, before the
             # boss is beaten.
             api_won = raw_state.get("won", False)
-            safe_won_states = {"SHOP", "BLIND_SELECT", "ROUND_EVAL"}
+            safe_won_states = {"SHOP", "BLIND_SELECT", "ROUND_EVAL", "SELECTING_HAND", "GAME_OVER"}
             if (api_won and not getattr(self, '_win_recorded', False)
                     and game_state_name in safe_won_states):
                 self._win_recorded = True
@@ -738,11 +738,13 @@ class Trainer:
             if game_state_name == "GAME_OVER":
                 self.joker_logger.round_end()  # flush any pending round data
                 ante = raw_state.get("ante_num", 1)
-                won = ante > 8
+                api_won_flag = raw_state.get("won", False)
                 already_recorded = getattr(self, '_win_recorded', False)
+                # Win if: ante >= 8 AND api says won, OR ante > 8 (survived past 8)
+                won = (ante >= 8 and api_won_flag) or ante > 8 or already_recorded
                 print(f"[GAME_OVER] ante={ante} won={won} "
                       f"already_recorded={already_recorded} "
-                      f"api_won={raw_state.get('won', False)}", flush=True)
+                      f"api_won={api_won_flag}", flush=True)
 
                 # Append to game history log (rolling buffer)
                 try:
