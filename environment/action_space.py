@@ -486,6 +486,12 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
         num_jokers = len(joker_cards)
         has_joker_slot = num_jokers < JOKER_SLOTS
 
+        # Detect owned joker synergies that affect shop decisions
+        has_hologram = any(
+            (_api_key_to_name(j.get("key", "")) or "") == "Hologram"
+            for j in joker_cards
+        )
+
         # Interest awareness: $1 per $5 held, max $5 at $25
         current_interest = min(money // 5, 5)
 
@@ -822,9 +828,16 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             ip = _interest_penalty(money, cost)
             pack_key = card.get("key", "")
 
-            # Standard packs add cards to deck — dilutes draw odds. Block them.
+            # Standard packs add cards to deck — normally low value (dilutes draw odds)
+            # BUT: Hologram gains +0.25 xMult per card added → standard packs become amazing
             if "standard" in pack_key:
-                mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = 0.0
+                if has_hologram:
+                    # Hologram synergy: each card added = +0.25 xMult, huge value
+                    mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.5) * ip
+                    any_good_pack = True
+                else:
+                    # No Hologram — standard packs are low priority but not blocked
+                    mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.3) * ip
                 continue
 
             # If scoring jokers are available in shop WITH open slots, penalize packs
