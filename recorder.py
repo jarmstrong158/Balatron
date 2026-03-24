@@ -78,15 +78,15 @@ class RunRecorder:
         self._run_start_time = time.monotonic()
 
         try:
-            # Full desktop capture, no audio, ultrafast preset
+            # Capture the Balatro window directly by title
             cmd = [
                 "ffmpeg",
                 "-f", "gdigrab",
-                "-framerate", "30",
-                "-i", "desktop",
+                "-framerate", "15",
+                "-i", "title=Balatro",
                 "-vcodec", "libx264",
                 "-pix_fmt", "yuv420p",  # Windows-compatible pixel format
-                "-crf", "23",
+                "-crf", "28",
                 "-preset", "ultrafast",
                 "-an",  # no audio
                 "-y",   # overwrite
