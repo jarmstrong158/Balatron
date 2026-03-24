@@ -456,17 +456,40 @@ class PPOTrainer:
             self.network.load_state_dict(checkpoint["network_state_dict"])
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         except RuntimeError as e:
-            # State vector size changed — filter out shape-mismatched params and load the rest
-            print(f"[WARN] Checkpoint shape mismatch, loading compatible weights only: {e}")
+            # State vector size changed — pad or trim mismatched params
+            print(f"[WARN] Checkpoint shape mismatch, migrating weights: {e}")
             saved_state = checkpoint["network_state_dict"]
             current_state = self.network.state_dict()
-            compatible = {
-                k: v for k, v in saved_state.items()
-                if k in current_state and v.shape == current_state[k].shape
-            }
-            skipped = set(saved_state.keys()) - set(compatible.keys())
-            if skipped:
-                print(f"[WARN] Skipped {len(skipped)} params with shape mismatch: {skipped}")
+            compatible = {}
+            padded_keys = []
+            skipped_keys = []
+            for k, v in saved_state.items():
+                if k not in current_state:
+                    skipped_keys.append(k)
+                    continue
+                target_shape = current_state[k].shape
+                if v.shape == target_shape:
+                    compatible[k] = v
+                elif len(v.shape) == 2 and len(target_shape) == 2 and v.shape[0] == target_shape[0]:
+                    # Input dimension grew — zero-pad columns (new state features)
+                    import torch
+                    padded = torch.zeros(target_shape, dtype=v.dtype, device=v.device)
+                    padded[:, :v.shape[1]] = v
+                    compatible[k] = padded
+                    padded_keys.append(f"{k}: {v.shape} → {target_shape}")
+                elif len(v.shape) == 1 and len(target_shape) == 1 and v.shape[0] < target_shape[0]:
+                    # Bias grew — zero-pad
+                    import torch
+                    padded = torch.zeros(target_shape, dtype=v.dtype, device=v.device)
+                    padded[:v.shape[0]] = v
+                    compatible[k] = padded
+                    padded_keys.append(f"{k}: {v.shape} → {target_shape}")
+                else:
+                    skipped_keys.append(k)
+            if padded_keys:
+                print(f"[WARN] Zero-padded {len(padded_keys)} params: {padded_keys}")
+            if skipped_keys:
+                print(f"[WARN] Skipped {len(skipped_keys)} params: {skipped_keys}")
             current_state.update(compatible)
             self.network.load_state_dict(current_state)
             # Don't load optimizer — references old parameter shapes

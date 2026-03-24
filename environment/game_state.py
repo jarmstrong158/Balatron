@@ -31,7 +31,7 @@ from environment.hand_eval import assess_strategy, HAND_EVAL_FEATURES
 API_URL = "http://127.0.0.1:12346"
 
 # State vector section sizes
-GAME_META_SIZE = 42  # 16 original + 22 boss blind + 4 reroll value
+GAME_META_SIZE = 45  # 16 original + 22 boss blind + 4 reroll value + 3 phase weights
 HAND_LEVELS_SIZE = 79       # 13 × 3 (level, chips, mult) + 13 play freq + 26 ROI deltas + 1 best target
 DECK_COMP_SIZE = 61          # 52 rank×suit + 9 enhancement counts
 VOUCHER_SIZE = 32
@@ -1087,6 +1087,14 @@ class GameStateManager:
         #    High when: open slots AND can afford rerolls. Zero when: full slots or broke.
         reroll_efficiency = min(affordable_rerolls, open_joker_slots)
         vec[offset + 41] = _clamp_norm(reroll_efficiency, 5.0)
+
+        # Phase weights — explicit signal for strategic phase awareness
+        from environment.reward import compute_phase_weights
+        ante = raw.get("ante_num", 1)
+        w_stab, w_scale, w_exec = compute_phase_weights(ante)
+        vec[offset + 42] = w_stab    # Stabilize weight (high antes 1-2)
+        vec[offset + 43] = w_scale   # Scale weight (high antes 3-5)
+        vec[offset + 44] = w_exec    # Execute weight (high antes 6-8)
 
         return offset + GAME_META_SIZE
 

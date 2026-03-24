@@ -59,6 +59,39 @@ REWARD_SELL_PENALTY_SCALE = 0.3  # Multiplier on normalized contribution (0-1 ra
 # Penalty for wasted actions
 REWARD_INVALID_ACTION = -0.1     # Attempted an action that failed/was invalid
 
+# Phase-aware reward constants
+REWARD_XMULT_ACQUIRE_FIXED = 0.3      # Acquiring a fixed xMult joker
+REWARD_XMULT_ACQUIRE_SCALING = 0.5    # Acquiring a scaling xMult joker (rarer, more impactful)
+REWARD_GOLD_HOARD_PENALTY = -0.02     # Per-dollar penalty above reroll buffer (Scale phase)
+REWARD_GOLD_HOARD_BUFFER = 10         # Dollar threshold for hoarding penalty
+
+
+# ============================================================
+# Phase Weight Functions
+# ============================================================
+
+def _sigmoid_ramp(ante: float, center: float, width: float = 0.8) -> float:
+    """Smooth sigmoid transition centered at `center` ante."""
+    x = (ante - center) / width
+    x = max(min(x, 10.0), -10.0)  # clamp to avoid overflow
+    return 1.0 / (1.0 + math.exp(-x))
+
+
+def compute_phase_weights(ante: int) -> tuple[float, float, float]:
+    """Returns (w_stabilize, w_scale, w_execute) for the given ante.
+
+    Three phases with smooth sigmoid transitions:
+    - Stabilize (antes 1-2): Survive, acquire functional joker base
+    - Scale (antes 3-5): Spend aggressively on scaling/xMult jokers
+    - Execute (antes 6-8): Optimize plays, stop experimenting
+    """
+    ramp_early = _sigmoid_ramp(ante, 2.5, 0.8)
+    ramp_late = _sigmoid_ramp(ante, 5.5, 0.8)
+    w_stabilize = 1.0 - ramp_early
+    w_scale = ramp_early * (1.0 - ramp_late)
+    w_execute = ramp_late
+    return (w_stabilize, w_scale, w_execute)
+
 
 # ============================================================
 # Reward Calculator
@@ -158,6 +191,13 @@ class RewardCalculator:
         # Sell penalty — penalize selling high-contribution jokers
         if action == "sell":
             reward += self._check_sell_penalty(prev_state, new_state)
+
+        # xMult acquisition bonus (phase-scaled)
+        reward += self._check_xmult_acquisition(prev_state, new_state)
+
+        # Gold hoarding penalty (Scale phase only)
+        if not skip_economy:
+            reward += self._check_gold_hoarding(new_state)
 
         self._sync_state(new_state, scaling_values, joker_contributions)
         self._run_reward += reward
@@ -292,9 +332,13 @@ class RewardCalculator:
 
         # Interest bonus: reward maintaining money in $5 increments
         # Balatro gives $1 interest per $5 held, up to $5 max (at $25)
+        # Dampened during Scale phase — stop rewarding gold hoarding
         if new_money >= 5:
             interest_tiers = min(new_money // 5, 5)
-            reward += interest_tiers * REWARD_INTEREST_THRESHOLD
+            ante = new_state.get("ante_num", 1)
+            _, w_scale, _ = compute_phase_weights(ante)
+            interest_damping = 1.0 - 0.7 * w_scale  # 30% of normal at peak Scale
+            reward += interest_tiers * REWARD_INTEREST_THRESHOLD * interest_damping
 
         return reward
 
@@ -389,7 +433,80 @@ class RewardCalculator:
             penalty = max(penalty, REWARD_SELL_PENALTY_MAX)  # cap
             total_penalty += penalty
 
+        # Amplify during Execute phase — discourage late-game experimentation
+        ante = new_state.get("ante_num", 1)
+        _, _, w_execute = compute_phase_weights(ante)
+        total_penalty *= (1.0 + w_execute)  # up to 2× penalty in Execute
+
         return total_penalty
+
+    def _check_xmult_acquisition(self, prev_state: dict, new_state: dict) -> float:
+        """Reward acquiring xMult jokers, scaled by phase weight.
+
+        xMult jokers are the strongest category — multiplicative scaling
+        compounds with everything else. Identified via data/jokers.py schema:
+        schema.get("xmult") or schema.get("xmult_scaling").
+        """
+        prev_jokers = prev_state.get("jokers", {}).get("cards", [])
+        new_jokers = new_state.get("jokers", {}).get("cards", [])
+
+        prev_ids = {j.get("id") for j in prev_jokers if j.get("id") is not None}
+        new_ids = {j.get("id") for j in new_jokers if j.get("id") is not None}
+
+        acquired_ids = new_ids - prev_ids
+        if not acquired_ids:
+            return 0.0
+
+        from data.jokers import JOKERS
+        from environment.hand_eval import _api_key_to_name
+
+        reward = 0.0
+        for jc in new_jokers:
+            if jc.get("id") not in acquired_ids:
+                continue
+            key = jc.get("key", "")
+            name = _api_key_to_name(key)
+            if not name or name not in JOKERS:
+                continue
+            schema = JOKERS[name]
+
+            if schema.get("xmult_scaling"):
+                reward += REWARD_XMULT_ACQUIRE_SCALING
+            elif schema.get("xmult"):
+                reward += REWARD_XMULT_ACQUIRE_FIXED
+
+        if reward == 0.0:
+            return 0.0
+
+        # Scale by phase — xmult is most valuable in Scale phase
+        # but always worth at least 30% even outside it
+        ante = new_state.get("ante_num", 1)
+        _, w_scale, _ = compute_phase_weights(ante)
+        phase_multiplier = 0.3 + 0.7 * w_scale
+        return reward * phase_multiplier
+
+    def _check_gold_hoarding(self, new_state: dict) -> float:
+        """Penalize holding excess gold during Scale phase (antes 3-5).
+
+        Buffer = max(reroll_cost * 2, 10). Gold above this threshold
+        incurs a small per-dollar penalty scaled by w_scale.
+        """
+        ante = new_state.get("ante_num", 1)
+        _, w_scale, _ = compute_phase_weights(ante)
+        if w_scale < 0.1:
+            return 0.0  # negligible outside Scale phase
+
+        money = new_state.get("money", 0)
+        reroll_cost = new_state.get("round", {}).get("reroll_cost", 5)
+        buffer = max(reroll_cost * 2, REWARD_GOLD_HOARD_BUFFER)
+
+        excess = money - buffer
+        if excess <= 0:
+            return 0.0
+
+        # Gradual penalty: small per-dollar, capped
+        penalty = excess * REWARD_GOLD_HOARD_PENALTY * w_scale
+        return max(penalty, -0.15)  # hard floor
 
     def _check_scaling_growth(self, scaling_values: dict[int, float]) -> float:
         """Reward growth in scaling joker values."""
