@@ -3621,9 +3621,25 @@ def _estimate_joker_scoring_for_type(hand_type: str, jokers: list[dict],
                     bonus_mult += 6.0  # estimate avg low rank * 2
                     continue
                 else:
-                    # Baron, Shoot the Moon — estimate ~1 matching held card
+                    # Baron, Shoot the Moon — estimate held cards from deck
+                    target_ranks_est = _normalize_trigger_ranks(
+                        schema.get("trigger_ranks") or [])
+                    # Estimate: in an 8-card hand with ~52 cards, expect
+                    # ~(4/52)*8 ≈ 0.6 of a specific rank in hand.
+                    # With 4 Kings in a 52-card deck drawn 8: ~2 held on avg
+                    # (some played, some held). Conservative: deck_count * 0.4
+                    if gamestate and target_ranks_est:
+                        deck = gamestate.get("deck", {}).get("cards", [])
+                        if deck:
+                            matching = sum(1 for c in deck
+                                          if card_rank(c) in target_ranks_est)
+                            # Expect ~40% of matching cards to be held (not played)
+                            trigger_count = max(1, int(matching * 0.4))
+                        else:
+                            trigger_count = 2  # default: assume 2 held
+                    else:
+                        trigger_count = 2
                     triggered = True
-                    trigger_count = 1
             elif trigger == "per_specific_joker_present":
                 if uncommon_count > 0:
                     triggered = True
