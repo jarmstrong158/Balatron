@@ -1678,6 +1678,9 @@ class Trainer:
                 "SELLING_CARD",
                 # Blind selection transitions
                 "SKIP_BLIND",
+                # Generic unknown — mod returns this during win screen,
+                # run summary, and other unmapped transitions
+                "UNKNOWN",
             }
             if state in TRANSIENT_STATES:
                 # These resolve on their own — give extra time
