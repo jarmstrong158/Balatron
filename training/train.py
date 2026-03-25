@@ -551,6 +551,20 @@ class Trainer:
         """
         print("[CRASH-RECOVERY] Balatro appears stuck — restarting...", flush=True)
 
+        # Save recording before killing everything — crash runs at ante 7+
+        # are still worth keeping for review
+        try:
+            ante = getattr(self, '_current_ante', 1)
+            score = getattr(self, '_current_score', 0)
+            won = getattr(self, '_win_recorded', False)
+            self.recorder.end_run(
+                won=won,
+                ante_reached=ante,
+                final_score=score,
+            )
+        except Exception:
+            pass  # never block restart for recording
+
         # Kill existing Balatro process
         try:
             subprocess.run(
@@ -1054,6 +1068,8 @@ class Trainer:
 
             # Track episode
             ante = raw_state.get("ante_num", 1)
+            self._current_ante = ante
+            self._current_score = int(raw_state.get("round", {}).get("chips", 0))
             self.episode_tracker.step(reward, ante, raw_state)
 
             # Store transition
