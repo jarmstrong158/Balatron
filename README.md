@@ -1,3 +1,6 @@
+[![Tests](https://github.com/jarmstrong158/Balatron/actions/workflows/tests.yml/badge.svg)](https://github.com/jarmstrong158/Balatron/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 # Balatron
 
 A reinforcement learning agent that plays [Balatro](https://www.playbalatro.com/) autonomously, combining deep domain knowledge with PPO (Proximal Policy Optimization) to master the game's complex scoring mechanics, economy management, and joker synergy systems.
