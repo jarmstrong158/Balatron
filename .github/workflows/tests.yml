@@ -18,7 +18,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pytest
+          pip install pytest numpy
           pip install -r requirements.txt || true
 
       - name: Run tests
