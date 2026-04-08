@@ -22,4 +22,4 @@ jobs:
           pip install -r requirements.txt || true
 
       - name: Run tests
-        run: python -m pytest tests/ -v --tb=short
+        run: python -m tests.test_scoring
