@@ -1010,7 +1010,10 @@ class GameStateManager:
         # Estimate: current money + interest + blind payout + joker passive income.
         # Interest: $1 per $5 held, capped at $5 (or $10/$25 with vouchers).
         interest_cap = 5  # default cap
-        vouchers = raw.get("vouchers", {}).get("owned", [])
+        # Owned vouchers live under "used_vouchers" (a flat list of keys), the
+        # same field _encode_vouchers reads. raw["vouchers"]["owned"] does not
+        # exist, so interest_cap never picked up money_tree / seed_money.
+        vouchers = raw.get("used_vouchers", [])
         if isinstance(vouchers, list):
             v_set = set(vouchers)
         else:
