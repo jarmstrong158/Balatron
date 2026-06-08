@@ -743,27 +743,31 @@ class Trainer:
                 # by _win_reward_stored so GAME_OVER won't double-count it.
                 if not getattr(self, '_win_reward_stored', False):
                     win_reward = self.reward_calc.terminal_win_reward(raw_state)
-                    last = getattr(self, '_last_transition', None)
-                    if last is not None:
-                        (l_vec, l_action, l_logprob, l_value,
-                         l_mask, l_head) = last
-                    else:
-                        l_vec = np.zeros(STATE_VECTOR_SIZE, dtype=np.float32)
-                        l_action = np.zeros(14, dtype=np.float32)
-                        l_logprob, l_value = 0.0, 0.0
-                        l_mask = np.zeros(ACTION_HEAD_SIZE, dtype=np.float32)
-                        l_head = game_state_name
-                    self.ppo.store_transition(
-                        l_vec, l_action, l_logprob, win_reward, l_value,
-                        True, l_mask, l_head,
+                    # Credit the win to the real decision that won the run by
+                    # amending the last stored transition in place (set
+                    # done=True, add the reward). Appending a fresh done=True
+                    # transition would make GAE train only the value head on a
+                    # phantom state, never the policy on the winning action.
+                    amended = self.ppo.amend_last_transition(
+                        reward_delta=win_reward, done=True,
                     )
-                    self.global_step += 1
+                    if not amended:
+                        # No real transition yet this rollout — fall back to a
+                        # placeholder so the win reward isn't lost.
+                        self.ppo.store_transition(
+                            np.zeros(STATE_VECTOR_SIZE, dtype=np.float32),
+                            np.zeros(14, dtype=np.float32),
+                            0.0, win_reward, 0.0, True,
+                            np.zeros(ACTION_HEAD_SIZE, dtype=np.float32),
+                            game_state_name,
+                        )
+                        self.global_step += 1
                     self._win_reward_stored = True
                     # Consume the last real transition so the GAME_OVER block
-                    # below can't store a second terminal from the same one.
+                    # below can't credit a second terminal from the same one.
                     self._last_transition = None
-                    print(f"[WIN] Stored terminal win reward "
-                          f"{win_reward:+.2f} to PPO buffer", flush=True)
+                    print(f"[WIN] Credited terminal win reward "
+                          f"{win_reward:+.2f} to last transition", flush=True)
                 # DON'T end recording here — let GAME_OVER handle it so the
                 # winning hand, scoring animation, and win screen get captured
 
@@ -838,28 +842,28 @@ class Trainer:
                 self._win_reward_stored = False  # reset for next run
                 prev_raw = None
 
-                # Store terminal transition. Attach the terminal reward to the
-                # actual last state/action the agent took rather than a zeroed
-                # placeholder, so the reward is credited to a real decision.
-                # Skip entirely if the won-flag fallback already stored a
-                # terminal from the same last transition — otherwise we'd push
-                # two done=True transitions for one episode end.
+                # Credit the terminal reward to the real decision that ended
+                # the run by amending the last stored transition in place (set
+                # done=True, add the reward) rather than appending a phantom
+                # done=True step, which GAE would only use to train the value
+                # head. Skip entirely if the won-flag fallback already amended
+                # the last transition — otherwise we'd double-count the end.
                 if not win_already_stored:
-                    last = getattr(self, '_last_transition', None)
-                    if last is not None:
-                        (t_vec, t_action, t_logprob, t_value,
-                         t_mask, t_head) = last
-                    else:
-                        t_vec = np.zeros(STATE_VECTOR_SIZE, dtype=np.float32)
-                        t_action = np.zeros(14, dtype=np.float32)
-                        t_logprob, t_value = 0.0, 0.0
-                        t_mask = np.zeros(ACTION_HEAD_SIZE, dtype=np.float32)
-                        t_head = "GAME_OVER"
-                    self.ppo.store_transition(
-                        t_vec, t_action, t_logprob, reward, t_value, True,
-                        t_mask, t_head,
+                    amended = self.ppo.amend_last_transition(
+                        reward_delta=reward, done=True,
                     )
-                    self.global_step += 1
+                    if not amended:
+                        # Buffer empty (terminal on the first step of a fresh
+                        # rollout) — no real decision to credit, so fall back
+                        # to a placeholder terminal transition.
+                        self.ppo.store_transition(
+                            np.zeros(STATE_VECTOR_SIZE, dtype=np.float32),
+                            np.zeros(14, dtype=np.float32),
+                            0.0, reward, 0.0, True,
+                            np.zeros(ACTION_HEAD_SIZE, dtype=np.float32),
+                            "GAME_OVER",
+                        )
+                        self.global_step += 1
                 self._last_transition = None
                 last_done = True
 

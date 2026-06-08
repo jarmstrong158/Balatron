@@ -115,6 +115,28 @@ class RolloutBuffer:
         if self.pos >= self.capacity:
             self.full = True
 
+    def amend_last(self, reward_delta: float = 0.0,
+                   done: Optional[bool] = None) -> bool:
+        """Amend the most recently added transition in place.
+
+        Adds `reward_delta` to its stored reward and, if `done` is given,
+        overrides its done flag. Used to credit a terminal reward to the
+        real decision that produced it instead of appending a separate
+        done=True transition — GAE would otherwise treat the appended
+        transition as a phantom and only train the value head on it, never
+        crediting the policy for the action that actually ended the episode.
+
+        Returns True if a transition was amended, False if the buffer is
+        empty (no real transition to amend yet).
+        """
+        if self.pos == 0:
+            return False
+        idx = self.pos - 1
+        self.rewards[idx] += reward_delta
+        if done is not None:
+            self.dones[idx] = float(done)
+        return True
+
     def compute_gae(self, last_value: float, last_done: bool,
                     gamma: float = 0.99, gae_lambda: float = 0.95):
         """Compute Generalized Advantage Estimation.
@@ -246,6 +268,18 @@ class PPOTrainer:
         head_idx = get_head_index(game_state)
         self.buffer.add(state, action, log_prob, reward, value, done, mask, head_idx)
         self.total_steps += 1
+
+    def amend_last_transition(self, reward_delta: float = 0.0,
+                              done: Optional[bool] = None) -> bool:
+        """Amend the last stored transition in the rollout buffer.
+
+        Adds `reward_delta` to its reward and optionally overrides its done
+        flag. Lets terminal rewards be credited to the real decision that
+        caused them rather than an appended phantom transition (which GAE
+        only uses to train the value head). Returns True if a transition was
+        amended, False if the buffer is empty.
+        """
+        return self.buffer.amend_last(reward_delta, done)
 
     def update(self, last_value: float, last_done: bool) -> dict:
         """Run PPO update on collected rollout.
