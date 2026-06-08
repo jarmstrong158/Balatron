@@ -879,7 +879,19 @@ class Trainer:
             try:
                 state_vec = await self.game.step()
             except Exception:
-                # API dropped (e.g. menu escape killed server) — wait and retry
+                # API dropped (e.g. menu escape killed server) — wait and retry.
+                # Count consecutive silent skips so a persistent failure trips
+                # recovery instead of looping forever before the stuck-detector.
+                self._silent_skip_count = getattr(self, '_silent_skip_count', 0) + 1
+                if self._silent_skip_count >= 40:
+                    print(f"[STUCK] {self._silent_skip_count} consecutive "
+                          f"state-encode failures — restarting Balatro", flush=True)
+                    self._silent_skip_count = 0
+                    await self._restart_balatro()
+                    self.reward_calc.reset()
+                    self.game.reset()
+                    prev_raw = None
+                    continue
                 await asyncio.sleep(0.3)
                 continue
 
@@ -910,9 +922,26 @@ class Trainer:
 
             # Check if any actions are valid
             if action_mask[:14].sum() == 0:
-                # No valid actions — skip this step
+                # No valid actions — skip this step. Count consecutive skips so
+                # a wedged state the agent can't act in (e.g. a shop with an
+                # all-zero mask) trips recovery instead of looping forever past
+                # the spin/stuck detectors below.
+                self._silent_skip_count = getattr(self, '_silent_skip_count', 0) + 1
+                if self._silent_skip_count >= 40:
+                    print(f"[STUCK] {self._silent_skip_count} steps with no valid "
+                          f"action in {game_state_name} — restarting Balatro",
+                          flush=True)
+                    self._silent_skip_count = 0
+                    await self._restart_balatro()
+                    self.reward_calc.reset()
+                    self.game.reset()
+                    prev_raw = None
+                    continue
                 prev_raw = raw_state
                 continue
+
+            # Valid action available — clear the silent-skip watchdog.
+            self._silent_skip_count = 0
 
             # Get head index
             head_idx = get_head_index(game_state_name)
