@@ -832,14 +832,24 @@ class Trainer:
                 self._win_reward_stored = False  # reset for next run
                 prev_raw = None
 
-                # Store terminal transition
-                state_vec = np.zeros(STATE_VECTOR_SIZE, dtype=np.float32)
+                # Store terminal transition. Attach the terminal reward to the
+                # actual last state/action the agent took rather than a zeroed
+                # placeholder, so the reward is credited to a real decision.
+                last = getattr(self, '_last_transition', None)
+                if last is not None:
+                    (t_vec, t_action, t_logprob, t_value,
+                     t_mask, t_head) = last
+                else:
+                    t_vec = np.zeros(STATE_VECTOR_SIZE, dtype=np.float32)
+                    t_action = np.zeros(14, dtype=np.float32)
+                    t_logprob, t_value = 0.0, 0.0
+                    t_mask = np.zeros(ACTION_HEAD_SIZE, dtype=np.float32)
+                    t_head = "GAME_OVER"
                 self.ppo.store_transition(
-                    state_vec, np.zeros(14, dtype=np.float32),
-                    0.0, reward, 0.0, True,
-                    np.zeros(ACTION_HEAD_SIZE, dtype=np.float32),
-                    "GAME_OVER",
+                    t_vec, t_action, t_logprob, reward, t_value, True,
+                    t_mask, t_head,
                 )
+                self._last_transition = None
                 self.global_step += 1
                 last_done = True
 
