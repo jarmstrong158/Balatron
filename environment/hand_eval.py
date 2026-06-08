@@ -3629,7 +3629,13 @@ def _estimate_joker_scoring_for_type(hand_type: str, jokers: list[dict],
                     # With 4 Kings in a 52-card deck drawn 8: ~2 held on avg
                     # (some played, some held). Conservative: deck_count * 0.4
                     if gamestate and target_ranks_est:
-                        deck = gamestate.get("deck", {}).get("cards", [])
+                        # Deck cards live under gamestate["cards"]["cards"] (as
+                        # used everywhere else). gamestate["deck"] is the deck
+                        # *name* string in some states, so the old key crashed
+                        # with 'str' object has no attribute 'get'. Guard the
+                        # type too — the API occasionally returns non-dicts.
+                        _cards_obj = gamestate.get("cards", {})
+                        deck = _cards_obj.get("cards", []) if isinstance(_cards_obj, dict) else []
                         if deck:
                             matching = sum(1 for c in deck
                                           if card_rank(c) in target_ranks_est)
