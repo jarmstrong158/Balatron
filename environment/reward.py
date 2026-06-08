@@ -226,8 +226,9 @@ class RewardCalculator:
         reward = 0.0
         ante = new_state.get("ante_num", self._prev_ante)
 
-        # Check if this was a win (cleared Ante 8)
-        if ante > 8:
+        # Check if this was a win (cleared Ante 8). Use >= 8 to match the
+        # win condition in train.py (clearing ante 8 == reaching ante 8's boss).
+        if ante >= 8:
             reward += REWARD_GAME_WIN
             # Phase 2: check for naneinf
             if self.phase == 2:
@@ -237,6 +238,18 @@ class RewardCalculator:
             reward += REWARD_GAME_LOSS
             reward += ante * REWARD_PER_ANTE_SURVIVED
 
+        return reward
+
+    def terminal_win_reward(self, state: dict) -> float:
+        """Win reward for a cleared run.
+
+        Used as a fallback by train.py when the win screen is auto-dismissed
+        by the Lua mod and GAME_OVER never fires, so the win reward would
+        otherwise never reach the PPO buffer.
+        """
+        reward = REWARD_GAME_WIN
+        if self.phase == 2:
+            reward += self._check_naneinf(state)
         return reward
 
     def _check_naneinf(self, state: dict) -> float:
@@ -621,7 +634,7 @@ class ConfigurableRewardCalculator(RewardCalculator):
         ante = new_state.get("ante_num", self._prev_ante)
         w = self._weights
 
-        if ante > 8:
+        if ante >= 8:
             reward += w.game_win
             if self.phase == 2:
                 reward += self._check_naneinf(new_state)
@@ -629,6 +642,12 @@ class ConfigurableRewardCalculator(RewardCalculator):
             reward += w.game_loss
             reward += ante * w.per_ante_survived
 
+        return reward
+
+    def terminal_win_reward(self, state: dict) -> float:
+        reward = self._weights.game_win
+        if self.phase == 2:
+            reward += self._check_naneinf(state)
         return reward
 
     def _check_ante_cleared(self, prev_state: dict, new_state: dict) -> float:

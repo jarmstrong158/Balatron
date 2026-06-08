@@ -735,6 +735,32 @@ class Trainer:
                 print(f"[WIN] Won flag detected in state={game_state_name} "
                       f"ante={ante}", flush=True)
                 self.episode_tracker.end_episode(True, raw_state)
+
+                # Fallback: the Lua mod auto-dismisses the win screen, so
+                # GAME_OVER may never fire and the win reward would never reach
+                # the PPO buffer. Push a terminal transition carrying the win
+                # reward here, attached to the last real state/action. Guarded
+                # by _win_reward_stored so GAME_OVER won't double-count it.
+                if not getattr(self, '_win_reward_stored', False):
+                    win_reward = self.reward_calc.terminal_win_reward(raw_state)
+                    last = getattr(self, '_last_transition', None)
+                    if last is not None:
+                        (l_vec, l_action, l_logprob, l_value,
+                         l_mask, l_head) = last
+                    else:
+                        l_vec = np.zeros(STATE_VECTOR_SIZE, dtype=np.float32)
+                        l_action = np.zeros(14, dtype=np.float32)
+                        l_logprob, l_value = 0.0, 0.0
+                        l_mask = np.zeros(ACTION_HEAD_SIZE, dtype=np.float32)
+                        l_head = game_state_name
+                    self.ppo.store_transition(
+                        l_vec, l_action, l_logprob, win_reward, l_value,
+                        True, l_mask, l_head,
+                    )
+                    self.global_step += 1
+                    self._win_reward_stored = True
+                    print(f"[WIN] Stored terminal win reward "
+                          f"{win_reward:+.2f} to PPO buffer", flush=True)
                 # DON'T end recording here — let GAME_OVER handle it so the
                 # winning hand, scoring animation, and win screen get captured
 
@@ -776,6 +802,10 @@ class Trainer:
 
                 # Compute terminal reward
                 reward = self.reward_calc.step(prev_raw, raw_state)
+                # If the win reward was already pushed to the buffer via the
+                # won-flag fallback above, don't count it again here.
+                if getattr(self, '_win_reward_stored', False):
+                    reward = 0.0
                 self.episode_tracker.step(reward, ante, raw_state)
                 # Only call end_episode if win wasn't already recorded
                 if not getattr(self, '_win_recorded', False):
@@ -799,6 +829,7 @@ class Trainer:
                 self.reward_calc.reset()
                 self.game.reset()
                 self._win_recorded = False  # reset for next run
+                self._win_reward_stored = False  # reset for next run
                 prev_raw = None
 
                 # Store terminal transition
@@ -1076,6 +1107,13 @@ class Trainer:
             self.ppo.store_transition(
                 state_vec, action_np, log_prob, reward, value,
                 False, action_mask, game_state_name,
+            )
+            # Remember the last real (non-terminal) transition so terminal
+            # rewards can be attached to the actual last state/action rather
+            # than a zeroed placeholder.
+            self._last_transition = (
+                state_vec, action_np, log_prob, value,
+                action_mask, game_state_name,
             )
 
             prev_raw = raw_state
