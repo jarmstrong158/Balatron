@@ -1300,25 +1300,15 @@ class Trainer:
                         _vl_sold = getattr(self, '_verdant_leaf_sold', False)
                         if len(joker_cards_vl) > 1 and not _vl_sold:
                             self._verdant_leaf_sold = True
-                            # Find weakest joker by delta
                             from environment.action_space import (
-                                _estimate_joker_value as _vl_est,
-                                _joker_is_scoring as _vl_scoring,
                                 _api_key_to_name as _vl_name,
                             )
-                            weakest_idx = -1
-                            weakest_delta = float('inf')
-                            for vi, vj in enumerate(joker_cards_vl):
-                                vmod = vj.get("modifier", {})
-                                if isinstance(vmod, dict) and vmod.get("eternal", False):
-                                    continue
-                                ved = vmod.get("edition", "") if isinstance(vmod, dict) else ""
-                                if ved == "NEGATIVE":
-                                    continue  # never sell negative
-                                vdelta = _vl_est(vj, joker_cards_vl, raw)
-                                if vdelta < weakest_delta:
-                                    weakest_delta = vdelta
-                                    weakest_idx = vi
+                            # Find the weakest SELLABLE joker — the shared
+                            # guard never returns eternal, negative, MUST_BUY
+                            # (Blueprint/Brainstorm), retrigger, or copy jokers.
+                            weakest_idx, _ = _find_weakest_sellable_joker(
+                                joker_cards_vl, raw,
+                            )
                             if weakest_idx >= 0:
                                 vk = joker_cards_vl[weakest_idx].get("key", "")
                                 vn = _vl_name(vk) or vk
@@ -1540,19 +1530,23 @@ class Trainer:
                         # Slots full — evaluate swap with weakest owned joker
                         current_score = estimate_score_for_hand_type(current_jokers, raw)
 
-                        # Find the weakest current joker (lowest score contribution)
-                        worst_idx = 0
-                        worst_score_without = 0
-                        for j_idx in range(len(current_jokers)):
-                            # Skip eternal jokers — can't sell them
-                            mod = current_jokers[j_idx].get("modifier", {})
-                            if isinstance(mod, dict) and mod.get("eternal", False):
-                                continue
-                            jokers_without = [j for i, j in enumerate(current_jokers) if i != j_idx]
-                            score_without = estimate_score_for_hand_type(jokers_without, raw)
-                            if score_without > worst_score_without or j_idx == 0:
-                                worst_score_without = score_without
-                                worst_idx = j_idx
+                        # Find the weakest SELLABLE joker to make room. The
+                        # shared guard never returns eternal, negative,
+                        # MUST_BUY (Blueprint/Brainstorm), retrigger, or copy
+                        # jokers, so none of those can be sold to swap for a
+                        # pack card.
+                        worst_idx, _ = _find_weakest_sellable_joker(
+                            current_jokers, raw,
+                        )
+                        if worst_idx < 0:
+                            # Nothing safe to sell — skip the pack rather than
+                            # swap out a protected joker.
+                            try:
+                                await self.game.execute_action("pack", {"skip": True})
+                            except Exception:
+                                pass
+                            await asyncio.sleep(cfg.api_poll_delay)
+                            continue
 
                         # Check for must-pick jokers first (always swap for these)
                         must_pick_idx = -1
