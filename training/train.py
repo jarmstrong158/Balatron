@@ -759,6 +759,9 @@ class Trainer:
                     )
                     self.global_step += 1
                     self._win_reward_stored = True
+                    # Consume the last real transition so the GAME_OVER block
+                    # below can't store a second terminal from the same one.
+                    self._last_transition = None
                     print(f"[WIN] Stored terminal win reward "
                           f"{win_reward:+.2f} to PPO buffer", flush=True)
                 # DON'T end recording here — let GAME_OVER handle it so the
@@ -803,8 +806,11 @@ class Trainer:
                 # Compute terminal reward
                 reward = self.reward_calc.step(prev_raw, raw_state)
                 # If the win reward was already pushed to the buffer via the
-                # won-flag fallback above, don't count it again here.
-                if getattr(self, '_win_reward_stored', False):
+                # won-flag fallback above, don't count it again here. Capture
+                # the flag before reset() clears it below so we can also skip
+                # the duplicate terminal store.
+                win_already_stored = getattr(self, '_win_reward_stored', False)
+                if win_already_stored:
                     reward = 0.0
                 self.episode_tracker.step(reward, ante, raw_state)
                 # Only call end_episode if win wasn't already recorded
@@ -835,22 +841,26 @@ class Trainer:
                 # Store terminal transition. Attach the terminal reward to the
                 # actual last state/action the agent took rather than a zeroed
                 # placeholder, so the reward is credited to a real decision.
-                last = getattr(self, '_last_transition', None)
-                if last is not None:
-                    (t_vec, t_action, t_logprob, t_value,
-                     t_mask, t_head) = last
-                else:
-                    t_vec = np.zeros(STATE_VECTOR_SIZE, dtype=np.float32)
-                    t_action = np.zeros(14, dtype=np.float32)
-                    t_logprob, t_value = 0.0, 0.0
-                    t_mask = np.zeros(ACTION_HEAD_SIZE, dtype=np.float32)
-                    t_head = "GAME_OVER"
-                self.ppo.store_transition(
-                    t_vec, t_action, t_logprob, reward, t_value, True,
-                    t_mask, t_head,
-                )
+                # Skip entirely if the won-flag fallback already stored a
+                # terminal from the same last transition — otherwise we'd push
+                # two done=True transitions for one episode end.
+                if not win_already_stored:
+                    last = getattr(self, '_last_transition', None)
+                    if last is not None:
+                        (t_vec, t_action, t_logprob, t_value,
+                         t_mask, t_head) = last
+                    else:
+                        t_vec = np.zeros(STATE_VECTOR_SIZE, dtype=np.float32)
+                        t_action = np.zeros(14, dtype=np.float32)
+                        t_logprob, t_value = 0.0, 0.0
+                        t_mask = np.zeros(ACTION_HEAD_SIZE, dtype=np.float32)
+                        t_head = "GAME_OVER"
+                    self.ppo.store_transition(
+                        t_vec, t_action, t_logprob, reward, t_value, True,
+                        t_mask, t_head,
+                    )
+                    self.global_step += 1
                 self._last_transition = None
-                self.global_step += 1
                 last_done = True
 
                 # Navigate back to menu so next poll doesn't see GAME_OVER again
