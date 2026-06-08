@@ -124,11 +124,12 @@ class RunRecorder:
 
         if won:
             self._save_win(ante_reached, final_score, checkpoint_path, total_steps)
-        elif ante_reached >= self.NOTABLE_ANTE_THRESHOLD:
-            self._save_notable(ante_reached, final_score)
         else:
+            # Win-only mode: discard every non-win, including high-ante losses
+            # (the "notable" loss-saving path is intentionally disabled).
             print(
-                f"[RECORDER] Run ended (Ante {ante_reached}) — recording discarded",
+                f"[RECORDER] Run ended (Ante {ante_reached}) — recording "
+                f"discarded (win-only mode)",
                 flush=True,
             )
             self._delete_temp()
