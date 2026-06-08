@@ -15,6 +15,7 @@ See NOTES.md for full state vector layout.
 import asyncio
 import json
 import math
+import zlib
 from typing import Any, Optional
 
 import aiohttp
@@ -1452,9 +1453,12 @@ class GameStateManager:
                     vec[slot_offset] = 0.67
                 elif "SPECTRAL" in card_set:
                     vec[slot_offset] = 1.0
-                # Key as normalized hash (1)
+                # Key as normalized hash (1) — use zlib.crc32 for a
+                # deterministic value; Python's built-in hash() is salted per
+                # process, so the same consumable would map to different
+                # features across runs and break the learned policy.
                 key = card.get("key", "")
-                vec[slot_offset + 1] = (hash(key) % 1000) / 1000.0
+                vec[slot_offset + 1] = (zlib.crc32(key.encode("utf-8")) % 1000) / 1000.0
                 # Is negative (1)
                 edition = _as_dict(card.get("modifier", {})).get("edition", "")
                 vec[slot_offset + 2] = 1.0 if edition == "NEGATIVE" else 0.0
