@@ -500,7 +500,7 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
 
         # Next blind target — but think AHEAD, not just the immediate blind
         next_blind_score = _get_blind_target(raw_state)
-        ante = raw_state.get("ante", 1)
+        ante = raw_state.get("ante_num", 1)
 
         # Boss blind check — if the next blind is a boss, prepare harder
         blinds = raw_state.get("blinds", {})
