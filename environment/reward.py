@@ -341,7 +341,10 @@ class RewardCalculator:
         if delta > 0:
             reward += delta * REWARD_MONEY_GAIN
         elif delta < 0:
-            reward += delta * REWARD_MONEY_LOSS  # Note: delta is negative, MONEY_LOSS is negative
+            # delta is negative (money spent) and REWARD_MONEY_LOSS is
+            # negative; use abs(delta) so spending actually incurs a penalty
+            # (dollars_spent * -0.01) rather than a positive reward.
+            reward += abs(delta) * REWARD_MONEY_LOSS
 
         # Interest bonus: reward maintaining money in $5 increments
         # Balatro gives $1 interest per $5 held, up to $5 max (at $25)
@@ -713,7 +716,8 @@ class ConfigurableRewardCalculator(RewardCalculator):
         if delta > 0:
             reward += delta * w.money_gain
         elif delta < 0:
-            reward += delta * w.money_loss
+            # abs(delta) so spending money is penalized (money_loss is negative)
+            reward += abs(delta) * w.money_loss
 
         if new_money >= 5:
             interest_tiers = min(new_money // 5, 5)
