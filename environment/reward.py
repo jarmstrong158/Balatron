@@ -226,9 +226,11 @@ class RewardCalculator:
         reward = 0.0
         ante = new_state.get("ante_num", self._prev_ante)
 
-        # Check if this was a win (cleared Ante 8). Use >= 8 to match the
-        # win condition in train.py (clearing ante 8 == reaching ante 8's boss).
-        if ante >= 8:
+        # Check if this was a win (cleared Ante 8). Require BOTH ante >= 8 AND
+        # the API 'won' flag — reaching ante 8 isn't a win unless the boss was
+        # actually beaten. Without the won check, dying on the ante-8 boss
+        # would still pay out the full win reward.
+        if ante >= 8 and new_state.get("won", False):
             reward += REWARD_GAME_WIN
             # Phase 2: check for naneinf
             if self.phase == 2:
@@ -637,7 +639,9 @@ class ConfigurableRewardCalculator(RewardCalculator):
         ante = new_state.get("ante_num", self._prev_ante)
         w = self._weights
 
-        if ante >= 8:
+        # Require BOTH ante >= 8 AND the API 'won' flag — dying on the ante-8
+        # boss is a loss, not a win (see RewardCalculator._check_terminal).
+        if ante >= 8 and new_state.get("won", False):
             reward += w.game_win
             if self.phase == 2:
                 reward += self._check_naneinf(new_state)
