@@ -226,17 +226,21 @@ class RewardCalculator:
         reward = 0.0
         ante = new_state.get("ante_num", self._prev_ante)
 
-        # Check if this was a win (cleared Ante 8). Require BOTH ante >= 8 AND
-        # the API 'won' flag — reaching ante 8 isn't a win unless the boss was
-        # actually beaten. Without the won check, dying on the ante-8 boss
-        # would still pay out the full win reward.
-        if ante >= 8 and new_state.get("won", False):
+        # Check if this was a win. The win reward requires getting PAST ante 8
+        # (ante > 8), NOT the API 'won' flag: the base game sets G.GAME.won=true
+        # the moment you reach the ante-8 boss (state_events.lua end_round),
+        # win OR lose — so 'won' is true even when you die on the boss (e.g.
+        # 90,592/100,000). Surviving past ante 8 (ante advances to 9 in endless
+        # mode) is the only reliable signal that the boss was actually beaten.
+        # Genuine wins are also credited via train.py's post-boss win-fallback.
+        if ante > 8:
             reward += REWARD_GAME_WIN
             # Phase 2: check for naneinf
             if self.phase == 2:
                 reward += self._check_naneinf(new_state)
         else:
-            # Loss — base penalty + partial credit for progress
+            # Loss (includes dying on the ante-8 boss) — base penalty + partial
+            # credit for progress.
             reward += REWARD_GAME_LOSS
             reward += ante * REWARD_PER_ANTE_SURVIVED
 
@@ -639,9 +643,10 @@ class ConfigurableRewardCalculator(RewardCalculator):
         ante = new_state.get("ante_num", self._prev_ante)
         w = self._weights
 
-        # Require BOTH ante >= 8 AND the API 'won' flag — dying on the ante-8
-        # boss is a loss, not a win (see RewardCalculator._check_terminal).
-        if ante >= 8 and new_state.get("won", False):
+        # Win requires getting PAST ante 8 (ante > 8), not the 'won' flag, which
+        # the base game sets true the moment you reach the ante-8 boss — win or
+        # lose (see RewardCalculator._check_terminal).
+        if ante > 8:
             reward += w.game_win
             if self.phase == 2:
                 reward += self._check_naneinf(new_state)
