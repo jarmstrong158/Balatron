@@ -1669,6 +1669,14 @@ class Trainer:
                                     best_swap_score = swap_score
                                     best_swap = pc_idx
 
+                        if best_swap is None:
+                            # Slots full and no pack joker beats the current
+                            # build — skip cleanly. Without this, pick_idx stays
+                            # at its default 0 and the bot falls through to pick
+                            # a joker into full slots, which the mod rejects
+                            # ("joker slots full") on every retry until bailout.
+                            pick_idx = -1
+
                         if best_swap is not None:
                             # Sell the weakest joker then IMMEDIATELY pick
                             # the replacement in the same iteration.
