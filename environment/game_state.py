@@ -881,7 +881,8 @@ class GameStateManager:
         self._last_action = None
         self._last_action_params = None
 
-    async def _rpc_call(self, method: str, params: Optional[dict] = None) -> dict:
+    async def _rpc_call(self, method: str, params: Optional[dict] = None,
+                        timeout_s: float = 30.0) -> dict:
         """Make a JSON-RPC 2.0 call to BalatroBot."""
         import aiohttp
 
@@ -893,7 +894,7 @@ class GameStateManager:
         if params:
             payload["params"] = params
 
-        timeout = aiohttp.ClientTimeout(total=30)
+        timeout = aiohttp.ClientTimeout(total=timeout_s)
         async with self._session.post(API_URL, json=payload, timeout=timeout) as resp:
             data = await resp.json()
             if "error" in data:
@@ -901,8 +902,15 @@ class GameStateManager:
             return data.get("result", {})
 
     async def fetch_gamestate(self) -> dict:
-        """Fetch current game state from BalatroBot API."""
-        return await self._rpc_call("gamestate")
+        """Fetch current game state from BalatroBot API.
+
+        Uses a short timeout so a hung/crashed game (which leaves the request
+        accepting but never responding) is detected fast and trips the
+        fetch-failure recovery, instead of blocking ~30s per poll. Action
+        calls keep the longer default since some (cash_out) wait on
+        animations server-side.
+        """
+        return await self._rpc_call("gamestate", timeout_s=8.0)
 
     async def execute_action(self, method: str, params: Optional[dict] = None) -> dict:
         """Execute an action and return the result."""
