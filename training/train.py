@@ -1448,7 +1448,8 @@ class Trainer:
                 # Hard bailout: if stuck too long, force skip
                 # (raised from 8 — multi-pick packs can legitimately need many attempts)
                 if pack_attempts > 15:
-                    # print(f"PACK BAILOUT after {pack_attempts} attempts — force skipping", flush=True)
+                    print(f"[PACK-DBG] BAILOUT after {pack_attempts} attempts — "
+                          f"force skipping (took nothing)", flush=True)
                     try:
                         await self.game.execute_action("pack", {"skip": True})
                     except Exception:
@@ -1475,6 +1476,13 @@ class Trainer:
                     s = pc.get("set", "")
                     set_counts[s] = set_counts.get(s, 0) + 1
                 card_set = max(set_counts, key=set_counts.get) if set_counts else ""
+
+                # INSTRUMENTATION: log every opened pack so the occasional
+                # multi-pick / Black-Hole freeze-then-skip is fully captured.
+                _pk_meta = {k: v for k, v in raw.get("pack", {}).items() if k != "cards"}
+                print(f"[PACK-DBG] open type={card_set} attempt={pack_attempts} "
+                      f"meta={_pk_meta} cards={[c.get('key', '?') for c in pack_cards]}",
+                      flush=True)
 
                 # ── Pick best card from pack ──
                 pick_idx = 0
@@ -1762,16 +1770,27 @@ class Trainer:
                         except Exception as e:
                             pass  # print(f"PACK card {try_idx} failed: {e}")
 
-                # Last resort: skip the pack (re-check state first — a card
-                # select may have partially succeeded and closed the pack)
-                if not selected:
+                # INSTRUMENTATION: did the pick land?
+                _tried_key = pack_cards[pick_idx].get("key", "?") if pick_idx < len(pack_cards) else "?"
+                print(f"[PACK-DBG] pick result selected={selected} pick_idx={pick_idx} "
+                      f"key={_tried_key} attempt={pack_attempts} order={card_order}",
+                      flush=True)
+
+                # On a failed pick, DON'T skip the pack — the failure is usually
+                # transient (the mod's 5s use_card timeout when a planet/Black-
+                # Hole use-animation lags, or STATE_COMPLETE not yet true). Just
+                # retry on the next poll; the pack stays open. Only give up and
+                # skip near the bailout, so an occasional hiccup no longer
+                # discards the whole pack ("freeze then take nothing").
+                if not selected and pack_attempts >= 12:
                     try:
                         recheck = await self.game.fetch_gamestate()
                         if recheck.get("state", "") == "SMODS_BOOSTER_OPENED":
+                            print(f"[PACK-DBG] giving up after {pack_attempts} "
+                                  f"failed picks — skipping pack", flush=True)
                             await self.game.execute_action("pack", {"skip": True})
-                    except Exception as e:
-                        pass  # print(f"PACK skip failed (attempt {pack_attempts}): {e}")
-                        await asyncio.sleep(0.5)
+                    except Exception:
+                        pass
 
                 await asyncio.sleep(cfg.api_poll_delay)
                 continue
