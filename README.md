@@ -37,14 +37,14 @@ A reinforcement learning agent that plays [Balatro](https://www.playbalatro.com/
 
 Balatron connects to a live instance of Balatro through the [BalatroBot](https://github.com/coder/balatrobot) mod, which exposes the full game state and accepts action commands via a JSON-RPC 2.0 HTTP API on `127.0.0.1:12346`. No screen capture or computer vision is needed — the agent reads structured game data directly.
 
-The agent observes the game state (hand cards, jokers, economy, blind targets, deck composition, shop contents), encodes it into an 814-dimensional vector, and uses a PPO neural network to select actions. A sophisticated heuristic layer validates and enhances the network's decisions with Balatro-specific domain knowledge — optimal hand selection, joker ordering, consumable usage, pack evaluation, and economy management.
+The agent observes the game state (hand cards, jokers, economy, blind targets, deck composition, shop contents), encodes it into an 817-dimensional vector, and uses a PPO neural network to select actions. A sophisticated heuristic layer validates and enhances the network's decisions with Balatro-specific domain knowledge — optimal hand selection, joker ordering, consumable usage, pack evaluation, and economy management.
 
 ```
 Balatro Game
     |
     | JSON-RPC 2.0 (BalatroBot mod)
     v
-Game State Encoder (814-dim vector)
+Game State Encoder (817-dim vector)
     |
     v
 PPO Neural Network (shared trunk + 3 policy heads)
@@ -78,7 +78,7 @@ Balatron uses a **hybrid architecture** that combines neural network learning wi
 ### Neural Network
 
 ```
-Input (814) --> Shared Trunk (814 -> 768 -> 768 -> 512)
+Input (817) --> Shared Trunk (817 -> 768 -> 768 -> 512)
                     |
                     |--> Play Head   (512 -> 256 -> 45)  -- SELECTING_HAND state
                     |--> Shop Head   (512 -> 256 -> 45)  -- SHOP state
@@ -88,16 +88,16 @@ Input (814) --> Shared Trunk (814 -> 768 -> 768 -> 512)
 
 - **3 policy heads** specialized for different game phases — the shop head never sees hand-play decisions and vice versa
 - **Shared trunk** learns representations useful across all phases (joker synergies, economy state, deck composition)
-- **Layer normalization** + **SiLU activation** for training stability
+- **Layer normalization** + **ReLU activation** for training stability
 - **Action-conditioned target sampling** — after selecting an action type, target logits are masked so only valid targets can be chosen (e.g., `buy_pack` can only target pack slots, not joker slots)
 
 ### State Vector
 
-The game state is encoded into an **814-dimensional float vector** with careful normalization:
+The game state is encoded into an **817-dimensional float vector** with careful normalization:
 
 | Section | Dimensions | Contents |
 |---------|-----------|----------|
-| Game Meta | 42 | Ante, round, money (log-scaled), hands/discards left, reroll cost, chips/target (log), boss blind info, blind statuses, joker slots |
+| Game Meta | 45 | Ante, round, money (log-scaled), hands/discards left, reroll cost, chips/target (log), boss blind info, blind statuses, joker slots |
 | Hand Levels | 79 | 13 poker hand types x (level, chips, mult) + play counts, all normalized |
 | Deck Composition | 61 | 52 rank x suit counts + 9 enhancement/seal counters |
 | Vouchers | 32 | Binary flags for each voucher owned |
@@ -235,7 +235,7 @@ balatron/
 |   |-- ppo.py              # PPO trainer, rollout buffer, GAE
 |
 |-- environment/
-|   |-- game_state.py       # 814-dim state vector encoder
+|   |-- game_state.py       # 817-dim state vector encoder
 |   |-- action_space.py     # Action masks, target mapping, joker evaluation
 |   |-- hand_eval.py        # Full scoring engine, hand classifier, strategic advisor
 |   |-- reward.py           # Reward shaping (log-scaled, multi-tier)
@@ -322,6 +322,8 @@ uvx balatrobot serve --fast
 
 This launches the Balatro game with the BalatroBot mod injected and starts the JSON-RPC API server.
 
+Game speed can be increased for faster data collection via the `BALATROBOT_GAMESPEED` environment variable (e.g. `set BALATROBOT_GAMESPEED=8` before launching for 8× speed). Higher values train faster but are less stable; the trainer auto-restarts Balatro if the game hangs or crashes.
+
 **Terminal 2 — Start training:**
 ```powershell
 cd balatron
@@ -339,14 +341,14 @@ Runs: 50 (lifetime: 500) | Wins: 3 (lifetime: 12)
 ### Resuming from Checkpoint
 
 ```powershell
-python -u -m training.train --total-timesteps 1500000 --device cuda --checkpoint checkpoints/balatron_phase1_final.pt
+python -u -m training.train --total-timesteps 1500000 --device cuda --checkpoint checkpoints/balatron_phase1_update000130.pt
 ```
 
-Checkpoints are saved automatically during training.
+Checkpoints are saved automatically during training, every N PPO updates (`--checkpoint-interval`, default 10) as `checkpoints/balatron_phase1_updateNNNNNN.pt`, plus a `..._final.pt` on exit. Resume from the latest `updateNNNNNN.pt` to continue where training left off.
 
 ### Recording
 
-Wins are automatically recorded via ffmpeg screen capture. Use `--no-record` to disable recording (reduces CPU/disk overhead):
+Only **winning** runs are recorded and kept (via ffmpeg screen capture); every losing run is discarded. Use `--no-record` to disable recording entirely (reduces CPU/disk overhead):
 
 ```powershell
 python -u -m training.train --total-timesteps 1500000 --device cuda --checkpoint checkpoints/balatron_phase1_final.pt --no-record
