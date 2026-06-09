@@ -28,6 +28,7 @@ A reinforcement learning agent that plays [Balatro](https://www.playbalatro.com/
   - [Resuming from Checkpoint](#resuming-from-checkpoint)
 - [Training Phases](#training-phases)
 - [Key Design Decisions](#key-design-decisions)
+- [Decisions & Gotchas Log](DECISIONS.md)
 - [Acknowledgments](#acknowledgments)
 - [License](#license)
 
@@ -384,6 +385,10 @@ The agent will learn:
 ---
 
 ## Key Design Decisions
+
+> 📋 **For the full, running log of design decisions *and* hard-won gotchas
+> (the `won`-flag trap, pack-pick handling, out-of-repo mod patches, etc.), see
+> [DECISIONS.md](DECISIONS.md).** The highlights are below.
 
 ### Why PPO over DQN?
 
