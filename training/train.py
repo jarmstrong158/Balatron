@@ -242,7 +242,7 @@ class EpisodeTracker:
         if ante > self.session_highest_ante:
             self.session_highest_ante = ante
             score_info = f" | Best hand: {self.session_highest_score:,.0f} in {self.session_highest_score_round}" if self.session_highest_score > 0 else ""
-            print(f"🏆 NEW HIGHEST ANTE: {ante}{score_info}")
+            print(f"[RECORD] NEW HIGHEST ANTE: {ante}{score_info}")
 
     def end_episode(self, won: bool, raw_state: dict = None):
         """Record episode completion."""
@@ -721,13 +721,15 @@ class Trainer:
             # The Lua mod auto-dismisses the win screen, so GAME_OVER may
             # never fire. Record the win when we first see won=True.
             #
-            # IMPORTANT: Only trust 'won' when we're in a safe state (SHOP,
-            # BLIND_SELECT, ROUND_EVAL) — NOT during SELECTING_HAND where
-            # the bot could still die on the boss blind.  The API may set
-            # won=True after beating ante 8's small/big blind, before the
-            # boss is beaten.
+            # IMPORTANT: Only trust 'won' in POST-BOSS states (SHOP,
+            # BLIND_SELECT, ROUND_EVAL). The base game sets G.GAME.won=true the
+            # moment you reach the ante-8 boss — win OR lose (state_events.lua
+            # end_round) — so it is true during SELECTING_HAND while playing the
+            # boss and at GAME_OVER after dying on it. A LOSS goes straight to
+            # GAME_OVER, never to a post-boss SHOP/ROUND_EVAL, so seeing won in
+            # those states is the only reliable proof the boss was beaten.
             api_won = raw_state.get("won", False)
-            safe_won_states = {"SHOP", "BLIND_SELECT", "ROUND_EVAL", "SELECTING_HAND", "GAME_OVER"}
+            safe_won_states = {"SHOP", "BLIND_SELECT", "ROUND_EVAL"}
             if (api_won and not getattr(self, '_win_recorded', False)
                     and game_state_name in safe_won_states):
                 self._win_recorded = True
@@ -777,8 +779,12 @@ class Trainer:
                 ante = raw_state.get("ante_num", 1)
                 api_won_flag = raw_state.get("won", False)
                 already_recorded = getattr(self, '_win_recorded', False)
-                # Win if: ante >= 8 AND api says won, OR ante > 8 (survived past 8)
-                won = (ante >= 8 and api_won_flag) or ante > 8 or already_recorded
+                # Win only if we got PAST the ante-8 boss: ante > 8 (advanced in
+                # endless) OR already_recorded by the post-boss win-fallback.
+                # NOT "ante >= 8 and api_won": the base game sets won=true on
+                # reaching the ante-8 boss, so that clause counted boss LOSSES
+                # (e.g. 90,592/100,000 at ante 8) as wins.
+                won = ante > 8 or already_recorded
                 print(f"[GAME_OVER] ante={ante} won={won} "
                       f"already_recorded={already_recorded} "
                       f"api_won={api_won_flag}", flush=True)
@@ -968,65 +974,100 @@ class Trainer:
                 action_np, raw_state
             )
 
-            # Shop spin detection: if the NN keeps choosing no-op actions
-            # (gamestate) while in SHOP, try to force a buy before leaving
+            # Shop spin detection: track ANY repeated shop state, not just
+            # gamestate calls — failed buy attempts also cause loops
             if game_state_name == "SHOP":
-                if api_method == "gamestate":
+                _shop_fp = (
+                    raw_state.get("money", -1),
+                    str(raw_state.get("shop", {}).get("cards", [])),
+                    str(raw_state.get("packs", {}).get("cards", [])),
+                    len(raw_state.get("jokers", {}).get("cards", [])),
+                )
+                _prev_shop_fp = getattr(self, '_prev_shop_fingerprint', None)
+                if _shop_fp == _prev_shop_fp:
                     self._shop_noop_count = getattr(self, '_shop_noop_count', 0) + 1
+                else:
+                    self._shop_noop_count = 0
+                self._prev_shop_fingerprint = _shop_fp
+
+                noop_count = self._shop_noop_count
+                if noop_count > 0 and noop_count <= 5:
                     noop_action_type = int(action_np[0])
                     noop_target = int(action_np[13])
+                    print(f"[SHOP-SPIN] #{noop_count} action={noop_action_type} "
+                          f"target={noop_target} api={api_method} "
+                          f"params={api_params}", flush=True)
+
+                if noop_count >= 3:
+                    from environment.action_space import (
+                        _is_joker_card as _noop_ij,
+                    )
                     noop_money = raw_state.get("money", 0)
-                    if self._shop_noop_count <= 3:
-                        mask_val = action_mask[noop_action_type] if noop_action_type < len(action_mask) else -1
-                        print(f"[SHOP-NOOP] action_type={noop_action_type} "
-                              f"target={noop_target} money=${noop_money} "
-                              f"mask[{noop_action_type}]={mask_val:.4f} "
-                              f"(noop #{self._shop_noop_count})", flush=True)
-                    if self._shop_noop_count >= 3:
-                        # Before forcing leave, try to buy the best affordable joker
-                        from environment.action_space import (
-                            _is_joker_card as _noop_ij,
-                        )
-                        # Try to buy ANY affordable card in shop (joker or consumable)
+                    noop_jokers = raw_state.get("jokers", {}).get("cards", [])
+                    noop_jcount = len(noop_jokers)
+                    noop_jlimit = raw_state.get("jokers", {}).get("limit", 5)
+                    noop_cons = raw_state.get("consumables", {}).get("cards", [])
+                    noop_climit = raw_state.get("consumables", {}).get("limit", 2)
+
+                    # Priority 1: buy affordable packs (spectral > arcana > celestial > other)
+                    noop_packs = raw_state.get("packs", {}).get("cards", [])
+                    best_pack = -1
+                    best_pack_priority = -1
+                    for pi, pc in enumerate(noop_packs):
+                        pc_cost = pc.get("cost", {}).get("buy", 999)
+                        if pc_cost > noop_money:
+                            continue
+                        pk = pc.get("key", "")
+                        if "spectral" in pk:
+                            prio = 4
+                        elif "arcana" in pk:
+                            prio = 3
+                        elif "celestial" in pk:
+                            prio = 2
+                        elif "buffoon" in pk and noop_jcount < noop_jlimit:
+                            prio = 1
+                        else:
+                            prio = 0
+                        if prio > best_pack_priority:
+                            best_pack = pi
+                            best_pack_priority = prio
+                    if best_pack >= 0 and best_pack_priority > 0:
+                        pk_name = noop_packs[best_pack].get("key", "?")
+                        print(f"[SHOP] SPIN recovery: buying pack {pk_name} "
+                              f"(slot {best_pack})", flush=True)
+                        api_method = "buy"
+                        api_params = {"pack": best_pack}
+                        self._shop_noop_count = 0
+                    else:
+                        # Priority 2: buy affordable shop card (joker/consumable)
                         noop_shop = raw_state.get("shop", {}).get("cards", [])
-                        noop_jokers = raw_state.get("jokers", {}).get("cards", [])
-                        noop_jcount = len(noop_jokers)
-                        noop_jlimit = raw_state.get("jokers", {}).get("limit", 5)
-                        noop_cons = raw_state.get("consumables", {}).get("cards", [])
-                        noop_climit = raw_state.get("consumables", {}).get("limit", 2)
                         best_noop_buy = -1
                         for ni, nc in enumerate(noop_shop):
-                            nc_key = nc.get("key", "")
-                            nc_set = nc.get("set", "").upper()
                             nc_cost = nc.get("cost", {}).get("buy", 999)
-                            print(f"[SHOP-NOOP-SCAN] slot {ni}: "
-                                  f"key={nc_key} set={nc_set} cost=${nc_cost}",
-                                  flush=True)
                             if nc_cost > noop_money:
                                 continue
                             if _noop_ij(nc):
                                 if noop_jcount < noop_jlimit and best_noop_buy < 0:
                                     best_noop_buy = ni
-                            elif nc_set in ("PLANET", "TAROT") and len(noop_cons) < noop_climit:
-                                if best_noop_buy < 0:
+                            elif nc.get("set", "").upper() in ("PLANET", "TAROT"):
+                                if len(noop_cons) < noop_climit and best_noop_buy < 0:
                                     best_noop_buy = ni
                         if best_noop_buy >= 0:
                             bk = noop_shop[best_noop_buy].get("key", "?")
-                            print(f"[SHOP] NOOP recovery: force-buying {bk} "
+                            print(f"[SHOP] SPIN recovery: buying card {bk} "
                                   f"(slot {best_noop_buy})", flush=True)
                             api_method = "buy"
                             api_params = {"card": best_noop_buy}
                             self._shop_noop_count = 0
-                        elif self._shop_noop_count > 5:
-                            print(f"[SHOP] Forcing next_round after "
-                                  f"{self._shop_noop_count} no-ops", flush=True)
+                        elif noop_count >= 8:
+                            print(f"[SHOP] SPIN recovery: forcing next_round "
+                                  f"after {noop_count} spins", flush=True)
                             api_method = "next_round"
                             api_params = None
                             self._shop_noop_count = 0
-                else:
-                    self._shop_noop_count = 0
             else:
                 self._shop_noop_count = 0
+                self._prev_shop_fingerprint = None
 
             # Stuck-state detector: if we keep getting the same state,
             # escalate from force-play → restart
@@ -1035,6 +1076,8 @@ class Trainer:
                 str(raw_state.get("hand", {}).get("cards", [])),
                 raw_state.get("round", {}).get("hands_left", -1),
                 raw_state.get("round", {}).get("discards_left", -1),
+                raw_state.get("money", -1),
+                str(raw_state.get("shop", {}).get("cards", [])) if game_state_name == "SHOP" else "",
             )
             prev_fingerprint = getattr(self, '_prev_state_fingerprint', None)
             if state_fingerprint == prev_fingerprint:
@@ -1057,8 +1100,11 @@ class Trainer:
                     self._pending_hand_rearrange = None
                     self._pending_rearrange = None
 
-                elif stuck >= 4 and game_state_name == "SHOP":
-                    # Shop loop — force leave instead of restarting
+                elif stuck >= 5 and game_state_name == "SHOP":
+                    # Shop loop — force-leave via next_round BEFORE the generic
+                    # stuck>=8 restart below (which would otherwise preempt this
+                    # branch and hard-restart instead of just leaving the shop).
+                    # The mod's next_round is reliable, so this escapes cheaply.
                     print(f"[STUCK] Shop unchanged {stuck}x — "
                           f"forcing next_round", flush=True)
                     api_method = "next_round"
@@ -1069,6 +1115,14 @@ class Trainer:
                     # Buttons are permanently broken — restart Balatro
                     print(f"[STUCK] State unchanged {stuck}x — "
                           f"game desynced, restarting Balatro", flush=True)
+                    # INSTRUMENTATION: dump the frozen state + the action that
+                    # isn't landing, so we can see what desynced (esp. post-win).
+                    import json as _json
+                    print(f"[STATE-DUMP] desync state={game_state_name} "
+                          f"won={raw_state.get('won')} ante={raw_state.get('ante_num')} "
+                          f"action={api_method} params={api_params} "
+                          f"keys={sorted(raw_state.keys())} "
+                          f"raw={_json.dumps(raw_state, default=str)[:1500]}", flush=True)
                     self._state_stuck_count = 0
                     self._prev_state_fingerprint = None
                     await self._restart_balatro()
@@ -1210,7 +1264,9 @@ class Trainer:
                 consecutive_fetch_fails = 0
             except Exception:
                 consecutive_fetch_fails += 1
-                if consecutive_fetch_fails >= 20:
+                # With the 8s fetch timeout, 6 consecutive failures ≈ 48s — a
+                # hung/crashed game recovers in ~1 min instead of ~10 min.
+                if consecutive_fetch_fails >= 6:
                     print(f"[CRASH-RECOVERY] {consecutive_fetch_fails} consecutive fetch failures — triggering restart", flush=True)
                     await self._restart_balatro()
                     self.reward_calc.reset()
@@ -1348,7 +1404,7 @@ class Trainer:
                                     await self.game.execute_action(
                                         "sell", {"joker": weakest_idx})
                                     await asyncio.sleep(0.3)
-                                    raw = await self._fetch_state()
+                                    raw = await self.game.fetch_gamestate()
                                 except Exception as e:
                                     print(f"[BOSS] Verdant Leaf sell failed: {e}",
                                           flush=True)
@@ -1428,7 +1484,10 @@ class Trainer:
                 # If joker slots are full, sell weakest to make room.
                 soul_idx = -1
                 for sc_idx, sc in enumerate(pack_cards):
-                    if sc.get("key", "") == "c_the_soul":
+                    # The Soul's API key is "c_soul" (its display name is
+                    # "The Soul"); "c_the_soul" never matches, so the agent
+                    # was passing on free Legendary jokers.
+                    if sc.get("key", "") == "c_soul":
                         soul_idx = sc_idx
                         break
                 if soul_idx >= 0:
@@ -1788,6 +1847,15 @@ class Trainer:
                 await asyncio.sleep(0.5)
                 # Only count toward stuck if we've been in transient for a while
                 unknown_state_count += 1
+                # INSTRUMENTATION: dump the raw state at a few checkpoints so we
+                # can see what the game is actually showing during a stall —
+                # especially post-win win-screen / run-summary wedges.
+                if unknown_state_count in (5, 30, 60):
+                    import json as _json
+                    print(f"[STATE-DUMP] transient '{state}' poll#{unknown_state_count} "
+                          f"won={raw.get('won')} ante={raw.get('ante_num')} "
+                          f"keys={sorted(raw.keys())} "
+                          f"raw={_json.dumps(raw, default=str)[:1500]}", flush=True)
                 if unknown_state_count > 60:  # 30+ seconds in transient
                     print(f"[CRASH-RECOVERY] Stuck in transient state '{state}' for "
                           f"{unknown_state_count} polls — triggering restart", flush=True)

@@ -864,6 +864,14 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                     any_good_pack = True
                 else:
                     mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.15) * ip
+            elif "spectral" in pack_key:
+                # Spectral packs are high-value (edition upgrades, destroy/create cards)
+                if needs_upgrade:
+                    mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.4) * ip
+                    any_good_pack = True
+                else:
+                    mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.2) * ip
+                    any_good_pack = True
             else:
                 mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.1) * ip
         any_pack_target_valid = any(
@@ -1020,6 +1028,9 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             elif has_scoring_joker_in_shop and empty_slots >= 1 and any_buyable_joker:
                 # Scoring joker available with empty slots — strongly penalize leaving
                 mask[ACTION_END_SHOP] = math.exp(-HAND_BIAS_STRENGTH * 0.5)
+            elif any_good_pack and any_affordable_pack:
+                # Good packs available (spectral, arcana, celestial) — don't leave yet
+                mask[ACTION_END_SHOP] = math.exp(-HAND_BIAS_STRENGTH * 0.4)
             elif needs_upgrade and can_buy_something:
                 # We need power and can buy it — penalize leaving
                 mask[ACTION_END_SHOP] = math.exp(-HAND_BIAS_STRENGTH * 0.4)
