@@ -61,6 +61,15 @@ class PPOConfig:
     anneal_lr: bool = True           # Linear LR annealing
     target_kl: Optional[float] = 0.03  # Early stop if KL exceeds this
 
+    # Behavior cloning kickstart: auxiliary imitation loss toward the
+    # heuristic layer's OVERRIDDEN (executed) actions, annealed linearly
+    # to zero over bc_anneal_updates. Distills the heuristics into the
+    # policy so the overrides/bias-masks can later be lifted without the
+    # win rate falling off a cliff. The anneal runs relative to the update
+    # at which BC first engaged (persisted in checkpoints), not update 0.
+    bc_coef: float = 0.5             # Initial BC loss weight (0 disables)
+    bc_anneal_updates: int = 200     # Updates to anneal bc_coef -> 0
+
     # Device
     device: str = "cpu"              # "cpu" or "cuda"
 
@@ -101,10 +110,14 @@ class RolloutBuffer:
         # Computed after rollout
         self.advantages = np.zeros(capacity, dtype=np.float32)
         self.returns = np.zeros(capacity, dtype=np.float32)
+        # 1.0 where the stored action came from a heuristic OVERRIDE (the
+        # teacher corrected the policy) — the behavior-cloning loss
+        # imitates only these steps, never the policy's own samples.
+        self.bc_flags = np.zeros(capacity, dtype=np.float32)
 
     def add(self, state: np.ndarray, action: np.ndarray, log_prob: float,
             reward: float, value: float, done: bool, mask: np.ndarray,
-            head_idx: int):
+            head_idx: int, bc_flag: bool = False):
         """Add a single transition to the buffer."""
         self.states[self.pos] = state
         self.actions[self.pos] = action
@@ -114,6 +127,7 @@ class RolloutBuffer:
         self.dones[self.pos] = float(done)
         self.masks[self.pos] = mask
         self.head_indices[self.pos] = head_idx
+        self.bc_flags[self.pos] = float(bc_flag)
         self.pos += 1
         if self.pos >= self.capacity:
             self.full = True
@@ -203,6 +217,7 @@ class RolloutBuffer:
                 # Rollout-time value estimates — without these the
                 # clip_value branch in the update silently never ran.
                 "old_values": torch.tensor(self.values[batch_idx], device=self.device),
+                "bc_flags": torch.tensor(self.bc_flags[batch_idx], device=self.device),
                 "masks": torch.tensor(self.masks[batch_idx], device=self.device),
                 "head_indices": torch.tensor(self.head_indices[batch_idx],
                                              device=self.device, dtype=torch.long),
@@ -263,9 +278,17 @@ class PPOTrainer:
         self.total_updates = 0
         self.total_steps = 0
 
+        # Behavior-cloning anneal anchor: the update count at which BC
+        # first engaged. Persisted in checkpoints so frequent restarts
+        # don't reset the anneal. None until the first update with
+        # bc_coef > 0.
+        self.bc_start_update: Optional[int] = None
+        self._bc_coef_now = 0.0
+
     def store_transition(self, state: np.ndarray, action: np.ndarray,
                          log_prob: float, reward: float, value: float,
-                         done: bool, mask: np.ndarray, game_state: str):
+                         done: bool, mask: np.ndarray, game_state: str,
+                         bc_flag: bool = False):
         """Store a transition from environment interaction.
 
         Args:
@@ -277,9 +300,13 @@ class PPOTrainer:
             done: episode terminated
             mask: action validity mask (45,)
             game_state: BalatroBot state name for head routing
+            bc_flag: True when the action is a heuristic override of the
+                policy's sample — the behavior-cloning loss imitates only
+                these teacher-corrected steps
         """
         head_idx = get_head_index(game_state)
-        self.buffer.add(state, action, log_prob, reward, value, done, mask, head_idx)
+        self.buffer.add(state, action, log_prob, reward, value, done, mask,
+                        head_idx, bc_flag=bc_flag)
         self.total_steps += 1
 
     def amend_last_transition(self, reward_delta: float = 0.0,
@@ -324,11 +351,25 @@ class PPOTrainer:
             # This is a simple version — caller should pass progress fraction
             pass  # Handled externally via set_learning_rate()
 
+        # Behavior-cloning coefficient: linear anneal to zero over
+        # bc_anneal_updates, anchored to the update where BC first engaged
+        # (so resumes continue the anneal instead of restarting it).
+        self._bc_coef_now = 0.0
+        if cfg.bc_coef > 0 and cfg.bc_anneal_updates > 0:
+            if self.bc_start_update is None:
+                self.bc_start_update = self.total_updates
+            elapsed = self.total_updates - self.bc_start_update
+            frac = max(0.0, 1.0 - elapsed / cfg.bc_anneal_updates)
+            self._bc_coef_now = cfg.bc_coef * frac
+
         # PPO epochs
         metrics = {
             "policy_loss": 0.0,
             "value_loss": 0.0,
             "entropy": 0.0,
+            "bc_loss": 0.0,
+            "bc_coef": self._bc_coef_now,
+            "bc_fraction": float(self.buffer.bc_flags[:n].mean()) if n > 0 else 0.0,
             "total_loss": 0.0,
             "approx_kl": 0.0,
             "clip_fraction": 0.0,
@@ -345,7 +386,7 @@ class PPOTrainer:
                 batch_metrics = self._update_batch(batch)
 
                 for k in ["policy_loss", "value_loss", "entropy",
-                          "total_loss", "clip_fraction"]:
+                          "bc_loss", "total_loss", "clip_fraction"]:
                     metrics[k] += batch_metrics[k]
 
                 epoch_kl += batch_metrics["approx_kl"]
@@ -363,7 +404,7 @@ class PPOTrainer:
         # Average metrics
         if num_batches > 0:
             for k in ["policy_loss", "value_loss", "entropy",
-                      "total_loss", "approx_kl", "clip_fraction"]:
+                      "bc_loss", "total_loss", "approx_kl", "clip_fraction"]:
                 metrics[k] /= num_batches
 
         # Explained variance
@@ -451,11 +492,30 @@ class PPOTrainer:
         # Entropy bonus
         entropy_loss = entropy.mean()
 
+        # Behavior-cloning kickstart: plain imitation (-log pi) of the
+        # heuristic teacher, ONLY on steps it overrode the policy
+        # (bc_flags). No advantage weighting — the teacher's corrections
+        # are treated as supervision while bc_coef anneals to zero, after
+        # which PPO's reward signal (which CAN disagree with the teacher)
+        # is all that remains.
+        bc_flags = batch["bc_flags"]
+        bc_count = bc_flags.sum()
+        if self._bc_coef_now > 0 and bc_count > 0:
+            # Clamp: a type/target-inconsistent action would carry a ~-1e9
+            # conditioned-target logit and one bad sample would dwarf the
+            # whole loss. Storage already guards this (exec_lp > -30);
+            # the clamp makes the term immune to any future encoding bug.
+            bc_log_probs = torch.clamp(new_log_probs, min=-30.0)
+            bc_loss = -(bc_flags * bc_log_probs).sum() / bc_count
+        else:
+            bc_loss = torch.zeros((), device=self.device)
+
         # Total loss
         total_loss = (
             policy_loss
             + cfg.value_coef * value_loss
             - cfg.entropy_coef * entropy_loss
+            + self._bc_coef_now * bc_loss
         )
 
         # Gradient step
@@ -472,6 +532,7 @@ class PPOTrainer:
             "policy_loss": policy_loss.item(),
             "value_loss": value_loss.item(),
             "entropy": entropy_loss.item(),
+            "bc_loss": bc_loss.item(),
             "total_loss": total_loss.item(),
             "approx_kl": approx_kl,
             "clip_fraction": clip_fraction,
@@ -493,6 +554,7 @@ class PPOTrainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "total_updates": self.total_updates,
             "total_steps": self.total_steps,
+            "bc_start_update": self.bc_start_update,
             "config": self.config,
         }, path)
 
@@ -540,6 +602,7 @@ class PPOTrainer:
             # Don't load optimizer — references old parameter shapes
         self.total_updates = checkpoint.get("total_updates", 0)
         self.total_steps = checkpoint.get("total_steps", 0)
+        self.bc_start_update = checkpoint.get("bc_start_update", None)
 
     def get_stats(self) -> dict:
         """Get trainer statistics."""

@@ -1259,6 +1259,7 @@ class Trainer:
             # to the real cause (the old behavior trained the shop head on
             # noise: outcomes of redirected buys credited to whatever the
             # net happened to sample).
+            was_override = False
             if action_succeeded:
                 exec_action = self._encode_executed_action(
                     api_method, api_params, action_np)
@@ -1279,6 +1280,9 @@ class Trainer:
                     if np.isfinite(exec_lp) and exec_lp > -30.0:
                         action_np = exec_action
                         log_prob = exec_lp
+                        # Teacher correction — flag for the BC kickstart
+                        # loss (imitates only overridden steps).
+                        was_override = True
 
             # Settle the PREVIOUS action's outcome. The delta prev_raw ->
             # raw_state is what the last stored decision caused — it only
@@ -1323,6 +1327,7 @@ class Trainer:
             self.ppo.store_transition(
                 state_vec, action_np, log_prob, store_reward, value,
                 False, action_mask, game_state_name,
+                bc_flag=was_override,
             )
             # Remember the last real (non-terminal) transition so terminal
             # rewards can be attached to the actual last state/action rather
@@ -3093,6 +3098,9 @@ class Trainer:
             f"VL {metrics['value_loss']:>7.4f} | "
             f"Ent {metrics['entropy']:>6.3f} | "
             f"KL {metrics['approx_kl']:>6.4f} | "
+            f"BC {metrics.get('bc_loss', 0.0):>6.3f}"
+            f"@{metrics.get('bc_coef', 0.0):.2f}"
+            f"({metrics.get('bc_fraction', 0.0):.0%}) | "
             f"LR {self.ppo.get_learning_rate():.2e}"
         )
 
