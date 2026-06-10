@@ -164,12 +164,14 @@ BOSS_BLIND_INFO: dict[str, tuple[int, Optional[str]]] = {
     "The Needle":  (2, None),  # Only 1 hand per round
     # Discard removal (category 3)
     "The Hook":    (3, None),  # Discards 2 random cards per hand
-    "The Ox":      (3, None),  # Playing most played hand sets money to $0
-    "The Wheel":   (3, None),  # 1 in 7 chance cards are drawn face down
-    # Hand type debuff (category 4)
+    "The Water":   (3, None),  # Start with 0 discards
+    # Scoring debuff (category 4)
     "The Flint":   (4, None),  # Halves base chips and mult
-    "The Water":   (4, None),  # Start with 0 discards
+    "The Arm":     (4, None),  # Decreases level of played poker hand
     # Other (category 5)
+    "The Ox":      (5, None),  # Playing most played hand sets money to $0
+    "The Wheel":   (5, None),  # 1 in 7 chance cards are drawn face down
+    "The Tooth":   (5, None),  # Lose $1 per card played
     "The Wall":    (5, None),  # Blind has extra large score requirement
     "The House":   (5, None),  # First hand is drawn face down
     "The Mark":    (5, None),  # All face cards are drawn face down
@@ -1033,7 +1035,10 @@ class GameStateManager:
         interest = min(int(money) // 5, interest_cap)
 
         # Blind payout: Small=$3, Big=$4, Boss=$5 (base values)
-        blind_payout = 5.0 if is_boss else 4.0
+        _blind_type = (current_blind.get("type", "")
+                       if isinstance(current_blind, dict) else "")
+        blind_payout = {"SMALL": 3.0, "BIG": 4.0, "BOSS": 5.0}.get(
+            _blind_type, 4.0)
 
         # Joker passive income
         joker_income = 0.0
@@ -1074,7 +1079,11 @@ class GameStateManager:
         # Help the agent learn that rerolling is +EV when it has spare cash.
         reroll_cost = rnd.get("reroll_cost", 5)
         joker_slots_used = len(joker_cards)
-        joker_slots_max = raw.get("jokers", {}).get("max_slots", 5)
+        # The API key is "limit" (every other consumer uses it) — "max_slots"
+        # does not exist, so this always silently defaulted to 5 and the
+        # open-slot/reroll-efficiency features were wrong with Antimatter
+        # or negative jokers.
+        joker_slots_max = raw.get("jokers", {}).get("limit", 5)
         open_joker_slots = max(joker_slots_max - joker_slots_used, 0)
 
         # Safe-to-spend money: excess above current interest tier floor.
@@ -1582,7 +1591,9 @@ class GameStateManager:
                 card = shop_vouchers[slot_idx]
                 key = card.get("key", "")
                 buy_cost = _as_dict(card.get("cost", {})).get("buy", 0)
-                vec[slot_offset] = (VOUCHER_MAP.get(key, 0) + 1) / 32.0
+                # Unknown voucher keys encode as 0.0 — the old miss-default
+                # of 0 collided with v_overstock's (0+1)/32 encoding.
+                vec[slot_offset] = (VOUCHER_MAP.get(key, -1) + 1) / 32.0
                 vec[slot_offset + 1] = _clamp_norm(buy_cost, 20.0)
                 vec[slot_offset + 2] = 1.0 if raw.get("money", 0) >= buy_cost else 0.0
                 vec[slot_offset + 3] = 0.0  # placeholder
