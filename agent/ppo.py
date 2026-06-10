@@ -143,9 +143,15 @@ class RolloutBuffer:
 
         Must be called after rollout is complete and before get_batches().
 
+        Buffer convention is Gym-style: dones[t] == 1 means action t ended
+        the episode, so step t must not bootstrap into (or chain GAE from)
+        whatever follows it in the buffer — that's the next episode.
+
         Args:
             last_value: V(s_{T+1}) — bootstrap value for the last state
-            last_done: whether the last state was terminal
+            last_done: whether the state after the final transition is
+                terminal (safety net for a terminal observed right at the
+                rollout boundary before amend_last could mark it)
             gamma: discount factor
             gae_lambda: GAE lambda
         """
@@ -153,15 +159,16 @@ class RolloutBuffer:
         last_gae = 0.0
 
         for t in reversed(range(n)):
+            done_t = self.dones[t]
             if t == n - 1:
-                next_non_terminal = 1.0 - float(last_done)
+                done_t = max(done_t, float(last_done))
                 next_value = last_value
             else:
-                next_non_terminal = 1.0 - self.dones[t + 1]
                 next_value = self.values[t + 1]
 
-            delta = self.rewards[t] + gamma * next_value * next_non_terminal - self.values[t]
-            last_gae = delta + gamma * gae_lambda * next_non_terminal * last_gae
+            non_terminal = 1.0 - done_t
+            delta = self.rewards[t] + gamma * next_value * non_terminal - self.values[t]
+            last_gae = delta + gamma * gae_lambda * non_terminal * last_gae
             self.advantages[t] = last_gae
 
         self.returns[:n] = self.advantages[:n] + self.values[:n]
