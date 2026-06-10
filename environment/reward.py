@@ -128,6 +128,14 @@ class RewardCalculator:
         self._prev_scaling_values: dict[int, float] = {}  # slot_id → value
         self._prev_joker_ids: set[int] = set()  # track joker IDs to detect sells
         self._prev_joker_contributions: dict[int, float] = {}  # id → normalized contribution
+        # Potentials for delta-based shaping (diversity / interest). These
+        # bonuses used to be re-paid on EVERY step, accruing +20-40 over a
+        # 300-decision run vs +10 for actually winning — the agent was paid
+        # more for existing-while-diverse than for winning. Paying only the
+        # CHANGE in potential (acquire a category: +once; lose it: -once)
+        # keeps the incentive without the runaway accrual.
+        self._prev_diversity_potential = 0.0
+        self._prev_interest_potential = 0.0
 
     def step(self, prev_state: Optional[dict], new_state: dict,
              action: Optional[str] = None,
@@ -354,13 +362,17 @@ class RewardCalculator:
 
         # Interest bonus: reward maintaining money in $5 increments
         # Balatro gives $1 interest per $5 held, up to $5 max (at $25)
-        # Dampened during Scale phase — stop rewarding gold hoarding
-        if new_money >= 5:
-            interest_tiers = min(new_money // 5, 5)
-            ante = new_state.get("ante_num", 1)
-            _, w_scale, _ = compute_phase_weights(ante)
-            interest_damping = 1.0 - 0.7 * w_scale  # 30% of normal at peak Scale
-            reward += interest_tiers * REWARD_INTEREST_THRESHOLD * interest_damping
+        # Dampened during Scale phase — stop rewarding gold hoarding.
+        # Paid as a POTENTIAL DELTA (crossing a tier up: +, dropping: −),
+        # not re-paid per step — see reset() for why.
+        interest_tiers = min(new_money // 5, 5) if new_money >= 5 else 0
+        ante = new_state.get("ante_num", 1)
+        _, w_scale, _ = compute_phase_weights(ante)
+        interest_damping = 1.0 - 0.7 * w_scale  # 30% of normal at peak Scale
+        interest_potential = (interest_tiers * REWARD_INTEREST_THRESHOLD
+                              * interest_damping)
+        reward += interest_potential - self._prev_interest_potential
+        self._prev_interest_potential = interest_potential
 
         return reward
 
@@ -379,7 +391,10 @@ class RewardCalculator:
         """
         joker_cards = state.get("jokers", {}).get("cards", [])
         if not joker_cards:
-            return 0.0
+            # All jokers gone — settle the potential down to zero
+            delta = 0.0 - self._prev_diversity_potential
+            self._prev_diversity_potential = 0.0
+            return delta
 
         from data.jokers import JOKERS
         from environment.hand_eval import _api_key_to_name
@@ -423,7 +438,11 @@ class RewardCalculator:
         if has_scaling:
             reward += REWARD_SCALING_BONUS
 
-        return reward
+        # Pay only the CHANGE in diversity potential (see reset()) — gaining
+        # a category pays once, losing one costs once, holding pays nothing.
+        delta = reward - self._prev_diversity_potential
+        self._prev_diversity_potential = reward
+        return delta
 
     def _check_sell_penalty(self, prev_state: dict, new_state: dict) -> float:
         """Penalize selling jokers that contributed significantly to scoring.
@@ -728,9 +747,11 @@ class ConfigurableRewardCalculator(RewardCalculator):
             # abs(delta) so spending money is penalized (money_loss is negative)
             reward += abs(delta) * w.money_loss
 
-        if new_money >= 5:
-            interest_tiers = min(new_money // 5, 5)
-            reward += interest_tiers * w.interest_threshold
+        # Potential delta, not per-step accrual (see RewardCalculator.reset)
+        interest_tiers = min(new_money // 5, 5) if new_money >= 5 else 0
+        interest_potential = interest_tiers * w.interest_threshold
+        reward += interest_potential - self._prev_interest_potential
+        self._prev_interest_potential = interest_potential
 
         return reward
 
