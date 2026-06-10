@@ -146,6 +146,27 @@ allows Hex/Ankh only with exactly one joker, and returns None to skip.
 Planet picks are now weighted by play frequency (0.05 floor) — absolute gain
 always favored high-tier hands the bot never plays. Commit `d68204f`.
 
+### 12. Real Balatro scoring order: card x-mults BEFORE joker flat mult
+Glass (×2), Polychrome (×1.5) and held Steel (×1.5) fire during card/held
+scoring; jokers trigger last. The model applied `enhance_xmult` as a final
+global multiplier — over joker flat mult too — overestimating those hands by
+up to ~50% (Glass pair + Joker: model 336, real 224) and triggering false
+"wins the round" plays. Fold card x-mults into mult *before* adding joker
+mult. Boss filters must compare `hand_type`, never the chase `detail` string
+("Flush:Hearts" ≠ "Flush" — The Eye/Mouth filters were silent no-ops); The
+Mouth's lock derives from `round_played > 0`, not the chase-commitment field
+(reset on every play). The Psychic pads plays to exactly 5 (kickers are
+free). Commit `52b5bc7`.
+
+### 13. The 12 card-selection action bits only matter for action type 8
+Play/discard cards come from the planner; only "use consumable with hand
+targets" reads the bits. Their log-probs/entropy must be gated on
+`type_action == 8` in the network — folded in unconditionally they churn the
+PPO ratio on causally-dead dimensions, trip `target_kl` on irrelevant drift,
+and point the entropy bonus at no-op bits. Target entropy must use the
+*conditioned* target distribution (the one actually sampled). Commit
+`c352b54`.
+
 
 ---
 
