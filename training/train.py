@@ -1285,7 +1285,11 @@ class Trainer:
                 unknown_state_count = 0  # reset stuck counter
                 self._round_eval_count = 0  # reset win-screen detector
                 if state == "SHOP":
-                    self._shop_rerolls = 0
+                    # Reset the reroll budget only on ENTRY to a shop —
+                    # resetting on every poll made the per-shop reroll cap
+                    # dead code (the counter never survived to the guards).
+                    if getattr(self, '_prev_actionable_state', None) != "SHOP":
+                        self._shop_rerolls = 0
                     # ── RAW STATE DUMP — see exactly what the API returns ──
                     import json as _json
                     _raw_shop = raw.get("shop", {})
@@ -1430,6 +1434,7 @@ class Trainer:
                     raw = await self._auto_buy_vouchers(raw)
                     post_auto_money = raw.get("money", 0)
                     self._auto_action_this_step = (pre_auto_money != post_auto_money)
+                self._prev_actionable_state = state
                 return raw
 
             # SMODS_BOOSTER_OPENED — select best card from pack
@@ -2409,7 +2414,9 @@ class Trainer:
 
             # Reroll cap: only spend surplus above interest floor.
             # Interest floor = $25 base, $50 with Seed Money, $125 with Money Tree.
-            vouchers = raw_state.get("vouchers", {}).get("owned", [])
+            # Owned vouchers are a flat key list under "used_vouchers" —
+            # raw["vouchers"] is the SHOP's voucher stock and has no "owned".
+            vouchers = raw_state.get("used_vouchers", [])
             v_set = set(vouchers) if isinstance(vouchers, list) else set()
             if "v_money_tree" in v_set:
                 interest_floor = 125
