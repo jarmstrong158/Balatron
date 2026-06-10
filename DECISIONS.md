@@ -95,6 +95,15 @@ here — they must be re-applied if the mod is reinstalled/updated:
   on `G.round_eval` in `common_events.lua` (lines 1072 & 1195) to stop the
   endless-mode "attempt to index field 'round_eval' (a nil value)" crash.
 
+### 7. Don't raise game speed to train faster — it destabilizes the game
+Rollout collection (the live game) is the real wall-clock bottleneck, not the
+net — so cranking `BALATROBOT_GAMESPEED` *looks* like the obvious speedup. It
+isn't: high speeds repeatedly cause UNKNOWN-state stalls, desyncs, `round_eval`
+nil-crashes, and hung packs. Speed went `100 → 16 → 8` for exactly this reason.
+**Keep it at 8.** Stability at 8 beats churn at higher speeds. (The GPU doesn't
+help here either — the net is tiny; the minutes go to the game playing, not the
+PPO update.)
+
 ### 6. Print UTF-8 safely / recover from process death
 - The trainer prints emoji that crash on Windows `cp1252` when stdout is
   redirected/piped — always launch with `PYTHONUTF8=1`.
