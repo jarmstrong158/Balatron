@@ -95,6 +95,13 @@ here — they must be re-applied if the mod is reinstalled/updated:
   on `G.round_eval` in `common_events.lua` (lines 1072 & 1195) to stop the
   endless-mode "attempt to index field 'round_eval' (a nil value)" crash.
 
+### 6. Print UTF-8 safely / recover from process death
+- The trainer prints emoji that crash on Windows `cp1252` when stdout is
+  redirected/piped — always launch with `PYTHONUTF8=1`.
+- The watchdog restarts **Balatro** on a hung/crashed game (~48s), but nothing
+  restarts the **trainer process** if it dies — it can sit idle. Relaunch from
+  the newest checkpoint. (A supervisor loop is the proper fix.)
+
 ### 7. Don't raise game speed to train faster — it destabilizes the game
 Rollout collection (the live game) is the real wall-clock bottleneck, not the
 net — so cranking `BALATROBOT_GAMESPEED` *looks* like the obvious speedup. It
@@ -104,12 +111,41 @@ nil-crashes, and hung packs. Speed went `100 → 16 → 8` for exactly this reas
 help here either — the net is tiny; the minutes go to the game playing, not the
 PPO update.)
 
-### 6. Print UTF-8 safely / recover from process death
-- The trainer prints emoji that crash on Windows `cp1252` when stdout is
-  redirected/piped — always launch with `PYTHONUTF8=1`.
-- The watchdog restarts **Balatro** on a hung/crashed game (~48s), but nothing
-  restarts the **trainer process** if it dies — it can sit idle. Relaunch from
-  the newest checkpoint. (A supervisor loop is the proper fix.)
+### 8. The rollout buffer uses the Gym done convention — GAE must too  *(critical)*
+`dones[t] == 1` means **action t ended the episode** (that's what `amend_last`
+sets). `compute_gae` originally read `dones[t+1]` (the CleanRL convention,
+where done marks a *reset state*) — off by one index, every episode: the
+terminal action bootstrapped V(next episode's start), diluting the win/loss
+reward ~3x, and the second-to-last action was treated as terminal. Any new
+GAE/return code must mask with `dones[t]`. Fixed in commit `2f32988`.
+
+### 9. Step rewards settle one fetch later — amend, don't store
+A reward computed from the delta `prev_raw → raw_state` describes the
+**previous** action (both snapshots predate the current one). It must be
+credited via `amend_last_transition`, never stored with the current action —
+storing it created a one-step lag that put the blind-clear bonus on the first
+SHOP action instead of the winning play. New transitions store reward 0; the
+rollout-boundary block does a final settle so the last decision still gets
+its reward. Any new code path that stores transitions or restarts the game
+must keep this invariant (restart paths close the episode with
+`amend_last_transition(done=True)` and call `_reset_run_state()`). Commits
+`8f814b3`, `fe0a6dc`.
+
+### 10. Shaping bonuses must be potential DELTAS, never per-step accruals
+The joker-diversity and interest bonuses were re-paid every decision and
+accrued +20–40 per run vs +10 for winning — the agent was paid more for
+existing-while-diverse than for winning. Pay `Φ(s′) − Φ(s)` (acquire: +once,
+lose: −once, hold: 0). Apply the same rule to any future shaping term.
+Commit `c202a72`.
+
+### 11. Spectral packs need their own evaluator
+Routing spectral picks through `pick_best_planet` silently returned index 0
+(no spectral key matches a planet), blindly taking Hex/Ankh — which destroy
+every joker but one. `evaluate_pack_spectral` ranks all spectral cards,
+allows Hex/Ankh only with exactly one joker, and returns None to skip.
+Planet picks are now weighted by play frequency (0.05 floor) — absolute gain
+always favored high-tier hands the bot never plays. Commit `d68204f`.
+
 
 ---
 
