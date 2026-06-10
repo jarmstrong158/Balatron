@@ -45,3 +45,9 @@ htmlcov/
 # Secrets / Config
 .env
 *.key
+
+# Context Keeper (local working memory; DECISIONS.md is the shared, canonical log)
+.context/
+
+# Win recordings (generated; large)
+recordings/
