@@ -1253,6 +1253,33 @@ class Trainer:
             # and we already rearrange at round start + before each play.
             # This eliminates ~120-perm brute force per buy/sell action.
 
+            # Reconcile sampled vs EXECUTED action. When a heuristic
+            # override changed what ran, store the executed action with its
+            # log-prob under the current policy so PPO credits the outcome
+            # to the real cause (the old behavior trained the shop head on
+            # noise: outcomes of redirected buys credited to whatever the
+            # net happened to sample).
+            if action_succeeded:
+                exec_action = self._encode_executed_action(
+                    api_method, api_params, action_np)
+                if (exec_action is not None
+                        and not np.array_equal(exec_action, action_np)):
+                    with torch.no_grad():
+                        ea_t = torch.tensor(
+                            exec_action, dtype=torch.float32).unsqueeze(0)
+                        if cfg.device == "cuda" and torch.cuda.is_available():
+                            ea_t = ea_t.cuda()
+                        _, exec_lp_t, _, _ = self.network.get_action_and_value(
+                            state_t, head_idx, mask_t, action=ea_t)
+                    exec_lp = exec_lp_t[0].cpu().item()
+                    # Guard: an executed action that is ~impossible under
+                    # the masked policy (e.g. a force-buy of a masked
+                    # target) would store log_prob -> -inf and blow up the
+                    # PPO ratio. Keep the sampled action in that case.
+                    if np.isfinite(exec_lp) and exec_lp > -30.0:
+                        action_np = exec_action
+                        log_prob = exec_lp
+
             # Settle the PREVIOUS action's outcome. The delta prev_raw ->
             # raw_state is what the last stored decision caused — it only
             # became observable on this fetch. It must be credited to that
@@ -2052,6 +2079,78 @@ class Trainer:
             self.reward_calc.reset()
             self.game.reset()
         return None  # Timed out
+
+    def _encode_executed_action(self, api_method: str,
+                                api_params: Optional[dict],
+                                sampled_action: np.ndarray
+                                ) -> Optional[np.ndarray]:
+        """Map the EXECUTED API call back to a 14-dim action tensor.
+
+        The heuristic layer routinely overrides the sampled action (buy
+        redirects, reroll->buy conversion, leave-guard force-buys, planner
+        choosing play vs discard). Storing the sampled action with the
+        overridden action's outcome trains the policy heads on structured
+        noise — PPO credits results to choices that never executed. This
+        re-encodes what actually ran so the gradient matches reality.
+
+        Returns None when the call has no action-tensor equivalent
+        (gamestate no-op, pack handling, menu) or the index falls outside
+        the head's target range — the caller keeps the sampled action.
+        """
+        params = api_params or {}
+        a = sampled_action.copy()
+        target: Optional[int] = None
+
+        if api_method == "play":
+            atype = 0
+        elif api_method == "discard":
+            atype = 1
+        elif api_method == "buy":
+            if "card" in params:
+                if params["card"] > 2:
+                    return None
+                atype, target = 2, 0 + params["card"]
+            elif "voucher" in params:
+                if params["voucher"] > 1:
+                    return None
+                atype, target = 3, 3 + params["voucher"]
+            elif "pack" in params:
+                if params["pack"] > 1:
+                    return None
+                atype, target = 4, 5 + params["pack"]
+            else:
+                return None
+        elif api_method == "sell":
+            if params.get("joker", 0) > 4:
+                return None
+            atype, target = 5, 7 + params.get("joker", 0)
+        elif api_method == "reroll":
+            atype = 7
+        elif api_method == "use":
+            if params.get("consumable", 0) > 1:
+                return None
+            atype, target = 8, 12 + params.get("consumable", 0)
+            # Card bits matter only for type 8 — set them from the real
+            # targets so the (gated) card log-prob describes what ran.
+            a[1:13] = 0.0
+            for ci in params.get("cards", []) or []:
+                if 0 <= ci < 12:
+                    a[1 + ci] = 1.0
+        elif api_method == "select":
+            atype = 9
+        elif api_method == "skip":
+            atype = 10
+        elif api_method == "next_round":
+            atype = 13
+        else:
+            return None  # gamestate / pack / menu — no tensor equivalent
+
+        a[0] = float(atype)
+        if target is not None:
+            a[13] = float(target)
+        # No-target actions keep the sampled target — the conditioned
+        # target distribution is uniform for them, so it cannot matter.
+        return a
 
     def _action_to_api_call(self, action: np.ndarray,
                             raw_state: dict) -> tuple[str, Optional[dict]]:
