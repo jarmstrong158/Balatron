@@ -18,6 +18,7 @@ A reinforcement learning agent that plays [Balatro](https://www.playbalatro.com/
   - [State Vector](#state-vector)
   - [Action Space](#action-space)
   - [Reward Shaping](#reward-shaping)
+  - [Behavior-Cloning Kickstart](#behavior-cloning-kickstart)
 - [Scoring Engine](#scoring-engine)
 - [Joker Schema Database](#joker-schema-database)
 - [Project Structure](#project-structure)
@@ -170,6 +171,16 @@ Two structural rules keep the signal honest:
 
 - **State bonuses are potential deltas, never per-step accruals.** Joker-diversity and interest-tier bonuses pay only on *change* (acquire a category: +once; lose it: −once; hold: zero). Paid per-step, they accrued +20–40 over a run vs +10 for winning — the agent was being paid more for existing than for winning.
 - **Each reward is credited to the action that caused it.** A state delta only becomes observable on the *next* fetch, so it's amended onto the previous transition rather than stored with the current action — otherwise every step reward lands one decision late, often on a different policy head.
+
+### Behavior-Cloning Kickstart
+
+The hybrid design has a structural catch: when heuristics override most consequential decisions (the planner picks play vs discard, shop buys get redirected), the policy's choices barely influence outcomes — so PPO's gradient is honestly near zero and the network coasts. Two mechanisms fix this:
+
+1. **Executed-action storage.** When a heuristic overrides the sampled action, the rollout buffer stores what *actually ran* (re-encoded to the action tensor, with its log-prob under the current policy) — so PPO credits outcomes to the real cause instead of training the policy heads on noise.
+
+2. **Annealed imitation loss.** Overridden steps are flagged as *teacher corrections*, and an auxiliary behavior-cloning term — `bc_coef · (−log π(executed action))`, only on flagged steps — distills the heuristic layer into the policy. `bc_coef` anneals linearly from 0.5 to 0 over 200 updates (anchored to first engagement, persisted in checkpoints across restarts). Early on the policy imitates the teacher; as the coefficient decays, PPO's reward signal — which *can* disagree with the teacher — takes over.
+
+This is the AlphaGo-style recipe (supervised warm-start, then RL surpasses the teacher), and it's what makes the long-term plan safe: once the heuristics are distilled into the policy, the hard overrides and bias masks can be lifted one at a time without the win rate falling off a cliff. Legality masks stay forever; bias masks are trainer wheels.
 
 ---
 
@@ -344,13 +355,11 @@ python -u -m training.train --total-timesteps 1500000 --device cpu --checkpoint-
 
 `PYTHONUTF8=1` is required when output is redirected or piped — the trainer prints emoji that crash on Windows cp1252. `--device cpu` is the practical choice: the wall-clock bottleneck is live-game rollout collection, not the (small) network, so a GPU buys almost nothing here. `--checkpoint-interval 2` saves every 2 PPO updates so a crash loses minutes, not hours.
 
-Training progress is printed to the console:
+Training progress is printed per PPO update:
 ```
-Runs: 50 (lifetime: 500) | Wins: 3 (lifetime: 12)
-  Avg reward: 8.42 | Best: 22.1 | Avg ante: 5.3
-  Win rate: 6.0% (lifetime: 2.4%)
-  Steps: 125000 / 1500000 (8.3%)
+Update   205 | Step  425,843 | FPS 664 | Ep 24 | R 27.30 | Ante 4.2 | WR 0.0% | PL 0.0406 | VL 20.96 | Ent 2.635 | KL 0.0000 | BC 3.794@0.50(11%) | LR 2.15e-04
 ```
+`PL`/`VL`/`Ent`/`KL` are the PPO policy loss, value loss, entropy, and approximate KL divergence. `BC loss@coef(frac)` is the behavior-cloning kickstart — the imitation loss, its current (annealing) coefficient, and the fraction of the rollout that was heuristic-overridden.
 
 ### Resuming from Checkpoint
 
