@@ -617,11 +617,16 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                     # Planet cards level up hand types — always useful for scaling
                     boost = HAND_BIAS_STRENGTH * 0.25 if needs_upgrade else HAND_BIAS_STRENGTH * 0.15
                     mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(boost) * ip
+                    # Keeps ACTION_BUY_JOKER unmasked — without this, a shop
+                    # whose only buyable card was a planet had BUY hard-
+                    # blocked below and the planet was unreachable.
+                    any_buyable_joker = True
                     print(f"[SHOP-EVAL] {card_key}: planet cost=${cost}",
                           flush=True)
                 elif card_set == "TAROT" and has_cons_slot and card_key in GOOD_TAROT_KEYS:
                     # Good tarots — moderate priority
                     mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.15) * ip
+                    any_buyable_joker = True  # same: keep BUY reachable
                     print(f"[SHOP-EVAL] {card_key}: good tarot cost=${cost}",
                           flush=True)
                 else:
@@ -1189,6 +1194,26 @@ def _is_action_feasible(action_type: int, raw_state: dict) -> bool:
         joker_cards = raw_state.get("jokers", {}).get("cards", [])
         shop_cards = raw_state.get("shop", {}).get("cards", [])
         money = raw_state.get("money", 0)
+
+        # Shop consumables (planets / good tarots / Hermit) are bought via
+        # the same BUY action and need a CONSUMABLE slot, not a joker slot.
+        # Skipping them here made BUY infeasible in a shop whose only
+        # buyable card was a planet — the mask deadlock that kept shop
+        # planets unreachable.
+        cons = raw_state.get("consumables", {})
+        if len(cons.get("cards", [])) < cons.get("limit", 2):
+            GOOD_TAROT_KEYS = {"c_strength", "c_death", "c_empress",
+                               "c_justice", "c_temperance"}
+            for c in shop_cards[:SHOP_JOKER_SLOTS]:
+                if not _is_non_joker_card(c):
+                    continue
+                c_set = c.get("set", "").upper()
+                c_key = c.get("key", "")
+                if (c_set == "PLANET" or c_key in MUST_BUY_CONSUMABLES
+                        or (c_set == "TAROT" and c_key in GOOD_TAROT_KEYS)):
+                    if c.get("cost", {}).get("buy", 999) <= money:
+                        return True
+
         has_slot = len(joker_cards) < JOKER_SLOTS
         if not has_slot:
             # At capacity — allow if:
