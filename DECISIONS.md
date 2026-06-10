@@ -37,6 +37,20 @@ See gotcha #1 below. The win reward (`reward.py`) and win recording (`train.py`)
 key off **getting past the ante-8 boss** (ante advances to 9 in endless, or a
 post-boss SHOP/ROUND_EVAL state is reached) — never the raw `won` flag.
 
+### BC kickstart: distill heuristics into the policy, then lift the overrides
+Weight-delta analysis (update 198→202) proved the policy heads were barely
+learning (KL pinned at 0.0000; the blind head literally frozen — one legal
+action means zero policy gradient) because heuristics override most
+consequential decisions. The path to real learning: (1) store **executed**
+actions, not sampled ones (commit `31c527a`); (2) a behavior-cloning
+auxiliary loss imitates the heuristic teacher **only on overridden steps**
+(`bc_flag`), with `bc_coef` annealed 0.5 → 0 over 200 updates, anchored to
+first engagement and persisted in checkpoints (commit `52836ec`); (3) only
+*then* lift authority gradually — play/discard tempo first, then shop
+overrides one at a time. Legality masks stay forever; bias masks are the
+trainer wheels that come off. BC can never exceed the teacher — the anneal
+to zero is what lets PPO surpass it.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
