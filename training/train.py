@@ -543,6 +543,33 @@ class Trainer:
         # Ensure checkpoint directory exists
         os.makedirs(config.checkpoint_dir, exist_ok=True)
 
+    def _reset_run_state(self):
+        """Clear all per-run flags and pending state.
+
+        Must run on every path that abandons or finishes a run (GAME_OVER
+        and every crash-recovery restart). A stale _win_recorded surviving
+        a post-win wedge restart made the NEXT run's loss count as a win
+        at GAME_OVER (won = ante > 8 or already_recorded) — logged, stat-
+        counted, and video-recorded as a win. Stale _pending_* could fire
+        actions aimed at the previous run's shop.
+        """
+        self._win_recorded = False
+        self._win_reward_stored = False
+        self._pending_upgrade_buy = None
+        self._pending_rearrange = None
+        self._pending_hand_rearrange = None
+        self._pending_hand_rearrange_fallback = None
+        self._last_api_method = None
+        self._last_action_succeeded = True
+        self._prev_actionable_state = None
+        self._shop_rerolls = 0
+        self._shop_noop_count = 0
+        self._prev_shop_fingerprint = None
+        self._state_stuck_count = 0
+        self._prev_state_fingerprint = None
+        self._current_ante = 1
+        self._current_score = 0
+
     async def _restart_balatro(self):
         """Kill Balatro and relaunch it after a crash.
 
@@ -564,6 +591,21 @@ class Trainer:
             )
         except Exception:
             pass  # never block restart for recording
+
+        # Close the crashed episode in the tracker (unless the win-fallback
+        # already ended it) so its reward/length/ante don't bleed into the
+        # next run's stats. Guard on length so a menu-time restart doesn't
+        # count a phantom zero-length episode.
+        try:
+            if (not getattr(self, '_win_recorded', False)
+                    and self.episode_tracker.current_length > 0):
+                self.episode_tracker.end_episode(False)
+        except Exception:
+            pass
+
+        # Recording saved and episode closed — now clear ALL per-run state
+        # so nothing leaks into the next run.
+        self._reset_run_state()
 
         # Kill existing Balatro process
         try:
@@ -606,8 +648,11 @@ class Trainer:
                 state = raw.get("state", "")
                 print(f"[CRASH-RECOVERY] API responded — state={state}", flush=True)
 
-                # If we're at menu, start a new run
+                # If we're at menu, start a new run (and record it — this
+                # path bypasses the MENU branch in _get_actionable_state,
+                # so without start_run() a win in this run had no video)
                 if state == "MENU":
+                    self.recorder.start_run()
                     seed = ''.join(random.choices(string.ascii_uppercase, k=8))
                     await self.game.execute_action(
                         "start", {"deck": "RED", "stake": "WHITE", "seed": seed}
@@ -849,8 +894,7 @@ class Trainer:
 
                 self.reward_calc.reset()
                 self.game.reset()
-                self._win_recorded = False  # reset for next run
-                self._win_reward_stored = False  # reset for next run
+                self._reset_run_state()  # win flags, pending actions, etc.
                 prev_raw = None
 
                 # Credit the terminal reward to the real decision that ended
@@ -898,6 +942,10 @@ class Trainer:
                     print(f"[STUCK] {self._silent_skip_count} consecutive "
                           f"state-encode failures — restarting Balatro", flush=True)
                     self._silent_skip_count = 0
+                    # Close the crashed episode in the buffer — otherwise
+                    # GAE bootstraps the new run's values into the dead run.
+                    self.ppo.amend_last_transition(done=True)
+                    last_done = True
                     await self._restart_balatro()
                     self.reward_calc.reset()
                     self.game.reset()
@@ -943,6 +991,9 @@ class Trainer:
                           f"action in {game_state_name} — restarting Balatro",
                           flush=True)
                     self._silent_skip_count = 0
+                    # Close the crashed episode in the buffer (see above)
+                    self.ppo.amend_last_transition(done=True)
+                    last_done = True
                     await self._restart_balatro()
                     self.reward_calc.reset()
                     self.game.reset()
@@ -1130,9 +1181,15 @@ class Trainer:
                           f"raw={_json.dumps(raw_state, default=str)[:1500]}", flush=True)
                     self._state_stuck_count = 0
                     self._prev_state_fingerprint = None
+                    # Close the crashed episode in the buffer, and drop the
+                    # stale prev_raw — otherwise the next settle computes a
+                    # junk delta between the dead run and the fresh one.
+                    self.ppo.amend_last_transition(done=True)
+                    last_done = True
                     await self._restart_balatro()
                     self.reward_calc.reset()
                     self.game.reset()
+                    prev_raw = None
                     continue
             else:
                 self._state_stuck_count = 0
