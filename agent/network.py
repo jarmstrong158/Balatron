@@ -302,22 +302,31 @@ class BalatronNetwork(nn.Module):
         )
         cond_target_dist = torch.distributions.Categorical(logits=conditioned_target_logits)
 
-        # Also need unconditional target dist for entropy calculation
-        target_dist = torch.distributions.Categorical(logits=target_logits)
+        # The 12 card-selection bits only affect execution for action type 8
+        # (use consumable with hand-card targets) — for play/discard the
+        # planner chooses the cards and for everything else they're unread.
+        # Folding their log-probs/entropy into the totals unconditionally
+        # made the PPO ratio churn on dimensions with no causal effect
+        # (more clipping), let approx_kl trip target_kl on irrelevant drift,
+        # and pointed most of the entropy bonus (12 Bernoullis, up to 8.3
+        # nats) at no-op bits instead of the action-type head.
+        card_used = (type_action == 8).float()
 
         # Log probabilities
         type_log_prob = type_dist.log_prob(type_action)
         card_log_prob = card_dist.log_prob(card_action).sum(dim=-1)
         target_log_prob = cond_target_dist.log_prob(target_action)
 
-        total_log_prob = type_log_prob + card_log_prob + target_log_prob
+        total_log_prob = type_log_prob + card_used * card_log_prob + target_log_prob
 
-        # Entropy
+        # Entropy — target entropy uses the CONDITIONED dist (the one that
+        # is actually sampled from); the unconditional dist pushed mass
+        # toward targets that can never be sampled for the chosen type.
         type_entropy = type_dist.entropy()
         card_entropy = card_dist.entropy().sum(dim=-1)
-        target_entropy = target_dist.entropy()
+        target_entropy = cond_target_dist.entropy()
 
-        total_entropy = type_entropy + card_entropy + target_entropy
+        total_entropy = type_entropy + card_used * card_entropy + target_entropy
 
         return action, total_log_prob, total_entropy, value
 

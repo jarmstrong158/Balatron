@@ -46,7 +46,10 @@ class PPOConfig:
     max_grad_norm: float = 0.5       # Gradient clipping
 
     # Training schedule
-    num_epochs: int = 4              # PPO epochs per rollout
+    # Rollouts cost ~12 min of live-game wall-clock; the network update
+    # costs seconds. More epochs per rollout extracts more learning per
+    # expensive rollout, with target_kl early-stopping bounding the drift.
+    num_epochs: int = 8              # PPO epochs per rollout
     num_minibatches: int = 4         # Minibatches per epoch
     rollout_steps: int = 2048        # Steps per rollout before update
 
@@ -197,6 +200,9 @@ class RolloutBuffer:
                 "log_probs": torch.tensor(self.log_probs[batch_idx], device=self.device),
                 "advantages": torch.tensor(self.advantages[batch_idx], device=self.device),
                 "returns": torch.tensor(self.returns[batch_idx], device=self.device),
+                # Rollout-time value estimates — without these the
+                # clip_value branch in the update silently never ran.
+                "old_values": torch.tensor(self.values[batch_idx], device=self.device),
                 "masks": torch.tensor(self.masks[batch_idx], device=self.device),
                 "head_indices": torch.tensor(self.head_indices[batch_idx],
                                              device=self.device, dtype=torch.long),
