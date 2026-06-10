@@ -48,7 +48,7 @@ from environment.hand_eval import (
     find_best_discard, find_best_hands, estimate_score_for_hand_type,
     plan_optimal_action, compute_optimal_joker_order,
     plan_consumable_use, optimize_play_order,
-    evaluate_pack_tarot, pick_best_planet,
+    evaluate_pack_tarot, evaluate_pack_spectral, pick_best_planet,
 )
 from recorder import RunRecorder
 
@@ -1642,11 +1642,36 @@ class Trainer:
                     await asyncio.sleep(cfg.api_poll_delay)
                     continue
 
-                if card_set in ("PLANET", "SPECTRAL"):
+                preferred_targets: Optional[list] = None
+                if card_set == "PLANET":
                     # Joker-aware planet selection: pick the planet that gives
                     # the biggest marginal score increase with current jokers
                     jokers_for_planet = raw.get("jokers", {}).get("cards", [])
                     pick_idx = pick_best_planet(pack_cards, jokers_for_planet, raw)
+
+                elif card_set == "SPECTRAL":
+                    # Spectral packs need their own evaluator — routing them
+                    # through pick_best_planet (which knows no spectral keys)
+                    # silently picked index 0, including build-destroying
+                    # cards like Hex/Ankh (destroy every joker but one).
+                    hand_for_spec = raw.get("hand", {}).get("cards", [])
+                    jokers_for_spec = raw.get("jokers", {}).get("cards", [])
+                    spec_result = evaluate_pack_spectral(
+                        pack_cards, hand_for_spec, jokers_for_spec, raw)
+                    if spec_result is None:
+                        spec_keys = [c.get("key", "?") for c in pack_cards]
+                        print(f"[PACK] No safe spectral pick in {spec_keys} "
+                              f"— skipping pack", flush=True)
+                        try:
+                            await self.game.execute_action("pack", {"skip": True})
+                        except Exception:
+                            pass
+                        await asyncio.sleep(cfg.api_poll_delay)
+                        continue
+                    pick_idx, preferred_targets = spec_result
+                    print(f"[PACK] spectral pick: "
+                          f"{pack_cards[pick_idx].get('key', '?')} "
+                          f"targets={preferred_targets}", flush=True)
 
                 elif card_set == "TAROT":
                     # Evaluate tarot cards and pick the best one with targets
@@ -1874,6 +1899,10 @@ class Trainer:
                             target_attempts = [[0, 1], [0, 1, 2]]
                         else:
                             target_attempts = [[0], [0, 1], [0, 1, 2]]
+                        # The evaluator's chosen target(s) (e.g. the best
+                        # hand card for a seal/edition spectral) go first
+                        if preferred_targets and try_idx == pick_idx:
+                            target_attempts = [preferred_targets] + target_attempts
                         for targets in target_attempts:
                             try:
                                 await self.game.execute_action("pack", {"card": try_idx, "targets": targets})

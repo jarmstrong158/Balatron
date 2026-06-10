@@ -3427,11 +3427,19 @@ def pick_best_planet(pack_cards: list[dict], jokers: list[dict],
 
         gain = new_score - current_score
 
-        # Bonus: if this is a hand type the bot has actually played,
-        # it's more valuable (we know we can achieve it)
+        # Weight by how often the bot actually plays this hand type. A
+        # planet level only pays off multiplied by play frequency: absolute
+        # gain always favors high-tier hands (Neptune's Straight Flush gain
+        # dwarfs Mercury's Pair gain ~10x), so an unweighted pick levels
+        # hands the bot never scores with. The floor keeps unplayed types
+        # pickable when nothing played is on offer, but must stay below
+        # ~1/10 or the tier-gain gap overrides frequency entirely.
         times_played = ht_info.get("played", 0)
-        if times_played > 0:
-            gain *= 1.2  # 20% bonus for proven hand types
+        total_played = sum(
+            (h or {}).get("played", 0) for h in hands_data.values()
+        ) if isinstance(hands_data, dict) else 0
+        play_share = times_played / total_played if total_played > 0 else 0.0
+        gain *= (0.05 + 0.95 * play_share)
 
         if gain > best_gain:
             best_gain = gain
@@ -5033,6 +5041,89 @@ def evaluate_pack_tarot(pack_cards: list[dict], hand_cards: list[dict],
         return None
 
     return (best_pick[1], best_pick[2])
+
+
+def evaluate_pack_spectral(pack_cards: list[dict], hand_cards: list[dict],
+                           jokers: list[dict], gamestate: dict
+                           ) -> Optional[tuple[int, list[int]]]:
+    """Evaluate spectral cards in a pack and select the best one with targets.
+
+    Returns (pick_index, target_indices) or None to skip the pack.
+
+    Spectral packs previously fell through pick_best_planet, which knows no
+    spectral keys and silently returned index 0 — blindly taking whatever sat
+    first, including build-destroying cards like Hex and Ankh (which destroy
+    every joker but one).
+    """
+    if not pack_cards:
+        return None
+
+    joker_count = len(jokers)
+    money = gamestate.get("money", 0)
+    best: Optional[tuple[float, int, list[int]]] = None
+
+    # Cards that act on ONE selected hand card
+    ONE_TARGET_SPECTRALS = {"c_aura", "c_deja_vu", "c_cryptid",
+                            "c_talisman", "c_trance", "c_medium"}
+
+    for pc_idx, pc in enumerate(pack_cards):
+        key = pc.get("key", "")
+        score = 0.0
+        targets: list[int] = []
+
+        if key == "c_soul":
+            # Legendary joker — train.py's soul check grabs it before this
+            # runs; scored here too so it can never be passed over.
+            score = 100.0
+        elif key == "c_black_hole":
+            score = 90.0  # +1 level to EVERY hand type
+        elif key in ("c_ankh", "c_hex"):
+            # Copy/polychrome ONE joker and DESTROY every other joker.
+            # Only safe with a single joker (free copy / free polychrome).
+            score = 5.0 if joker_count == 1 else -1.0
+        elif key == "c_ectoplasm":
+            # Negative edition on a random joker (frees a slot), -1 hand size
+            score = 6.5 if joker_count >= 1 else 0.0
+        elif key == "c_grim":
+            score = 4.5  # destroy 1 random hand card, add 2 enhanced Aces
+        elif key == "c_familiar":
+            score = 4.0  # destroy 1 random hand card, add 3 enhanced faces
+        elif key == "c_aura":
+            score = 4.0  # foil/holo/poly on 1 selected card
+        elif key == "c_incantation":
+            score = 3.5  # destroy 1 random hand card, add 4 enhanced numbers
+        elif key == "c_deja_vu":
+            score = 3.5  # red seal (retrigger) on 1 selected card
+        elif key == "c_wraith":
+            # Random RARE joker but money set to $0 — cheap when broke
+            score = 4.0 if money <= 10 else 1.5
+        elif key == "c_cryptid":
+            score = 3.0  # copy 1 selected card twice
+        elif key == "c_talisman":
+            score = 3.0  # gold seal on 1 selected card
+        elif key == "c_trance":
+            score = 2.5  # blue seal on 1 selected card
+        elif key == "c_medium":
+            score = 2.0  # purple seal on 1 selected card
+        elif key == "c_immolate":
+            score = 2.0  # destroy 5 random hand cards, +$20
+        elif key in ("c_sigil", "c_ouija"):
+            # Whole-hand suit/rank randomization (ouija also -1 hand size)
+            score = 1.0
+        else:
+            score = 1.0  # unknown spectral — mild default, never blind index 0
+
+        if key in ONE_TARGET_SPECTRALS:
+            targets = _find_highest_value_cards(hand_cards, 1)
+            if not targets:
+                score = 0.0  # needs a target and there is none — can't resolve
+
+        if score > 0 and (best is None or score > best[0]):
+            best = (score, pc_idx, targets)
+
+    if best is None:
+        return None
+    return (best[1], best[2])
 
 
 def compute_tarot_value(tarot_key: str, jokers: list[dict],
