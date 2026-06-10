@@ -440,6 +440,14 @@ def estimate_score(hand_type: str, cards: list[dict],
         if enh == "STEEL":
             enhance_xmult *= 1.5  # x1.5 per Steel card held
 
+    # Card enhancement/edition x-mults (Glass x2, Polychrome x1.5, held
+    # Steel x1.5) fire DURING card/held scoring — BEFORE jokers add flat
+    # mult (jokers trigger last, left to right). Applying enhance_xmult
+    # over joker mult too overestimated Glass/Steel/Poly hands by up to
+    # ~50% (e.g. Glass pair of 9s + plain Joker: model said 336, real 224),
+    # causing false "this wins the round" plays.
+    total_mult *= enhance_xmult
+
     # Joker contributions — pass level_mult so ordering correction kicks in
     joker_chips, joker_mult, joker_xmult = compute_joker_scoring(
         hand_type, cards, scoring_indices, jokers, gamestate,
@@ -449,7 +457,7 @@ def estimate_score(hand_type: str, cards: list[dict],
     total_chips += joker_chips
     total_mult += joker_mult
 
-    score = total_chips * total_mult * joker_xmult * enhance_xmult
+    score = total_chips * total_mult * joker_xmult
     return max(score, 0.0)
 
 
@@ -2496,6 +2504,41 @@ def _enumerate_targets(hand_cards: list[dict], deck_cards: list[dict],
 
 def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
                         jokers: list[dict], gamestate: dict) -> dict:
+    """Round-level strategy planner (see _plan_optimal_action_inner).
+
+    Wrapper enforcing The Psychic's "must play exactly 5 cards" rule on
+    every play decision — the boss flag was previously detected but never
+    enforced, so 2-card Pair plays were rejected by the game as illegal,
+    burning the step. Pads plays with the lowest-chip kickers (kickers
+    don't score, so padding is free).
+    """
+    result = _plan_optimal_action_inner(hand_cards, deck_cards, jokers,
+                                        gamestate)
+
+    if result.get("action") == "play" and len(result.get("cards", [])) < 5:
+        blinds = gamestate.get("blinds", {})
+        is_psychic = isinstance(blinds, dict) and any(
+            isinstance(b, dict) and b.get("status") == "CURRENT"
+            and b.get("name") == "The Psychic"
+            for b in blinds.values()
+        )
+        if is_psychic and len(hand_cards) >= 5:
+            chosen = list(result["cards"])
+            pool = sorted(
+                (i for i in range(len(hand_cards)) if i not in chosen),
+                key=lambda i: CARD_CHIP_VALUES.get(
+                    card_rank(hand_cards[i]), 0),
+            )
+            chosen.extend(pool[:5 - len(chosen)])
+            result["cards"] = chosen
+            result["reason"] = (result.get("reason", "")
+                                + " [psychic: padded to 5]")
+    return result
+
+
+def _plan_optimal_action_inner(hand_cards: list[dict],
+                               deck_cards: list[dict],
+                               jokers: list[dict], gamestate: dict) -> dict:
     """Round-level strategy planner.
 
     Instead of greedy one-discard-at-a-time decisions, this:
@@ -2776,7 +2819,11 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
                                     debuffed_suit=debuffed_suit)
 
     # ── BOSS FILTERS: restrict targets based on boss effects ──
-    # The Eye: can't repeat hand types this round
+    # The Eye: can't repeat hand types this round.
+    # Targets must be filtered by their hand_type field — their "detail"
+    # strings ("Flush:Hearts", "Trips:K") never match hand-type names, so
+    # the old detail-based filter was a no-op and discards kept chasing
+    # already-banned types.
     if boss_no_repeat_type:
         played_types = set()
         hand_usage = gamestate.get("hands", {})
@@ -2784,7 +2831,8 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
             if isinstance(info, dict) and info.get("round_played", 0) > 0:
                 played_types.add(ht)
         if played_types:
-            targets = [t for t in targets if t.get("detail", "") not in played_types]
+            targets = [t for t in targets
+                       if t.get("hand_type", "") not in played_types]
             top_hands = [h for h in top_hands if h["hand_type"] not in played_types]
             if top_hands:
                 best_play = top_hands[0]
@@ -2792,15 +2840,27 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
                 best_hand_type = best_play["hand_type"]
                 play_cards = list(best_play["card_indices"])
 
-    # The Mouth: only one hand type can be played this round
-    if boss_one_hand_type and committed_type:
-        targets = [t for t in targets if t.get("detail", "") == committed_type]
-        top_hands = [h for h in top_hands if h["hand_type"] == committed_type]
-        if top_hands:
-            best_play = top_hands[0]
-            best_play_score = best_play["estimated_score"]
-            best_hand_type = best_play["hand_type"]
-            play_cards = list(best_play["card_indices"])
+    # The Mouth: only one hand type can be played this round. The locked
+    # type is whatever already has round_played > 0 — derived from the
+    # game state every call, NOT from the chase-commitment field (which is
+    # reset on every play return, so the lock was forgotten after the
+    # first hand and the old detail-vs-hand_type comparison never matched
+    # anyway).
+    if boss_one_hand_type:
+        mouth_type = ""
+        for ht, info in gamestate.get("hands", {}).items():
+            if isinstance(info, dict) and info.get("round_played", 0) > 0:
+                mouth_type = ht
+                break
+        if mouth_type:
+            targets = [t for t in targets
+                       if t.get("hand_type", "") == mouth_type]
+            top_hands = [h for h in top_hands if h["hand_type"] == mouth_type]
+            if top_hands:
+                best_play = top_hands[0]
+                best_play_score = best_play["estimated_score"]
+                best_hand_type = best_play["hand_type"]
+                play_cards = list(best_play["card_indices"])
 
     # The Needle: only 1 hand — make it count, never discard
     if boss_one_hand_only:
@@ -2892,22 +2952,26 @@ def plan_optimal_action(hand_cards: list[dict], deck_cards: list[dict],
 
     # Helper: order discard candidates with seal + face card awareness
     # Priority: Purple Seal first (want tarot), face cards (if avoid_face),
-    # then normal, Blue Seal last (want to hold for planet)
+    # then normal; Blue Seal, Steel and Gold cards last — Blue Seal makes a
+    # planet when held, Steel is x1.5 mult on EVERY hand while held, Gold
+    # pays $3 when held at end of round. Discarding those throws away
+    # value the scorer already counts.
     def _order_discards(indices: list[int]) -> list[int]:
         purple = []
         face = []
         normal = []
-        blue = []
+        hold_last = []
         for i in indices:
-            if i in blue_seal_indices:
-                blue.append(i)  # last — keep these
+            enh = card_enhancement(hand_cards[i])
+            if i in blue_seal_indices or enh in ("STEEL", "GOLD"):
+                hold_last.append(i)  # last — keep these
             elif i in purple_seal_indices:
                 purple.append(i)  # first — want to discard for tarot
             elif avoid_face_cards and card_rank(hand_cards[i]) in FACE_RANKS:
                 face.append(i)  # second — avoid resetting scaling joker
             else:
                 normal.append(i)
-        return purple + face + normal + blue
+        return purple + face + normal + hold_last
 
     # Also: Blue Seal cards should be in keep_set when possible
     # (they generate Planet cards when held at end of round)
