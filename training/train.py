@@ -813,8 +813,13 @@ class Trainer:
                 except Exception:
                     pass  # never crash training for logging
 
-                # Compute terminal reward
-                reward = self.reward_calc.step(prev_raw, raw_state)
+                # Compute terminal reward (kwargs describe the action that
+                # led into GAME_OVER — the one this reward will amend)
+                reward = self.reward_calc.step(
+                    prev_raw, raw_state,
+                    action=getattr(self, '_last_api_method', None),
+                    action_succeeded=getattr(self, '_last_action_succeeded', True),
+                )
                 # If the win reward was already pushed to the buffer via the
                 # won-flag fallback above, don't count it again here. Capture
                 # the flag before reset() clears it below so we can also skip
@@ -1191,28 +1196,48 @@ class Trainer:
             # and we already rearrange at round start + before each play.
             # This eliminates ~120-perm brute force per buy/sell action.
 
-            # Compute reward — pass cached joker contributions to avoid
-            # redundant leave-one-out scoring in reward._sync_state
+            # Settle the PREVIOUS action's outcome. The delta prev_raw ->
+            # raw_state is what the last stored decision caused — it only
+            # became observable on this fetch. It must be credited to that
+            # transition (amend in place), not stored with the current
+            # action: storing it here put every step reward one decision
+            # late, often on a different policy head (e.g. the blind-clear
+            # bonus landed on the first SHOP action instead of the winning
+            # play). The action kwargs are likewise the PREVIOUS action's —
+            # the sell-penalty and invalid-action penalty describe the
+            # action that produced this delta.
             _cached_contribs = getattr(self.game, '_joker_eval_cache', {}).get('contributions')
-            reward = self.reward_calc.step(
+            settled_reward = self.reward_calc.step(
                 prev_raw, raw_state,
-                action=api_method,
-                action_succeeded=action_succeeded,
+                action=getattr(self, '_last_api_method', None),
+                action_succeeded=getattr(self, '_last_action_succeeded', True),
                 scaling_values=self._get_scaling_snapshot(),
                 joker_contributions=_cached_contribs,
                 skip_economy=getattr(self, '_auto_action_this_step', False),
             )
             self._auto_action_this_step = False
+            self._last_api_method = api_method
+            self._last_action_succeeded = action_succeeded
+
+            store_reward = 0.0
+            if settled_reward != 0.0:
+                if not self.ppo.amend_last_transition(reward_delta=settled_reward):
+                    # Rollout boundary: the causing transition was consumed
+                    # with the previous buffer — keep the reward on this
+                    # step rather than dropping it.
+                    store_reward = settled_reward
 
             # Track episode
             ante = raw_state.get("ante_num", 1)
             self._current_ante = ante
             self._current_score = int(raw_state.get("round", {}).get("chips", 0))
-            self.episode_tracker.step(reward, ante, raw_state)
+            self.episode_tracker.step(settled_reward, ante, raw_state)
 
-            # Store transition
+            # Store transition with reward 0 — its own outcome is settled
+            # (amended in) on the next iteration, or by the boundary settle
+            # after the loop, or by the terminal paths.
             self.ppo.store_transition(
-                state_vec, action_np, log_prob, reward, value,
+                state_vec, action_np, log_prob, store_reward, value,
                 False, action_mask, game_state_name,
             )
             # Remember the last real (non-terminal) transition so terminal
@@ -1232,14 +1257,37 @@ class Trainer:
         if not last_done:
             try:
                 raw_state = await self.game.fetch_gamestate()
-                state_vec = await self.game.step()
-                head_idx = get_head_index(raw_state.get("state", ""))
-                with torch.no_grad():
-                    state_t = torch.tensor(state_vec, dtype=torch.float32).unsqueeze(0)
-                    if cfg.device == "cuda" and torch.cuda.is_available():
-                        state_t = state_t.cuda()
-                    _, value_t = self.network.forward(state_t, head_idx)
-                    last_value = value_t[0].cpu().item()
+
+                # Settle the final transition's outcome before the buffer is
+                # consumed — without this, the last decision of every rollout
+                # would never receive its step reward (the settle normally
+                # happens on the NEXT iteration, which won't come).
+                if prev_raw is not None:
+                    boundary_terminal = raw_state.get("state", "") == "GAME_OVER"
+                    final_reward = self.reward_calc.step(
+                        prev_raw, raw_state,
+                        action=getattr(self, '_last_api_method', None),
+                        action_succeeded=getattr(self, '_last_action_succeeded', True),
+                        scaling_values=self._get_scaling_snapshot(),
+                    )
+                    if final_reward != 0.0 or boundary_terminal:
+                        self.ppo.amend_last_transition(
+                            reward_delta=final_reward,
+                            done=True if boundary_terminal else None,
+                        )
+                    if boundary_terminal:
+                        # Don't bootstrap V(GAME_OVER) into the dead episode.
+                        last_done = True
+
+                if not last_done:
+                    state_vec = await self.game.step()
+                    head_idx = get_head_index(raw_state.get("state", ""))
+                    with torch.no_grad():
+                        state_t = torch.tensor(state_vec, dtype=torch.float32).unsqueeze(0)
+                        if cfg.device == "cuda" and torch.cuda.is_available():
+                            state_t = state_t.cuda()
+                        _, value_t = self.network.forward(state_t, head_idx)
+                        last_value = value_t[0].cpu().item()
             except Exception:
                 last_value = 0.0
 
