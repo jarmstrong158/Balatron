@@ -166,14 +166,21 @@ Rewards are carefully structured to align with Balatro's exponential scoring:
 
 All score-based rewards use **log10 scaling** because Balatro scores grow exponentially — the agent learns to push the *exponent* higher.
 
+Two structural rules keep the signal honest:
+
+- **State bonuses are potential deltas, never per-step accruals.** Joker-diversity and interest-tier bonuses pay only on *change* (acquire a category: +once; lose it: −once; hold: zero). Paid per-step, they accrued +20–40 over a run vs +10 for winning — the agent was being paid more for existing than for winning.
+- **Each reward is credited to the action that caused it.** A state delta only becomes observable on the *next* fetch, so it's amended onto the previous transition rather than stored with the current action — otherwise every step reward lands one decision late, often on a different policy head.
+
 ---
 
 ## Scoring Engine
 
-The scoring engine (`hand_eval.py`) implements the full Balatro scoring formula:
+The scoring engine (`hand_eval.py`) implements the full Balatro scoring formula, in the game's actual order — card/held x-mults (Glass, Polychrome, Steel) fire during card scoring, *before* jokers add flat mult:
 
 ```
-Score = (hand_chips + card_chips + joker_chips) x (hand_mult + joker_mult) x joker_xmult
+Score = (hand_chips + card_chips + joker_chips)
+        x ((hand_mult + card_mult) x card_xmult + joker_mult)
+        x joker_xmult
 ```
 
 **Features implemented:**
@@ -181,9 +188,11 @@ Score = (hand_chips + card_chips + joker_chips) x (hand_mult + joker_mult) x jok
 - Complete hand classification (High Card through Flush Five)
 - All 150 joker effects — chips, mult, xmult, scaling, conditional triggers
 - **Retrigger system** — Hanging Chad (first card +2), Sock and Buskin (face cards +1), Hack (2/3/4/5 +1), Seltzer (all +1), Dusk (last hand), Red Seal (+1)
-- Card enhancements: Bonus (+30 chips), Mult (+4 mult), Wild (any suit), Glass (x1.5, may shatter), Steel (x1.5 held), Stone (50 chips, no rank/suit), Gold (+3 money), Lucky (chance mult/money)
+- Card enhancements: Bonus (+30 chips), Mult (+4 mult), Wild (any suit), Glass (x2, may shatter), Steel (x1.5 held), Stone (50 chips, no rank/suit), Gold (+3 money), Lucky (chance mult/money)
 - Card editions: Foil (+50 chips), Holographic (+10 mult), Polychrome (x1.5)
-- Boss blind debuffs: suit debuffs (Club, Goad, Window, Head), face debuff (Plant), rank debuffs
+- Boss blind handling: suit debuffs (Club, Goad, Window, Head), face debuff (Plant), scoring debuffs (Flint, Arm), economy bosses (Ox, Tooth), and enforced hand restrictions — The Psychic (plays padded to exactly 5 cards), The Eye (no repeat hand types), The Mouth (locked to the round's first hand type), The Needle (never discard)
+- Spectral pack evaluation — ranks all spectral cards, takes Hex/Ankh only as a free single-joker upgrade, targets seals/editions at the best hand card, skips when nothing is safe
+- Discard ordering protects held value: Blue Seal, Steel and Gold cards discard last
 - Blueprint/Brainstorm copy chain resolution
 - Joker ordering optimization (chips -> mult -> xmult left-to-right)
 - Draw probability calculation for discard decisions
@@ -255,6 +264,7 @@ balatron/
 |-- tests/
 |   |-- test_scoring.py     # Scoring engine validation
 |
+|-- DECISIONS.md            # Running log of design decisions + hard-won gotchas
 |-- NOTES.md                # Architecture decisions, state vector layout, design rationale
 |-- LICENSE                  # MIT License
 |-- README.md                # This file
@@ -265,7 +275,7 @@ balatron/
 ## Prerequisites
 
 - **Python 3.12+**
-- **PyTorch** with CUDA support (GPU strongly recommended for training)
+- **PyTorch** (CPU is fine — the bottleneck is live-game rollout collection, not the network)
 - **Balatro** (Steam version)
 - **[Steamodded](https://github.com/Steamopollys/Steamodded)** (>= 0.9.8) — Balatro mod loader
 - **[BalatroBot](https://github.com/coder/balatrobot)** mod (v1.4.1+) — JSON-RPC API for game control
@@ -273,8 +283,8 @@ balatron/
 ### Hardware Used
 
 - AMD Ryzen 9 9800X3D
-- NVIDIA RTX 5070 Ti
-- Training runs at ~1500 steps/hour with continuous Balatro gameplay
+- NVIDIA RTX 5070 Ti (unused for training — see above)
+- Training runs at ~5,000 steps/hour (8× game speed, continuous Balatro gameplay)
 
 ---
 
@@ -323,13 +333,16 @@ uvx balatrobot serve --fast
 
 This launches the Balatro game with the BalatroBot mod injected and starts the JSON-RPC API server.
 
-Game speed can be increased for faster data collection via the `BALATROBOT_GAMESPEED` environment variable (e.g. `set BALATROBOT_GAMESPEED=8` before launching for 8× speed). Higher values train faster but are less stable; the trainer auto-restarts Balatro if the game hangs or crashes.
+Game speed is set via the `BALATROBOT_GAMESPEED` environment variable (e.g. `set BALATROBOT_GAMESPEED=8` before launching). **8× is the recommended setting** — higher speeds look faster but repeatedly cause stalls, desyncs, and crashes that cost more time than they save (this project ran 100× → 16× → 8× before settling). The trainer auto-restarts Balatro if the game hangs or crashes regardless.
 
 **Terminal 2 — Start training:**
 ```powershell
 cd balatron
-python -u -m training.train --total-timesteps 1500000 --device cuda
+$env:PYTHONUTF8 = "1"
+python -u -m training.train --total-timesteps 1500000 --device cpu --checkpoint-interval 2
 ```
+
+`PYTHONUTF8=1` is required when output is redirected or piped — the trainer prints emoji that crash on Windows cp1252. `--device cpu` is the practical choice: the wall-clock bottleneck is live-game rollout collection, not the (small) network, so a GPU buys almost nothing here. `--checkpoint-interval 2` saves every 2 PPO updates so a crash loses minutes, not hours.
 
 Training progress is printed to the console:
 ```
@@ -342,10 +355,10 @@ Runs: 50 (lifetime: 500) | Wins: 3 (lifetime: 12)
 ### Resuming from Checkpoint
 
 ```powershell
-python -u -m training.train --total-timesteps 1500000 --device cuda --checkpoint checkpoints/balatron_phase1_update000130.pt
+python -u -m training.train --total-timesteps 1500000 --device cpu --checkpoint-interval 2 --checkpoint checkpoints/balatron_phase1_update000200.pt
 ```
 
-Checkpoints are saved automatically during training, every N PPO updates (`--checkpoint-interval`, default 10) as `checkpoints/balatron_phase1_updateNNNNNN.pt`, plus a `..._final.pt` on exit. Resume from the latest `updateNNNNNN.pt` to continue where training left off.
+Checkpoints are saved automatically during training, every N PPO updates (`--checkpoint-interval`, default 10 — use 2) as `checkpoints/balatron_phase1_updateNNNNNN.pt`, plus a `..._final.pt` on exit. Resume from the latest `updateNNNNNN.pt` (not `_final.pt`, which may be a crash auto-save) to continue where training left off.
 
 ### Recording
 
