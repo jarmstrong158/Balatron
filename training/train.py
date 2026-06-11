@@ -1255,6 +1255,26 @@ class Trainer:
                     raw_state, _intended_joker_order
                 )
 
+            # Debounce state-TRANSITION actions: re-issuing next_round /
+            # select / skip while the previous one is still animating
+            # double-fires the game's UI flow (the mod bypasses the
+            # game's own controller locks) — the second invocation's
+            # deferred events race the first's teardown and CRASH the
+            # game ('shop'/'blind_select'/'area' nil). If we issued the
+            # same transition action within the last 8s and the state
+            # name hasn't changed, wait instead of re-firing.
+            TRANSITION_ACTIONS = {"next_round", "select", "skip", "cash_out"}
+            if api_method in TRANSITION_ACTIONS:
+                last_m, last_t, last_s = getattr(
+                    self, '_last_transition_fire', (None, 0.0, None))
+                if (api_method == last_m
+                        and game_state_name == last_s
+                        and time.time() - last_t < 8.0):
+                    await asyncio.sleep(1.0)
+                    continue
+                self._last_transition_fire = (
+                    api_method, time.time(), game_state_name)
+
             # Execute action (with retry on UI timing errors)
             action_succeeded = True
             max_retries = 3
