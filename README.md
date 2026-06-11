@@ -354,7 +354,7 @@ Actions are logged to `logs/supervisor.log`, trainer output to `logs/trainer_<ti
 
 The supervisor **debounces** game restarts (3 consecutive down-checks, ~90s) because the trainer's internal watchdog also restarts a hung game and is faster — acting immediately would race it and leave two server instances fighting over the port. The trainer heals the game; the supervisor heals the trainer (and the game only when nothing else did).
 
-The supervisor also checks **liveness, not just existence**: the trainer stamps `logs/heartbeat` on every environment step, and a trainer that exists but hasn't stepped in 5 minutes is killed along with the game (a frozen trainer almost always means a wedged game — e.g. a boot-splash zombie whose socket still answers). Normal steps land every few seconds, so 5 minutes of silence is unambiguous.
+The supervisor checks **three health layers, not just existence**: the trainer stamps `logs/heartbeat` (`<unix_time> <global_step>`) on every environment step. A trainer that exists but hasn't stepped in 5 minutes is **frozen** — killed along with the game. A trainer that keeps stepping but at a sustained crawl (under 25 steps/min over a 25-minute window; normal is ~80) is **degraded** — usually chronic wedge/restart churn — and is also killed and rebuilt. The degraded check exists because one night of wedge churn ran 9 hours at quarter speed with a perfectly fresh heartbeat.
 
 The full recovery hierarchy:
 
@@ -362,7 +362,8 @@ The full recovery hierarchy:
 |---|---|---|
 | Game hangs/crashes | Trainer's internal watchdog | ~1 min |
 | Trainer process dies | Supervisor existence check | ~30 s |
-| Trainer freezes (alive, no progress) | Supervisor heartbeat check | ~6 min |
+| Trainer freezes (alive, no progress) | Supervisor heartbeat staleness | ~6 min |
+| Trainer degrades (stepping, but crawling) | Supervisor throughput check | ~30 min |
 | Machine sleeps (kills everything) | Nothing — prevent it | `powercfg /change standby-timeout-ac 0` |
 
 ### Manual training (two terminals)

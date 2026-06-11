@@ -140,11 +140,16 @@ Two recurring race classes, both triggered by fast programmatic transitions:
   the server, after a 3-check ~90s debounce so it doesn't race the
   trainer's own faster recovery) and the trainer is running (else
   relaunches from the newest checkpoint with `PYTHONUTF8=1`, logging to
-  `logs/trainer_<ts>.log`). It also checks **liveness, not just
-  existence**: the trainer stamps `logs/heartbeat` on every environment
-  step, and a trainer alive but >5 min silent is killed along with the
-  game — counters can't catch a freeze that stops the loop itself (a
-  boot-splash zombie with a live socket froze the trainer mid-MENU-loop).
+  `logs/trainer_<ts>.log`). It checks three health layers, not just
+  existence: the trainer stamps `logs/heartbeat` (`<unix_time>
+  <global_step>`) on every environment step — (1) **existence**: process
+  gone → relaunch; (2) **liveness**: heartbeat >5 min stale = frozen →
+  kill trainer + game (counters can't catch a freeze that stops the loop
+  itself — a boot-splash zombie with a live socket froze the trainer
+  mid-MENU-loop); (3) **throughput**: steps/min over a rolling 25-min
+  window; sustained <25/min (normal ~80) = degraded slow-churn stall →
+  kill + rebuild. Layer 3 exists because the 06-11 overnight wedge churn
+  ran 9 hours at ~19 steps/min with a perfectly fresh heartbeat.
   Launch it instead of starting server/trainer by hand; stop it by creating
   a `SUPERVISOR_STOP` file in the repo root. Actions log to
   `logs/supervisor.log`. For overnight runs also disable standby:
