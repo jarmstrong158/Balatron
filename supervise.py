@@ -43,15 +43,23 @@ TRAINER_GRACE_S = 60  # after starting the trainer, wait before re-checking
 HEARTBEAT_PATH = os.path.join(LOG_DIR, "heartbeat")
 HEARTBEAT_STALE_S = 300  # no env step in 5 min = trainer FROZEN
 
-# Throughput stall detection: a trainer can keep stepping (fresh
-# heartbeat) while churning through wedge/restart cycles at a fraction
-# of normal speed — overnight 06-11 it ran at ~19 steps/min vs ~80
-# normal for 9 hours and the freeze check never fired. The trainer
-# publishes its global step counter in the heartbeat; we compute
-# steps/min over a rolling window and rebuild the stack when sustained
-# throughput drops below the floor.
-STALL_WINDOW_S = 1500          # 25 min of samples before judging
-STALL_MIN_STEPS_PER_MIN = 25.0  # normal ~80; overnight degraded ~19
+# Throughput stall detection, two complementary signals:
+#
+# 1. Step rate (hard crawl): steps/min over a rolling window. The floor
+#    is deliberately LOW — legitimate deep runs (ante 5+ boss fights,
+#    long scoring animations) can run ~13-20 steps/min while perfectly
+#    healthy; the first deployment's 25/min floor killed exactly such a
+#    run 24 min after going live. 10/min for 40 min = genuinely dead.
+# 2. Checkpoint age (chronic churn): wedge/restart cycles can hold
+#    15-20 steps/min — above any safe rate floor — while updates crawl
+#    (overnight 06-11: ~190 min/checkpoint vs ~70-90 normal for 9
+#    hours). If the trainer has been up long enough and no checkpoint
+#    has landed, the stack is churning, not training.
+STALL_WINDOW_S = 2400            # 40 min of samples before judging rate
+STALL_MIN_STEPS_PER_MIN = 10.0   # below this = hard crawl, not deep play
+CHECKPOINT_STALL_S = 9000        # 150 min without a checkpoint = churn
+CHECKPOINT_GLOB = os.path.join(REPO, "checkpoints",
+                               "balatron_phase1_update*.pt")
 
 
 def log(msg: str):
@@ -121,6 +129,14 @@ def kill_trainer(pid: str):
                    capture_output=True, timeout=15)
 
 
+def newest_checkpoint_age() -> float:
+    """Seconds since the newest checkpoint was written, or 0 if none."""
+    cps = glob.glob(CHECKPOINT_GLOB)
+    if not cps:
+        return 0.0
+    return time.time() - max(os.path.getmtime(p) for p in cps)
+
+
 def start_server() -> bool:
     """Launch the BalatroBot server + game; wait for the port."""
     kill_strays()
@@ -174,6 +190,10 @@ def main():
     port_down_checks = 0
     # (timestamp, global_step) samples for throughput stall detection
     step_samples: list = []
+    # When the current trainer was (first seen) running — anchors the
+    # checkpoint-age check so an old checkpoint inherited at startup
+    # doesn't trigger an immediate kill.
+    trainer_seen_at = None
     while True:
         if os.path.exists(STOP_FILE):
             log("SUPERVISOR_STOP file found — exiting (stack left as-is)")
@@ -203,6 +223,7 @@ def main():
             if server_ok:
                 pid = trainer_pid()
                 if not pid:
+                    trainer_seen_at = None
                     log("trainer not running — (re)starting")
                     if start_trainer():
                         # Fresh trainer: stamp the heartbeat so the stale
@@ -215,6 +236,8 @@ def main():
                             pass
                         time.sleep(TRAINER_GRACE_S)
                 else:
+                    if trainer_seen_at is None:
+                        trainer_seen_at = time.time()
                     # Liveness: a trainer that exists but has made zero
                     # environment steps in HEARTBEAT_STALE_S is wedged
                     # (frozen fetch, hung start endpoint, boot-splash
@@ -258,6 +281,29 @@ def main():
                                     kill_trainer(pid)
                                     kill_strays()
                                     step_samples.clear()
+                                    trainer_seen_at = None
+
+                        # Checkpoint cadence: chronic wedge churn can hold
+                        # a step rate above any safe floor while updates
+                        # crawl. If this trainer has been up for the full
+                        # threshold and the newest checkpoint is older
+                        # than it, the stack is churning, not training.
+                        # (trainer_seen_at is None right after a rate-kill
+                        # above — skip; the stack is already going down.)
+                        up_for = (time.time() - trainer_seen_at
+                                  if trainer_seen_at is not None else 0)
+                        cp_age = newest_checkpoint_age()
+                        if (up_for > CHECKPOINT_STALL_S
+                                and cp_age > CHECKPOINT_STALL_S):
+                            log(f"trainer pid {pid} CHURNING: up "
+                                f"{up_for/60:.0f} min, newest checkpoint "
+                                f"{cp_age/60:.0f} min old (limit "
+                                f"{CHECKPOINT_STALL_S/60:.0f}) — killing "
+                                f"churning stack")
+                            kill_trainer(pid)
+                            kill_strays()
+                            step_samples.clear()
+                            trainer_seen_at = None
         except Exception as e:  # never let one bad cycle kill the supervisor
             log(f"ERROR in supervise cycle: {e}")
 

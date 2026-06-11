@@ -354,7 +354,7 @@ Actions are logged to `logs/supervisor.log`, trainer output to `logs/trainer_<ti
 
 The supervisor **debounces** game restarts (3 consecutive down-checks, ~90s) because the trainer's internal watchdog also restarts a hung game and is faster — acting immediately would race it and leave two server instances fighting over the port. The trainer heals the game; the supervisor heals the trainer (and the game only when nothing else did).
 
-The supervisor checks **three health layers, not just existence**: the trainer stamps `logs/heartbeat` (`<unix_time> <global_step>`) on every environment step. A trainer that exists but hasn't stepped in 5 minutes is **frozen** — killed along with the game. A trainer that keeps stepping but at a sustained crawl (under 25 steps/min over a 25-minute window; normal is ~80) is **degraded** — usually chronic wedge/restart churn — and is also killed and rebuilt. The degraded check exists because one night of wedge churn ran 9 hours at quarter speed with a perfectly fresh heartbeat.
+The supervisor checks **four health layers, not just existence**: the trainer stamps `logs/heartbeat` (`<unix_time> <global_step>`) on every environment step. A trainer that hasn't stepped in 5 minutes is **frozen**. One stepping at a hard crawl (under 10 steps/min over a 40-minute window) is **dead-slow** — the floor is deliberately low because healthy deep runs (long ante-6 boss fights) legitimately drop to ~13–20 steps/min, and the first deployment's 25/min floor killed exactly such a run. Chronic wedge/restart **churn** holds a step rate above any safe floor while updates crawl, so it's caught by checkpoint cadence instead: a trainer up for 150+ minutes with no checkpoint that recent gets rebuilt (one night of churn ran ~190 min/checkpoint vs ~70–90 normal, undetected for 9 hours).
 
 The full recovery hierarchy:
 
@@ -363,7 +363,8 @@ The full recovery hierarchy:
 | Game hangs/crashes | Trainer's internal watchdog | ~1 min |
 | Trainer process dies | Supervisor existence check | ~30 s |
 | Trainer freezes (alive, no progress) | Supervisor heartbeat staleness | ~6 min |
-| Trainer degrades (stepping, but crawling) | Supervisor throughput check | ~30 min |
+| Trainer crawls (<10 steps/min) | Supervisor rate floor | ~40 min |
+| Trainer churns (no checkpoints) | Supervisor checkpoint cadence | ~2.5 h |
 | Machine sleeps (kills everything) | Nothing — prevent it | `powercfg /change standby-timeout-ac 0` |
 
 ### Manual training (two terminals)
