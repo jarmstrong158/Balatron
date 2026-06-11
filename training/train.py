@@ -2041,6 +2041,14 @@ class Trainer:
                 # failure shapes: start raising AND start "succeeding" but
                 # bouncing straight back to MENU.
                 self._menu_loop_count = getattr(self, '_menu_loop_count', 0) + 1
+                if self._menu_loop_count == 1:
+                    # Let the menu settle before the first start attempt.
+                    # Firing start mid-transition (GAME_OVER overlay still
+                    # closing at speed 8) can make the mod's start_run a
+                    # silent no-op that wedges every subsequent start until
+                    # a full game restart — 17 of those wedges in one night
+                    # cost ~4x throughput.
+                    await asyncio.sleep(2.0)
                 if self._menu_loop_count >= 8:
                     print(f"[MENU] {self._menu_loop_count} consecutive MENU "
                           f"polls — start endpoint wedged, restarting "
