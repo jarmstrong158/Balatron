@@ -71,11 +71,20 @@ target-met check. BalatroBot's API `won` field is just `G.GAME.won`. So a boss
   (`safe_won_states = {SHOP, BLIND_SELECT, ROUND_EVAL}`; `GAME_OVER` won =
   `ante > 8 or already_recorded`). Commit `d387da3`.
 
-### 2. Never sell copy/retrigger jokers
+### 2. Never sell copy/retrigger jokers — and resolve their copies correctly
 All joker-selling paths must route through `_find_weakest_sellable_joker`, which
 excludes eternal, negative, MUST_BUY (Blueprint/Brainstorm), retrigger, and copy
 jokers. Ad-hoc "weakest joker" loops that only skip eternal jokers once sold a
 Brainstorm to make pack room, collapsing the build.
+
+Copy semantics are asymmetric and easy to get wrong: **Blueprint copies the
+joker to its RIGHT; Brainstorm copies the LEFTMOST joker** — and a Brainstorm
+that *is* leftmost copies itself, i.e. does **nothing** (a copy chain that
+resolves to a leftmost Brainstorm is dead). The scoring resolver once resolved
+a leftmost Brainstorm to the *next* joker instead — estimates inflated, and
+shop/swap logic happily parked Brainstorm in the dead slot ("uses Blueprint
+right, but not Brainstorm"). Fixed in `801f538`; the order optimizer was
+already correct, so the bug lived purely in the estimate/decision path.
 
 ### 3. Card keys have no `the_` prefix
 Match cards by their base-game center key, which is **not** the display name:
