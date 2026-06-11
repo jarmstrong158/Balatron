@@ -73,6 +73,10 @@ class PPOConfig:
     # Device
     device: str = "cpu"              # "cpu" or "cuda"
 
+    # Parallel environments (one rollout buffer per env; GAE computed
+    # per env, minibatching over the concatenated transitions)
+    num_envs: int = 1
+
     # Action dimensions (from action_space.py)
     action_size: int = 14            # [type(1) + cards(12) + target(1)]
     action_head_size: int = ACTION_HEAD_SIZE  # 45 (network output)
@@ -268,11 +272,19 @@ class PPOTrainer:
             weight_decay=self.config.weight_decay,
         )
 
-        # Rollout buffer
-        self.buffer = RolloutBuffer(
-            capacity=self.config.rollout_steps,
-            device=self.device,
-        )
+        # Rollout buffers — one per parallel environment. Per-env buffers
+        # keep amend_last (terminal/settle credits) and GAE temporal
+        # adjacency trivially correct: each env's transitions stay
+        # contiguous and its bootstrap is its own. update() computes GAE
+        # per buffer, then concatenates everything for minibatching.
+        self.num_envs = max(1, int(getattr(self.config, "num_envs", 1)))
+        self.buffers = [
+            RolloutBuffer(capacity=self.config.rollout_steps,
+                          device=self.device)
+            for _ in range(self.num_envs)
+        ]
+        # Backward-compat alias for single-env code paths
+        self.buffer = self.buffers[0]
 
         # Training stats
         self.total_updates = 0
@@ -288,7 +300,7 @@ class PPOTrainer:
     def store_transition(self, state: np.ndarray, action: np.ndarray,
                          log_prob: float, reward: float, value: float,
                          done: bool, mask: np.ndarray, game_state: str,
-                         bc_flag: bool = False):
+                         bc_flag: bool = False, env_id: int = 0):
         """Store a transition from environment interaction.
 
         Args:
@@ -303,14 +315,20 @@ class PPOTrainer:
             bc_flag: True when the action is a heuristic override of the
                 policy's sample — the behavior-cloning loss imitates only
                 these teacher-corrected steps
+            env_id: which parallel environment this transition came from
         """
         head_idx = get_head_index(game_state)
-        self.buffer.add(state, action, log_prob, reward, value, done, mask,
-                        head_idx, bc_flag=bc_flag)
+        self.buffers[env_id].add(state, action, log_prob, reward, value,
+                                 done, mask, head_idx, bc_flag=bc_flag)
         self.total_steps += 1
 
+    def total_collected(self) -> int:
+        """Total transitions across all env buffers this rollout."""
+        return sum(b.size for b in self.buffers)
+
     def amend_last_transition(self, reward_delta: float = 0.0,
-                              done: Optional[bool] = None) -> bool:
+                              done: Optional[bool] = None,
+                              env_id: int = 0) -> bool:
         """Amend the last stored transition in the rollout buffer.
 
         Adds `reward_delta` to its reward and optionally overrides its done
@@ -319,32 +337,68 @@ class PPOTrainer:
         only uses to train the value head). Returns True if a transition was
         amended, False if the buffer is empty.
         """
-        return self.buffer.amend_last(reward_delta, done)
+        return self.buffers[env_id].amend_last(reward_delta, done)
 
     def update(self, last_value: float, last_done: bool) -> dict:
         """Run PPO update on collected rollout.
 
-        Call this after filling the rollout buffer.
+        Call this after filling the rollout buffer(s).
 
         Args:
-            last_value: V(s) for the state after the last transition
-            last_done: whether the last state was terminal
+            last_value: V(s) for the state after the last transition —
+                a float (single env) or a list of floats (one per env)
+            last_done: whether the last state was terminal — a bool or
+                a list of bools (one per env)
 
         Returns:
             dict of training metrics
         """
         cfg = self.config
 
-        # Compute advantages
-        self.buffer.compute_gae(last_value, last_done, cfg.gamma, cfg.gae_lambda)
+        # Normalize bootstrap args to per-env lists
+        if not isinstance(last_value, (list, tuple)):
+            last_value = [last_value]
+        if not isinstance(last_done, (list, tuple)):
+            last_done = [last_done]
 
-        # Normalize advantages
-        n = self.buffer.size
-        adv = self.buffer.advantages[:n]
-        adv_mean = adv.mean()
-        adv_std = adv.std()
+        # Compute advantages PER ENV (each buffer is temporally contiguous
+        # for its own env; mixing envs would corrupt values[t+1] adjacency)
+        active = []
+        for i, buf in enumerate(self.buffers):
+            if buf.size == 0:
+                continue
+            lv = last_value[i] if i < len(last_value) else 0.0
+            ld = last_done[i] if i < len(last_done) else True
+            buf.compute_gae(lv, ld, cfg.gamma, cfg.gae_lambda)
+            active.append(buf)
+
+        if not active:
+            return {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0,
+                    "bc_loss": 0.0, "bc_coef": 0.0, "bc_fraction": 0.0,
+                    "total_loss": 0.0, "approx_kl": 0.0,
+                    "clip_fraction": 0.0, "explained_variance": 0.0,
+                    "num_epochs_run": 0}
+
+        # Concatenate all envs' transitions for the update
+        def cat(attr):
+            return np.concatenate([getattr(b, attr)[:b.size] for b in active])
+
+        c_states = cat("states")
+        c_actions = cat("actions")
+        c_log_probs = cat("log_probs")
+        c_advantages = cat("advantages")
+        c_returns = cat("returns")
+        c_values = cat("values")
+        c_masks = cat("masks")
+        c_head_indices = cat("head_indices")
+        c_bc_flags = cat("bc_flags")
+        n = len(c_states)
+
+        # Normalize advantages over the COMBINED set
+        adv_mean = c_advantages.mean()
+        adv_std = c_advantages.std()
         if adv_std > 1e-8:
-            self.buffer.advantages[:n] = (adv - adv_mean) / (adv_std + 1e-8)
+            c_advantages = (c_advantages - adv_mean) / (adv_std + 1e-8)
 
         # Learning rate annealing
         if cfg.anneal_lr:
@@ -369,7 +423,7 @@ class PPOTrainer:
             "entropy": 0.0,
             "bc_loss": 0.0,
             "bc_coef": self._bc_coef_now,
-            "bc_fraction": float(self.buffer.bc_flags[:n].mean()) if n > 0 else 0.0,
+            "bc_fraction": float(c_bc_flags.mean()) if n > 0 else 0.0,
             "total_loss": 0.0,
             "approx_kl": 0.0,
             "clip_fraction": 0.0,
@@ -378,11 +432,31 @@ class PPOTrainer:
         }
         num_batches = 0
 
+        def combined_batches():
+            """Shuffled minibatches over the concatenated arrays."""
+            indices = np.random.permutation(n)
+            batch_size = max(n // cfg.num_minibatches, 1)
+            for start in range(0, n - batch_size + 1, batch_size):
+                bi = indices[start:start + batch_size]
+                yield {
+                    "states": torch.tensor(c_states[bi], device=self.device),
+                    "actions": torch.tensor(c_actions[bi], device=self.device),
+                    "log_probs": torch.tensor(c_log_probs[bi], device=self.device),
+                    "advantages": torch.tensor(c_advantages[bi], device=self.device),
+                    "returns": torch.tensor(c_returns[bi], device=self.device),
+                    "old_values": torch.tensor(c_values[bi], device=self.device),
+                    "bc_flags": torch.tensor(c_bc_flags[bi], device=self.device),
+                    "masks": torch.tensor(c_masks[bi], device=self.device),
+                    "head_indices": torch.tensor(c_head_indices[bi],
+                                                 device=self.device,
+                                                 dtype=torch.long),
+                }
+
         for epoch in range(cfg.num_epochs):
             epoch_kl = 0.0
             epoch_batches = 0
 
-            for batch in self.buffer.get_batches(cfg.num_minibatches):
+            for batch in combined_batches():
                 batch_metrics = self._update_batch(batch)
 
                 # approx_kl MUST be in this list: it was accumulated only
@@ -412,19 +486,19 @@ class PPOTrainer:
                       "bc_loss", "total_loss", "approx_kl", "clip_fraction"]:
                 metrics[k] /= num_batches
 
-        # Explained variance
-        values = self.buffer.values[:n]
-        returns = self.buffer.returns[:n]
-        var_returns = np.var(returns)
+        # Explained variance (over the combined set)
+        var_returns = np.var(c_returns)
         if var_returns > 1e-8:
-            metrics["explained_variance"] = 1.0 - np.var(returns - values) / var_returns
+            metrics["explained_variance"] = (
+                1.0 - np.var(c_returns - c_values) / var_returns)
         else:
             metrics["explained_variance"] = 0.0
 
         self.total_updates += 1
 
-        # Reset buffer for next rollout
-        self.buffer.reset()
+        # Reset all env buffers for the next rollout
+        for buf in self.buffers:
+            buf.reset()
 
         return metrics
 
@@ -615,5 +689,5 @@ class PPOTrainer:
             "total_updates": self.total_updates,
             "total_steps": self.total_steps,
             "learning_rate": self.get_learning_rate(),
-            "buffer_size": self.buffer.size,
+            "buffer_size": self.total_collected(),
         }
