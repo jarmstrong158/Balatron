@@ -142,12 +142,13 @@ def start_server() -> bool:
     kill_strays()
     time.sleep(3)
     env = dict(os.environ,
-               # 4x: dropped from 8x on 2026-06-11 after a day-long crash
-               # wave — deferred-animation nil-races (DECISIONS gotcha 5)
-               # kept surfacing at new sites every ~12 min at 8x, eating
-               # 11+ hours of training. Half speed that trains beats full
-               # speed that churns. Never raise (DECISIONS gotcha 7).
-               BALATROBOT_GAMESPEED="4",
+               # 8x. Was dropped to 4x during the 06-11 crash wave on the
+               # theory the nil-races were speed-bound — disproven (4x
+               # crashed at the same cadence). The real fix is the
+               # double-fire protection (endpoint lock guard + trainer
+               # transition debounce), so full speed is back. Never raise
+               # above 8 (DECISIONS gotcha 7).
+               BALATROBOT_GAMESPEED="8",
                BALATROBOT_ANIMATION_FPS="120")
     server_log = open(os.path.join(LOG_DIR, "server.log"), "a")
     subprocess.Popen(
