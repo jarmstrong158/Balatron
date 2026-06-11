@@ -37,7 +37,7 @@ STOP_FILE = os.path.join(REPO, "SUPERVISOR_STOP")
 UVX = r"C:\Users\jarms\.local\bin\uvx.exe"
 # Parallel game instances: one server+game per port. Must match the
 # trainer's --num-envs (ports 12346..12346+N-1).
-NUM_ENVS = 2
+NUM_ENVS = 3
 PORTS = [12346 + i for i in range(NUM_ENVS)]
 PORT = PORTS[0]  # legacy references
 
