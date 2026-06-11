@@ -35,7 +35,11 @@ LOG_DIR = os.path.join(REPO, "logs")
 LOG_PATH = os.path.join(LOG_DIR, "supervisor.log")
 STOP_FILE = os.path.join(REPO, "SUPERVISOR_STOP")
 UVX = r"C:\Users\jarms\.local\bin\uvx.exe"
-PORT = 12346
+# Parallel game instances: one server+game per port. Must match the
+# trainer's --num-envs (ports 12346..12346+N-1).
+NUM_ENVS = 2
+PORTS = [12346 + i for i in range(NUM_ENVS)]
+PORT = PORTS[0]  # legacy references
 
 CHECK_INTERVAL_S = 30
 SERVER_BOOT_TIMEOUT_S = 120
@@ -70,13 +74,27 @@ def log(msg: str):
         f.write(line + "\n")
 
 
-def port_listening() -> bool:
+def port_listening(port: int = PORT) -> bool:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(1.5)
     try:
-        return s.connect_ex(("127.0.0.1", PORT)) == 0
+        return s.connect_ex(("127.0.0.1", port)) == 0
     finally:
         s.close()
+
+
+def kill_port_owner(port: int):
+    """Kill only the process tree owning a specific port (multi-instance:
+    a blanket taskkill /IM would murder every game at once)."""
+    out = subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         f"(Get-NetTCPConnection -LocalPort {port} -State Listen "
+         f"-ErrorAction SilentlyContinue).OwningProcess | Select-Object -First 1"],
+        capture_output=True, text=True, timeout=20,
+    ).stdout.strip()
+    if out:
+        subprocess.run(["taskkill", "/F", "/PID", out, "/T"],
+                       capture_output=True, timeout=15)
 
 
 def trainer_pid() -> str:
@@ -137,9 +155,9 @@ def newest_checkpoint_age() -> float:
     return time.time() - max(os.path.getmtime(p) for p in cps)
 
 
-def start_server() -> bool:
-    """Launch the BalatroBot server + game; wait for the port."""
-    kill_strays()
+def start_server(port: int = PORT) -> bool:
+    """Launch one BalatroBot server + game on a port; wait for it."""
+    kill_port_owner(port)
     time.sleep(3)
     env = dict(os.environ,
                # 8x. Was dropped to 4x during the 06-11 crash wave on the
@@ -149,7 +167,8 @@ def start_server() -> bool:
                # transition debounce), so full speed is back. Never raise
                # above 8 (DECISIONS gotcha 7).
                BALATROBOT_GAMESPEED="8",
-               BALATROBOT_ANIMATION_FPS="120")
+               BALATROBOT_ANIMATION_FPS="120",
+               BALATROBOT_PORT=str(port))
     server_log = open(os.path.join(LOG_DIR, "server.log"), "a")
     subprocess.Popen(
         [UVX, "balatrobot", "serve", "--fast"],
@@ -159,11 +178,11 @@ def start_server() -> bool:
     )
     deadline = time.time() + SERVER_BOOT_TIMEOUT_S
     while time.time() < deadline:
-        if port_listening():
-            log("server up, port listening")
+        if port_listening(port):
+            log(f"server up, port {port} listening")
             return True
         time.sleep(2)
-    log("ERROR: server failed to come up within timeout")
+    log(f"ERROR: server on port {port} failed to come up within timeout")
     return False
 
 
@@ -181,6 +200,7 @@ def start_trainer() -> bool:
          "--total-timesteps", "1500000",
          "--device", "cpu",
          "--checkpoint-interval", "2",
+         "--num-envs", str(NUM_ENVS),
          "--checkpoint", cp],
         env=env, cwd=REPO,
         stdout=trainer_log, stderr=subprocess.STDOUT,
@@ -193,7 +213,7 @@ def start_trainer() -> bool:
 def main():
     log(f"supervisor started (pid {os.getpid()}), checking every "
         f"{CHECK_INTERVAL_S}s")
-    port_down_checks = 0
+    port_down_checks = {p: 0 for p in PORTS}
     # (timestamp, global_step) samples for throughput stall detection
     step_samples: list = []
     # When the current trainer was (first seen) running — anchors the
@@ -219,12 +239,12 @@ def main():
                     log(f"port 12346 down {port_down_checks} checks — "
                         f"(re)starting server")
                     server_ok = start_server()
-                    port_down_checks = 0
+                    port_down_checks = {p: 0 for p in PORTS}
                 else:
                     log(f"port 12346 down (check {port_down_checks}/3) — "
                         f"waiting for trainer's own recovery")
             else:
-                port_down_checks = 0
+                port_down_checks = {p: 0 for p in PORTS}
 
             if server_ok:
                 pid = trainer_pid()
