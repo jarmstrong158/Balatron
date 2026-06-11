@@ -567,6 +567,7 @@ class Trainer:
         self._prev_shop_fingerprint = None
         self._state_stuck_count = 0
         self._prev_state_fingerprint = None
+        self._menu_loop_count = 0
         self._current_ante = 1
         self._current_score = 0
 
@@ -1421,6 +1422,7 @@ class Trainer:
                 pack_attempts = 0  # reset pack retry counter
                 unknown_state_count = 0  # reset stuck counter
                 self._round_eval_count = 0  # reset win-screen detector
+                self._menu_loop_count = 0  # a run is live — menu loop over
                 if state == "SHOP":
                     # Reset the reroll budget only on ENTRY to a shop —
                     # resetting on every poll made the per-shop reroll cap
@@ -2007,6 +2009,24 @@ class Trainer:
 
             # MENU — start a new run with random seed
             if state == "MENU":
+                # Count consecutive MENU visits: after WIN #36 the mod's
+                # start endpoint wedged (hung, then dropped the connection
+                # with no response) while gamestate still answered — the
+                # old silent except:pass retried forever, visibly spamming
+                # run-starts for 25+ minutes with a frozen log. Covers both
+                # failure shapes: start raising AND start "succeeding" but
+                # bouncing straight back to MENU.
+                self._menu_loop_count = getattr(self, '_menu_loop_count', 0) + 1
+                if self._menu_loop_count >= 8:
+                    print(f"[MENU] {self._menu_loop_count} consecutive MENU "
+                          f"polls — start endpoint wedged, restarting "
+                          f"Balatro", flush=True)
+                    self._menu_loop_count = 0
+                    await self._restart_balatro()
+                    self.reward_calc.reset()
+                    self.game.reset()
+                    return None
+
                 # Start recording the new run
                 self.recorder.start_run()
                 seed = ''.join(random.choices(string.ascii_uppercase, k=8))
@@ -2014,8 +2034,9 @@ class Trainer:
                     await self.game.execute_action(
                         "start", {"deck": "RED", "stake": "WHITE", "seed": seed}
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[MENU] start failed "
+                          f"(attempt {self._menu_loop_count}): {e}", flush=True)
                 await asyncio.sleep(0.5)
                 continue
 
