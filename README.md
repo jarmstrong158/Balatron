@@ -350,7 +350,7 @@ One detached process keeps the entire stack alive — it starts the server + gam
 Start-Process -WindowStyle Hidden python -ArgumentList '-u','supervise.py' -WorkingDirectory 'C:\Users\jarms\repos\balatron'
 ```
 
-The supervisor runs **multi-instance training**: `NUM_ENVS` parallel Balatro games (ports 12346+) feed one network through per-env rollout buffers — one brain, many bodies. There is no "merging" at save time: every update consumes all envs' transitions in one gradient step, and checkpoints are the single network's weights exactly as in single-instance mode. Health checks, debounce, and kills are all port-scoped. Env 0 records win videos; the others play uncaptured.
+The supervisor runs **multi-instance training**: `NUM_ENVS` parallel Balatro games (ports 12346+, currently 3) feed one network through per-env rollout buffers — one brain, many bodies. Measured scaling: 196 steps/min (N=1) → 309 (N=2) → 433 (N=3), ~620k steps/day, a PPO update every ~5 minutes. There is no "merging" at save time: every update consumes all envs' transitions in one gradient step, and checkpoints are the single network's weights exactly as in single-instance mode. Health checks, debounce, and kills are all port-scoped. Env 0 records win videos; the others play uncaptured.
 
 Actions are logged to `logs/supervisor.log`, trainer output to `logs/trainer_<timestamp>.log`. Stop it by creating a `SUPERVISOR_STOP` file in the repo root. For overnight runs, also disable standby (`powercfg /change standby-timeout-ac 0`) — a sleeping machine kills everything, including the supervisor.
 
@@ -395,9 +395,11 @@ python -u -m training.train --total-timesteps 1500000 --device cpu --checkpoint-
 
 Training progress is printed per PPO update:
 ```
-Update   205 | Step  425,843 | FPS 664 | Ep 24 | R 27.30 | Ante 4.2 | WR 0.0% | PL 0.0406 | VL 20.96 | Ent 2.635 | KL 0.0000 | BC 3.794@0.50(11%) | LR 2.15e-04
+Update   218 | Step  452,130 | FPS 393 | Ep 92 | R 3.56 | Ante 4.2 | WR 0.0% | PL 0.0371 | VL 17.99 | Ent 2.595 | KL 0.040203 | CF 0.158 | BC 3.598@0.47(13%) | LR 2.10e-04
 ```
-`PL`/`VL`/`Ent`/`KL` are the PPO policy loss, value loss, entropy, and approximate KL divergence. `BC loss@coef(frac)` is the behavior-cloning kickstart — the imitation loss, its current (annealing) coefficient, and the fraction of the rollout that was heuristic-overridden.
+`PL`/`VL`/`Ent` are the PPO policy loss, value loss, and entropy. `KL` is the true approximate KL divergence (healthy drift is ~0.01–0.05; the `target_kl=0.03` early-stop trims epochs when it overshoots). `CF` is the clip fraction (healthy ~0.1–0.2). `R` is the genuine per-episode mean reward. `BC loss@coef(frac)` is the behavior-cloning kickstart — the imitation loss, its current (annealing) coefficient, and the fraction of the rollout that was heuristic-overridden.
+
+> A note on trusting these numbers: three display metrics were found lying in a single day — `KL` was never accumulated into the printout (read 0.0000 forever), `CF` was computed but never printed, and `R` was a cumulative session sum masquerading as a per-episode mean. All fixed; the training signal itself (PPO buffer rewards) was never affected. Lesson recorded in [DECISIONS.md](DECISIONS.md): verify a metric's computation path before reasoning from it.
 
 ### Resuming from Checkpoint
 
