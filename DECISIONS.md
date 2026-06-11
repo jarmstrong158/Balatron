@@ -112,9 +112,18 @@ here — they must be re-applied if the mod is reinstalled/updated:
 ### 6. Print UTF-8 safely / recover from process death
 - The trainer prints emoji that crash on Windows `cp1252` when stdout is
   redirected/piped — always launch with `PYTHONUTF8=1`.
-- The watchdog restarts **Balatro** on a hung/crashed game (~48s), but nothing
-  restarts the **trainer process** if it dies — it can sit idle. Relaunch from
-  the newest checkpoint. (A supervisor loop is the proper fix.)
+- The watchdog restarts **Balatro** on a hung/crashed game, but nothing
+  restarted the **trainer process** — and twice the whole stack (server +
+  trainer + monitoring shells) died *simultaneously* with no crash trace
+  (external kill, likely Windows sleep), sitting idle until noticed.
+- **Fix: `supervise.py`** — a detached process that owns the stack: every
+  30s it ensures port 12346 is listening (else kills strays and relaunches
+  the server) and the trainer is running (else relaunches from the newest
+  checkpoint with `PYTHONUTF8=1`, logging to `logs/trainer_<ts>.log`).
+  Launch it instead of starting server/trainer by hand; stop it by creating
+  a `SUPERVISOR_STOP` file in the repo root. Actions log to
+  `logs/supervisor.log`. For overnight runs also disable standby:
+  `powercfg /change standby-timeout-ac 0`.
 
 ### 7. Don't raise game speed to train faster — it destabilizes the game
 Rollout collection (the live game) is the real wall-clock bottleneck, not the

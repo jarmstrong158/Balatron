@@ -333,7 +333,17 @@ pip install balatrobot
 
 ## Usage
 
-### Training
+### Supervised launch (recommended)
+
+One detached process keeps the entire stack alive — it starts the server + game if port 12346 isn't listening, and (re)starts the trainer from the newest checkpoint whenever it dies:
+
+```powershell
+Start-Process -WindowStyle Hidden python -ArgumentList '-u','supervise.py' -WorkingDirectory 'C:\Users\jarms\repos\balatron'
+```
+
+Actions are logged to `logs/supervisor.log`, trainer output to `logs/trainer_<timestamp>.log`. Stop it by creating a `SUPERVISOR_STOP` file in the repo root. For overnight runs, also disable standby (`powercfg /change standby-timeout-ac 0`) — a sleeping machine kills everything, including the supervisor.
+
+### Manual training (two terminals)
 
 Training requires two terminals running simultaneously:
 
