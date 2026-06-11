@@ -77,14 +77,19 @@ class TrainConfig:
     rollout_steps: int = 2048            # Steps per rollout
     phase: int = 1                       # 1 = general, 2 = naneinf
 
-    # PPO (forwarded to PPOConfig)
+    # PPO (forwarded to PPOConfig — values HERE win, not ppo.py defaults)
     learning_rate: float = 3e-4
-    gamma: float = 0.99
+    # 0.995: with 200-400 decisions/run, gamma=0.99 discounted the win
+    # reward to ~5% at early-ante decisions (0.99^300) — the shop choices
+    # that determine wins could barely feel it. 0.995^300 ~ 22%.
+    gamma: float = 0.995
     gae_lambda: float = 0.95
     clip_epsilon: float = 0.2
     entropy_coef: float = 0.01
     value_coef: float = 0.5
-    num_epochs: int = 4
+    # 8 epochs: rollouts cost ~25 min of live game, the update costs
+    # seconds — extract more learning per rollout, target_kl bounds drift.
+    num_epochs: int = 8
     num_minibatches: int = 4
     target_kl: float = 0.03
 
