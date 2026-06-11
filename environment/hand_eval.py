@@ -480,6 +480,14 @@ def _resolve_copy_source(jokers: list[dict], idx: int, direction: str) -> Option
     max_depth = len(jokers)  # prevent infinite loops
 
     if direction == "left":
+        # Brainstorm copies the LEFTMOST joker. If Brainstorm IS leftmost
+        # it copies itself — no effect. The old code skipped idx via
+        # `visited` and resolved to the NEXT joker, crediting a leftmost
+        # Brainstorm with a copy it never makes in-game: estimates
+        # inflated and shop/swap logic happily left Brainstorm parked in
+        # the dead slot ("uses Blueprint right, but not Brainstorm").
+        if idx == 0:
+            return None
         # Brainstorm: start scanning from leftmost
         scan_start = 0
     else:
@@ -521,6 +529,11 @@ def _resolve_copy_source(jokers: list[dict], idx: int, direction: str) -> Option
             current_scan = target_idx + 1
             direction = "right"
         else:
+            # Chain reached a Brainstorm: it copies the leftmost joker.
+            # If that Brainstorm IS leftmost, it copies itself — dead
+            # chain, the whole copy resolves to nothing.
+            if target_idx == 0:
+                return None
             current_scan = 0
             direction = "left"
 
