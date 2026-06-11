@@ -354,6 +354,17 @@ Actions are logged to `logs/supervisor.log`, trainer output to `logs/trainer_<ti
 
 The supervisor **debounces** game restarts (3 consecutive down-checks, ~90s) because the trainer's internal watchdog also restarts a hung game and is faster — acting immediately would race it and leave two server instances fighting over the port. The trainer heals the game; the supervisor heals the trainer (and the game only when nothing else did).
 
+The supervisor also checks **liveness, not just existence**: the trainer stamps `logs/heartbeat` on every environment step, and a trainer that exists but hasn't stepped in 5 minutes is killed along with the game (a frozen trainer almost always means a wedged game — e.g. a boot-splash zombie whose socket still answers). Normal steps land every few seconds, so 5 minutes of silence is unambiguous.
+
+The full recovery hierarchy:
+
+| Failure | Detected by | Healed in |
+|---|---|---|
+| Game hangs/crashes | Trainer's internal watchdog | ~1 min |
+| Trainer process dies | Supervisor existence check | ~30 s |
+| Trainer freezes (alive, no progress) | Supervisor heartbeat check | ~6 min |
+| Machine sleeps (kills everything) | Nothing — prevent it | `powercfg /change standby-timeout-ac 0` |
+
 ### Manual training (two terminals)
 
 Training requires two terminals running simultaneously:
