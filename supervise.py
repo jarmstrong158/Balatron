@@ -40,6 +40,8 @@ PORT = 12346
 CHECK_INTERVAL_S = 30
 SERVER_BOOT_TIMEOUT_S = 120
 TRAINER_GRACE_S = 60  # after starting the trainer, wait before re-checking
+HEARTBEAT_PATH = os.path.join(LOG_DIR, "heartbeat")
+HEARTBEAT_STALE_S = 300  # no env step in 5 min = trainer wedged
 
 
 def log(msg: str):
@@ -81,6 +83,21 @@ def kill_strays():
     for image in ("Balatro.exe", "balatrobot.exe"):
         subprocess.run(["taskkill", "/F", "/IM", image],
                        capture_output=True, timeout=15)
+
+
+def heartbeat_age() -> float:
+    """Seconds since the trainer last made a real environment step.
+    Returns 0 if the heartbeat file doesn't exist yet (fresh trainer
+    gets the grace period instead)."""
+    try:
+        return time.time() - os.path.getmtime(HEARTBEAT_PATH)
+    except OSError:
+        return 0.0
+
+
+def kill_trainer(pid: str):
+    subprocess.run(["taskkill", "/F", "/PID", pid],
+                   capture_output=True, timeout=15)
 
 
 def start_server() -> bool:
@@ -165,7 +182,28 @@ def main():
                 if not pid:
                     log("trainer not running — (re)starting")
                     if start_trainer():
+                        # Fresh trainer: stamp the heartbeat so the stale
+                        # check measures from launch, not from the
+                        # previous trainer's last step.
+                        try:
+                            with open(HEARTBEAT_PATH, "w") as f:
+                                f.write(str(time.time()))
+                        except OSError:
+                            pass
                         time.sleep(TRAINER_GRACE_S)
+                else:
+                    # Liveness: a trainer that exists but has made zero
+                    # environment steps in HEARTBEAT_STALE_S is wedged
+                    # (frozen fetch, hung start endpoint, boot-splash
+                    # zombie game...). Kill BOTH trainer and game — a
+                    # wedged trainer almost always means a wedged game —
+                    # and let the next cycles rebuild the stack.
+                    age = heartbeat_age()
+                    if age > HEARTBEAT_STALE_S:
+                        log(f"trainer pid {pid} alive but heartbeat is "
+                            f"{age:.0f}s stale — killing wedged stack")
+                        kill_trainer(pid)
+                        kill_strays()
         except Exception as e:  # never let one bad cycle kill the supervisor
             log(f"ERROR in supervise cycle: {e}")
 

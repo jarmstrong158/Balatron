@@ -548,6 +548,19 @@ class Trainer:
         # Ensure checkpoint directory exists
         os.makedirs(config.checkpoint_dir, exist_ok=True)
 
+    def _touch_heartbeat(self):
+        """Update logs/heartbeat so the supervisor can tell a frozen
+        trainer (process alive, zero progress) from a working one. Called
+        on every stored transition; the supervisor kills the trainer if
+        this file goes stale (>5 min without a single environment step
+        means wedged — normal steps land every few seconds)."""
+        try:
+            hb = os.path.join("logs", "heartbeat")
+            with open(hb, "w") as f:
+                f.write(str(time.time()))
+        except OSError:
+            pass  # never let liveness reporting break training
+
     def _reset_run_state(self):
         """Clear all per-run flags and pending state.
 
@@ -1335,6 +1348,12 @@ class Trainer:
                 False, action_mask, game_state_name,
                 bc_flag=was_override,
             )
+            # Liveness heartbeat: touch on every REAL step so the
+            # supervisor can distinguish a frozen trainer from a working
+            # one. Wedges keep finding new shapes (post-win start hang,
+            # boot-splash freeze with a live socket) — progress is the
+            # only signal that covers all of them.
+            self._touch_heartbeat()
             # Remember the last real (non-terminal) transition so terminal
             # rewards can be attached to the actual last state/action rather
             # than a zeroed placeholder.
