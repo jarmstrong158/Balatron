@@ -109,8 +109,15 @@ not yet true) makes a pick return an error.
   simultaneous-highlight cap (always 1), not the pick count.
 
 ### 5. Base-game crash fixes live outside this repo
-Four fixes patch Balatro/BalatroBot itself and are **not** version-controlled
+Five fixes patch Balatro/BalatroBot itself and are **not** version-controlled
 here — they must be re-applied if the mod is reinstalled/updated:
+- `%APPDATA%/Balatro/Mods/balatrobot/lovely/screenwipe_nil_fix.toml` —
+  nil-guards on `G.screenwipe` in `button_callbacks.lua` `wipe_off`
+  (~lines 3177/3213): the screen-wipe transition schedules deferred events
+  that index `G.screenwipe` after fast programmatic actions tore it down —
+  was crashing the game ~every 12 minutes (11 crashes/2.5h, 2026-06-11).
+  **Diagnostic tip:** crash tracebacks ARE captured in
+  `Mods/lovely/log/*.log` — grep for `attempt to`.
 - `%APPDATA%/Balatro/Mods/balatrobot/src/lua/endpoints/cash_out.lua` — a
   ~300-poll timeout fallback so `cash_out` can't hang forever (original in
   `cash_out.lua.bak`).
