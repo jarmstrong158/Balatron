@@ -844,7 +844,7 @@ class GameStateManager:
     - State vector assembly
     """
 
-    def __init__(self):
+    def __init__(self, port: int = 12346):
         self._session: Optional[aiohttp.ClientSession] = None
         self._scaling_tracker = ScalingTracker()
         self._event_detector = EventDetector()
@@ -852,6 +852,10 @@ class GameStateManager:
         self._last_action: Optional[str] = None
         self._last_action_params: Optional[dict] = None
         self._joker_eval_cache: dict = {}
+        # Per-instance API endpoint (multi-instance training runs one
+        # Balatro per port: 12346, 12347, ...)
+        self.port = port
+        self.api_url = f"http://127.0.0.1:{port}"
 
     async def connect(self):
         """Open HTTP session."""
@@ -897,7 +901,7 @@ class GameStateManager:
             payload["params"] = params
 
         timeout = aiohttp.ClientTimeout(total=timeout_s)
-        async with self._session.post(API_URL, json=payload, timeout=timeout) as resp:
+        async with self._session.post(self.api_url, json=payload, timeout=timeout) as resp:
             data = await resp.json()
             if "error" in data:
                 raise RuntimeError(f"BalatroBot error: {data['error']}")

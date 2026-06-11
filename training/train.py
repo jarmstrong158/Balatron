@@ -111,6 +111,9 @@ class TrainConfig:
     # Recording
     record_wins: bool = True            # Record runs and save wins to recordings/wins/
 
+    # Parallel game instances (ports 12346..12346+N-1); env 0 records
+    num_envs: int = 1
+
     def to_ppo_config(self) -> PPOConfig:
         return PPOConfig(
             learning_rate=self.learning_rate,
@@ -125,6 +128,7 @@ class TrainConfig:
             target_kl=self.target_kl,
             anneal_lr=self.anneal_lr,
             device=self.device,
+            num_envs=self.num_envs,
         )
 
 
@@ -139,9 +143,10 @@ class EpisodeTracker:
     WIN_LOG_FILE = "logs/win_log.json"
 
     def __init__(self):
-        self.current_reward = 0.0
-        self.current_length = 0
-        self.current_ante = 1
+        # Per-env per-episode accumulators (multi-instance: each game
+        # tracks its own in-flight episode; lifetime/session stats stay
+        # shared since this is all one process)
+        self._eps: dict = {}
 
         self.completed_episodes = 0
         self.total_rewards: list[float] = []
@@ -153,17 +158,25 @@ class EpisodeTracker:
         self.session_highest_ante = 0
         self.session_highest_score = 0.0
         self.session_highest_score_round = ""
-        self._prev_round_chips = 0.0
 
-        # Per-episode highest hand (reset each run)
-        self._episode_highest_hand = 0.0
-        self._episode_highest_hand_type = ""
 
         # Load lifetime stats from disk
         self._lifetime_wins = 0
         self._lifetime_episodes = 0
         self._lifetime_highest_ante = 0
         self._load_lifetime_stats()
+
+    def _ep(self, env_id: int):
+        """Per-env in-flight episode accumulator."""
+        if env_id not in self._eps:
+            from types import SimpleNamespace
+            self._eps[env_id] = SimpleNamespace(
+                reward=0.0, length=0, ante=1, prev_round_chips=0.0,
+                highest_hand=0.0, highest_hand_type="")
+        return self._eps[env_id]
+
+    def episode_length(self, env_id: int = 0) -> int:
+        return self._ep(env_id).length
 
     def _load_lifetime_stats(self):
         """Load cumulative stats from disk."""
@@ -208,20 +221,21 @@ class EpisodeTracker:
         except OSError:
             pass
 
-    def step(self, reward: float, ante: int, raw_state: dict = None):
+    def step(self, reward: float, ante: int, raw_state: dict = None, env_id: int = 0):
         """Record a single step."""
-        self.current_reward += reward
-        self.current_length += 1
-        self.current_ante = max(self.current_ante, ante)
+        ep = self._ep(env_id)
+        ep.reward += reward
+        ep.length += 1
+        ep.ante = max(ep.ante, ante)
 
         # Track highest hand score from chip deltas
         if raw_state:
             round_chips = raw_state.get("round", {}).get("chips", 0)
-            if round_chips > self._prev_round_chips and self._prev_round_chips >= 0:
-                hand_score = round_chips - self._prev_round_chips
+            if round_chips > ep.prev_round_chips and ep.prev_round_chips >= 0:
+                hand_score = round_chips - ep.prev_round_chips
                 # Per-episode tracking
-                if hand_score > self._episode_highest_hand:
-                    self._episode_highest_hand = hand_score
+                if hand_score > ep.highest_hand:
+                    ep.highest_hand = hand_score
                     # Try to get hand type from the [HAND] log context
                     blind_name = ""
                     blinds_ep = raw_state.get("blinds", {})
@@ -230,7 +244,7 @@ class EpisodeTracker:
                             if isinstance(b, dict) and b.get("status") == "CURRENT":
                                 blind_name = b.get("name", "")
                                 break
-                    self._episode_highest_hand_type = f"Ante {ante} ({blind_name})" if blind_name else f"Ante {ante}"
+                    ep.highest_hand_type = f"Ante {ante} ({blind_name})" if blind_name else f"Ante {ante}"
                 if hand_score > self.session_highest_score:
                     self.session_highest_score = hand_score
                     blind_name = ""
@@ -241,7 +255,7 @@ class EpisodeTracker:
                                 blind_name = b.get("name", "")
                                 break
                     self.session_highest_score_round = f"Ante {ante} ({blind_name})" if blind_name else f"Ante {ante}"
-            self._prev_round_chips = round_chips
+            ep.prev_round_chips = round_chips
 
         # Check for new highest ante
         if ante > self.session_highest_ante:
@@ -249,16 +263,17 @@ class EpisodeTracker:
             score_info = f" | Best hand: {self.session_highest_score:,.0f} in {self.session_highest_score_round}" if self.session_highest_score > 0 else ""
             print(f"[RECORD] NEW HIGHEST ANTE: {ante}{score_info}")
 
-    def end_episode(self, won: bool, raw_state: dict = None):
+    def end_episode(self, won: bool, raw_state: dict = None, env_id: int = 0):
         """Record episode completion."""
-        self.total_rewards.append(self.current_reward)
-        self.total_lengths.append(self.current_length)
-        self.max_antes.append(self.current_ante)
+        ep = self._ep(env_id)
+        self.total_rewards.append(ep.reward)
+        self.total_lengths.append(ep.length)
+        self.max_antes.append(ep.ante)
         self.completed_episodes += 1
 
         # Update lifetime counters
         self._lifetime_episodes += 1
-        self._lifetime_highest_ante = max(self._lifetime_highest_ante, self.current_ante)
+        self._lifetime_highest_ante = max(self._lifetime_highest_ante, ep.ante)
 
         if won:
             self.wins += 1
@@ -268,15 +283,15 @@ class EpisodeTracker:
                   f"#{self.wins} this session")
             print(f"   Run #{self._lifetime_episodes} lifetime | "
                   f"#{self.completed_episodes} this session | "
-                  f"Ante {self.current_ante}")
+                  f"Ante {ep.ante}")
             print(f"   Lifetime: {self._lifetime_wins}/{self._lifetime_episodes} "
                   f"({self._lifetime_wins/max(self._lifetime_episodes,1)*100:.1f}%)")
             win_record: dict = {
                 "win_number": self._lifetime_wins,
                 "episode": self._lifetime_episodes,
-                "ante": self.current_ante,
+                "ante": ep.ante,
                 "timestamp": datetime.now().isoformat(),
-                "reward": round(self.current_reward, 2),
+                "reward": round(ep.reward, 2),
             }
             if raw_state:
                 jokers = raw_state.get("jokers", {}).get("cards", [])
@@ -307,9 +322,9 @@ class EpisodeTracker:
                 win_record["money"] = raw_state.get("money", 0)
                 win_record["deck"] = raw_state.get("deck_name", "")
                 win_record["stake"] = raw_state.get("stake", "")
-                if self._episode_highest_hand > 0:
-                    win_record["highest_hand"] = round(self._episode_highest_hand)
-                    win_record["highest_hand_context"] = self._episode_highest_hand_type
+                if ep.highest_hand > 0:
+                    win_record["highest_hand"] = round(ep.highest_hand)
+                    win_record["highest_hand_context"] = ep.highest_hand_type
             print(f"{'='*50}\n")
             self._append_win_log(win_record)
         else:
@@ -323,12 +338,12 @@ class EpisodeTracker:
         # Save after every episode
         self._save_lifetime_stats()
 
-        self.current_reward = 0.0
-        self.current_length = 0
-        self.current_ante = 1
-        self._prev_round_chips = 0.0
-        self._episode_highest_hand = 0.0
-        self._episode_highest_hand_type = ""
+        # Per-env per-episode accumulators (multi-instance: each game
+        # tracks its own in-flight episode; lifetime/session stats stay
+        # shared since this is all one process)
+        self._eps: dict = {}
+        ep.highest_hand = 0.0
+        ep.highest_hand_type = ""
 
     def get_recent_stats(self, window: int = 20) -> dict:
         """Get statistics over the last N episodes."""
@@ -507,14 +522,74 @@ def _find_weakest_sellable_joker(
 
 
 # ============================================================
+# Per-environment session (multi-instance training)
+# ============================================================
+
+class NullRecorder:
+    """No-op recorder for envs beyond the first — screen capture can
+    only follow one window, so only env 0 records wins."""
+    def start_run(self): pass
+    def end_run(self, **kwargs): pass
+    def check_file_size(self): pass
+    def cleanup(self): pass
+
+
+class EnvSession:
+    """Everything that belongs to ONE Balatro instance.
+
+    The trainer's per-run mutable state used to live as singleton
+    attributes; with N parallel games each needs its own copy or runs
+    bleed into each other (a stale win flag from env 0 would mark env
+    1's loss as a win). All defaults here mirror the old getattr
+    defaults — the env methods read these directly now.
+    """
+
+    def __init__(self, env_id: int, port: int, phase: int,
+                 recorder=None):
+        self.env_id = env_id
+        self.port = port
+        self.game = GameStateManager(port=port)
+        self.reward_calc = RewardCalculator(phase=phase)
+        self.joker_logger = JokerOrderLogger()
+        self.recorder = recorder if recorder is not None else NullRecorder()
+        self.balatro_process: Optional[subprocess.Popen] = None
+
+        # Per-run flags / pending actions (mirrors _reset_run_state)
+        self.win_recorded = False
+        self.win_reward_stored = False
+        self.pending_upgrade_buy = None
+        self.pending_rearrange = None
+        self.pending_hand_rearrange = None
+        self.pending_hand_rearrange_fallback = None
+        self.last_api_method = None
+        self.last_action_succeeded = True
+        self.prev_actionable_state = None
+        self.shop_rerolls = 0
+        self.shop_noop_count = 0
+        self.prev_shop_fingerprint = None
+        self.state_stuck_count = 0
+        self.prev_state_fingerprint = None
+        self.menu_loop_count = 0
+        self.current_ante = 1
+        self.current_score = 0
+        self.silent_skip_count = 0
+        self.round_eval_count = 0
+        self.consecutive_api_failures = 0
+        self.auto_action_this_step = False
+        self.last_transition_fire = (None, 0.0, None)
+        self.last_transition = None
+
+
+# ============================================================
 # Training Orchestrator
 # ============================================================
 
 class Trainer:
     """Main training loop.
 
-    Connects to BalatroBot, plays the game, collects transitions,
-    and runs PPO updates.
+    Connects to N BalatroBot instances (ports 12346..12346+N-1), plays
+    them in parallel via asyncio, collects transitions into per-env
+    buffers, and runs PPO updates over the combined data.
     """
 
     def __init__(self, config: TrainConfig, checkpoint_path: Optional[str] = None):
@@ -523,19 +598,25 @@ class Trainer:
         # Create components
         self.network = BalatronNetwork()
         self.ppo = PPOTrainer(self.network, config.to_ppo_config())
-        self.game = GameStateManager()
-        self.reward_calc = RewardCalculator(phase=config.phase)
         self.action_decoder = ActionDecoder()
         self.episode_tracker = EpisodeTracker()
-        self.joker_logger = JokerOrderLogger()
         self.recorder = RunRecorder(enabled=config.record_wins)
+
+        # One session per parallel game instance; env 0 owns the real
+        # win recorder, the rest get no-ops.
+        num_envs = max(1, getattr(config, "num_envs", 1))
+        self.sessions = [
+            EnvSession(env_id=i, port=12346 + i, phase=config.phase,
+                       recorder=self.recorder if i == 0 else None)
+            for i in range(num_envs)
+        ]
+        # Single-env compatibility aliases (summary/util paths)
+        self.game = self.sessions[0].game
 
         # Training state
         self.global_step = 0
         self.num_updates = 0
         self.start_time = 0.0
-        self._consecutive_api_failures = 0
-        self._balatro_process: Optional[subprocess.Popen] = None
 
         # Load checkpoint if provided
         if checkpoint_path:
@@ -562,7 +643,7 @@ class Trainer:
         except OSError:
             pass  # never let liveness reporting break training
 
-    def _reset_run_state(self):
+    def _reset_run_state(self, env):
         """Clear all per-run flags and pending state.
 
         Must run on every path that abandons or finishes a run (GAME_OVER
@@ -572,25 +653,25 @@ class Trainer:
         counted, and video-recorded as a win. Stale _pending_* could fire
         actions aimed at the previous run's shop.
         """
-        self._win_recorded = False
-        self._win_reward_stored = False
-        self._pending_upgrade_buy = None
-        self._pending_rearrange = None
-        self._pending_hand_rearrange = None
-        self._pending_hand_rearrange_fallback = None
-        self._last_api_method = None
-        self._last_action_succeeded = True
-        self._prev_actionable_state = None
-        self._shop_rerolls = 0
-        self._shop_noop_count = 0
-        self._prev_shop_fingerprint = None
-        self._state_stuck_count = 0
-        self._prev_state_fingerprint = None
-        self._menu_loop_count = 0
-        self._current_ante = 1
-        self._current_score = 0
+        env.win_recorded = False
+        env.win_reward_stored = False
+        env.pending_upgrade_buy = None
+        env.pending_rearrange = None
+        env.pending_hand_rearrange = None
+        env.pending_hand_rearrange_fallback = None
+        env.last_api_method = None
+        env.last_action_succeeded = True
+        env.prev_actionable_state = None
+        env.shop_rerolls = 0
+        env.shop_noop_count = 0
+        env.prev_shop_fingerprint = None
+        env.state_stuck_count = 0
+        env.prev_state_fingerprint = None
+        env.menu_loop_count = 0
+        env.current_ante = 1
+        env.current_score = 0
 
-    async def _restart_balatro(self):
+    async def _restart_balatro(self, env):
         """Kill Balatro and relaunch it after a crash.
 
         Kills any running Balatro.exe process, waits briefly, then
@@ -601,10 +682,10 @@ class Trainer:
         # Save recording before killing everything — crash runs at ante 7+
         # are still worth keeping for review
         try:
-            ante = getattr(self, '_current_ante', 1)
-            score = getattr(self, '_current_score', 0)
-            won = getattr(self, '_win_recorded', False)
-            self.recorder.end_run(
+            ante = env.current_ante
+            score = env.current_score
+            won = env.win_recorded
+            env.recorder.end_run(
                 won=won,
                 ante_reached=ante,
                 final_score=score,
@@ -617,44 +698,60 @@ class Trainer:
         # next run's stats. Guard on length so a menu-time restart doesn't
         # count a phantom zero-length episode.
         try:
-            if (not getattr(self, '_win_recorded', False)
-                    and self.episode_tracker.current_length > 0):
-                self.episode_tracker.end_episode(False)
+            if (not env.win_recorded
+                    and self.episode_tracker.episode_length(env.env_id) > 0):
+                self.episode_tracker.end_episode(False, env_id=env.env_id)
         except Exception:
             pass
 
         # Recording saved and episode closed — now clear ALL per-run state
         # so nothing leaks into the next run.
-        self._reset_run_state()
+        self._reset_run_state(env)
 
-        # Kill existing Balatro process AND its balatrobot.exe wrapper —
-        # each restart spawns a fresh wrapper via start_balatro.bat, and
-        # killing only Balatro.exe leaked one zombie wrapper per restart
-        # (38 accumulated in one night of crash recovery).
-        for image in ("Balatro.exe", "balatrobot.exe"):
+        # Kill THIS env's game only — by the PID that owns its port, plus
+        # this env's tracked wrapper. A blanket taskkill /IM would murder
+        # every parallel instance's game at once.
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(Get-NetTCPConnection -LocalPort {env.port} "
+                 f"-State Listen -ErrorAction SilentlyContinue)"
+                 f".OwningProcess | Select-Object -First 1"],
+                capture_output=True, text=True, timeout=20,
+            ).stdout.strip()
+            if out:
+                subprocess.run(["taskkill", "/F", "/PID", out, "/T"],
+                               capture_output=True, timeout=10)
+                print(f"[CRASH-RECOVERY] killed port {env.port} owner "
+                      f"PID {out}", flush=True)
+        except Exception as e:
+            print(f"[CRASH-RECOVERY] port-kill failed: {e}", flush=True)
+        if env.balatro_process is not None:
             try:
-                subprocess.run(
-                    ["taskkill", "/F", "/IM", image],
-                    capture_output=True, timeout=10,
-                )
-            except Exception as e:
-                print(f"[CRASH-RECOVERY] taskkill {image} failed: {e}", flush=True)
+                env.balatro_process.kill()
+            except Exception:
+                pass
 
         await asyncio.sleep(3.0)  # Wait for process to fully die
 
-        # Relaunch via start_balatro.bat (runs in background)
-        bat_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "start_balatro.bat")
-        if not os.path.exists(bat_path):
-            bat_path = r"C:\Users\jarms\repos\balatron\start_balatro.bat"
-
+        # Relaunch directly (NOT via start_balatro.bat — the bat has no
+        # port awareness) with this env's port.
         try:
-            self._balatro_process = subprocess.Popen(
-                ["cmd", "/c", bat_path],
+            relaunch_env = dict(
+                os.environ,
+                BALATROBOT_PORT=str(env.port),
+                BALATROBOT_GAMESPEED="8",
+                BALATROBOT_ANIMATION_FPS="120",
+            )
+            env.balatro_process = subprocess.Popen(
+                [r"C:\Users\jarms\.local\bin\uvx.exe",
+                 "balatrobot", "serve", "--fast"],
+                env=relaunch_env,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            print(f"[CRASH-RECOVERY] Relaunched Balatro (PID {self._balatro_process.pid})", flush=True)
+            print(f"[CRASH-RECOVERY] Relaunched Balatro (PID {env.balatro_process.pid})", flush=True)
         except Exception as e:
             print(f"[CRASH-RECOVERY] Failed to relaunch: {e}", flush=True)
             print("[CRASH-RECOVERY] Please restart Balatro manually", flush=True)
@@ -666,9 +763,9 @@ class Trainer:
             await asyncio.sleep(1.0)
             try:
                 # Reconnect the HTTP session
-                await self.game.disconnect()
-                await self.game.connect()
-                raw = await self.game.fetch_gamestate()
+                await env.game.disconnect()
+                await env.game.connect()
+                raw = await env.game.fetch_gamestate()
                 state = raw.get("state", "")
                 print(f"[CRASH-RECOVERY] API responded — state={state}", flush=True)
 
@@ -676,14 +773,14 @@ class Trainer:
                 # path bypasses the MENU branch in _get_actionable_state,
                 # so without start_run() a win in this run had no video)
                 if state == "MENU":
-                    self.recorder.start_run()
+                    env.recorder.start_run()
                     seed = ''.join(random.choices(string.ascii_uppercase, k=8))
-                    await self.game.execute_action(
+                    await env.game.execute_action(
                         "start", {"deck": "RED", "stake": "WHITE", "seed": seed}
                     )
                     await asyncio.sleep(0.5)
 
-                self._consecutive_api_failures = 0
+                env.consecutive_api_failures = 0
                 print("[CRASH-RECOVERY] Recovery complete!", flush=True)
                 return
             except Exception:
@@ -706,17 +803,26 @@ class Trainer:
         print(f"  Network params: {sum(p.numel() for p in self.network.parameters()):,}")
         print("=" * 60)
 
-        # Connect to BalatroBot
-        await self.game.connect()
-        print("Connected to BalatroBot API")
+        # Connect to all BalatroBot instances
+        for env in self.sessions:
+            await env.game.connect()
+        print(f"Connected to {len(self.sessions)} BalatroBot instance(s) "
+              f"(ports {', '.join(str(e.port) for e in self.sessions)})")
 
         try:
             while self.global_step < cfg.total_timesteps:
-                # Collect rollout
-                last_value, last_done = await self._collect_rollout()
+                # Collect one rollout across all envs in parallel. Each
+                # env task plays until the COMBINED buffer total reaches
+                # rollout_steps (natural load balancing — faster envs
+                # contribute more).
+                results = await asyncio.gather(
+                    *[self._collect_rollout(env) for env in self.sessions]
+                )
+                last_values = [r[0] for r in results]
+                last_dones = [r[1] for r in results]
 
-                # PPO update
-                metrics = self.ppo.update(last_value, last_done)
+                # PPO update over the combined per-env buffers
+                metrics = self.ppo.update(last_values, last_dones)
                 self.num_updates += 1
 
                 # LR annealing
@@ -746,25 +852,27 @@ class Trainer:
             # Final checkpoint
             self._save_checkpoint(tag="final")
             self.recorder.cleanup()
-            await self.game.disconnect()
+            for env in self.sessions:
+                await env.game.disconnect()
             print("Disconnected from BalatroBot")
 
         self._print_summary()
 
-    async def _collect_rollout(self) -> tuple[float, bool]:
-        """Collect rollout_steps transitions by playing the game.
+    async def _collect_rollout(self, env) -> tuple[float, bool]:
+        """Collect transitions for ONE env until the COMBINED total
+        across all envs reaches rollout_steps.
 
         Returns:
-            (last_value, last_done) for GAE bootstrapping
+            (last_value, last_done) for this env's GAE bootstrap
         """
         cfg = self.config
         prev_raw = None
         last_done = False
 
-        for step in range(cfg.rollout_steps):
+        while self.ppo.total_collected() < cfg.rollout_steps:
 
             # Get current game state
-            raw_state = await self._get_actionable_state()
+            raw_state = await self._get_actionable_state(env)
 
             if raw_state is None:
                 # Couldn't get an actionable state — treat as terminal
@@ -773,7 +881,7 @@ class Trainer:
                     np.zeros(14, dtype=np.float32),
                     0.0, 0.0, 0.0, True,
                     np.zeros(ACTION_HEAD_SIZE, dtype=np.float32),
-                    "GAME_OVER",
+                    "GAME_OVER", env_id=env.env_id,
                 )
                 self.global_step += 1
                 last_done = True
@@ -784,7 +892,7 @@ class Trainer:
             # Detect round completion: SELECTING_HAND -> SHOP means blind was beaten
             prev_state_name = prev_raw.get("state", "") if prev_raw else ""
             if prev_state_name == "SELECTING_HAND" and game_state_name == "SHOP":
-                self.joker_logger.round_end()
+                env.joker_logger.round_end()
 
             # Detect win via API 'won' flag (endless mode auto-continues)
             # The Lua mod auto-dismisses the win screen, so GAME_OVER may
@@ -799,21 +907,21 @@ class Trainer:
             # those states is the only reliable proof the boss was beaten.
             api_won = raw_state.get("won", False)
             safe_won_states = {"SHOP", "BLIND_SELECT", "ROUND_EVAL"}
-            if (api_won and not getattr(self, '_win_recorded', False)
+            if (api_won and not env.win_recorded
                     and game_state_name in safe_won_states):
-                self._win_recorded = True
+                env.win_recorded = True
                 ante = raw_state.get("ante_num", 1)
                 print(f"[WIN] Won flag detected in state={game_state_name} "
                       f"ante={ante}", flush=True)
-                self.episode_tracker.end_episode(True, raw_state)
+                self.episode_tracker.end_episode(True, raw_state, env_id=env.env_id)
 
                 # Fallback: the Lua mod auto-dismisses the win screen, so
                 # GAME_OVER may never fire and the win reward would never reach
                 # the PPO buffer. Push a terminal transition carrying the win
                 # reward here, attached to the last real state/action. Guarded
                 # by _win_reward_stored so GAME_OVER won't double-count it.
-                if not getattr(self, '_win_reward_stored', False):
-                    win_reward = self.reward_calc.terminal_win_reward(raw_state)
+                if not env.win_reward_stored:
+                    win_reward = env.reward_calc.terminal_win_reward(raw_state)
                     # Credit the win to the real decision that won the run by
                     # amending the last stored transition in place (set
                     # done=True, add the reward). Appending a fresh done=True
@@ -821,6 +929,7 @@ class Trainer:
                     # phantom state, never the policy on the winning action.
                     amended = self.ppo.amend_last_transition(
                         reward_delta=win_reward, done=True,
+                        env_id=env.env_id,
                     )
                     if not amended:
                         # No real transition yet this rollout — fall back to a
@@ -830,13 +939,13 @@ class Trainer:
                             np.zeros(14, dtype=np.float32),
                             0.0, win_reward, 0.0, True,
                             np.zeros(ACTION_HEAD_SIZE, dtype=np.float32),
-                            game_state_name,
+                            game_state_name, env_id=env.env_id,
                         )
                         self.global_step += 1
-                    self._win_reward_stored = True
+                    env.win_reward_stored = True
                     # Consume the last real transition so the GAME_OVER block
                     # below can't credit a second terminal from the same one.
-                    self._last_transition = None
+                    env.last_transition = None
                     print(f"[WIN] Credited terminal win reward "
                           f"{win_reward:+.2f} to last transition", flush=True)
                 # DON'T end recording here — let GAME_OVER handle it so the
@@ -844,10 +953,10 @@ class Trainer:
 
             # Handle GAME_OVER — end episode, start new one
             if game_state_name == "GAME_OVER":
-                self.joker_logger.round_end()  # flush any pending round data
+                env.joker_logger.round_end()  # flush any pending round data
                 ante = raw_state.get("ante_num", 1)
                 api_won_flag = raw_state.get("won", False)
-                already_recorded = getattr(self, '_win_recorded', False)
+                already_recorded = env.win_recorded
                 # Win only if we got PAST the ante-8 boss: ante > 8 (advanced in
                 # endless) OR already_recorded by the post-boss win-fallback.
                 # NOT "ante >= 8 and api_won": the base game sets won=true on
@@ -884,28 +993,28 @@ class Trainer:
 
                 # Compute terminal reward (kwargs describe the action that
                 # led into GAME_OVER — the one this reward will amend)
-                reward = self.reward_calc.step(
+                reward = env.reward_calc.step(
                     prev_raw, raw_state,
-                    action=getattr(self, '_last_api_method', None),
-                    action_succeeded=getattr(self, '_last_action_succeeded', True),
+                    action=env.last_api_method,
+                    action_succeeded=env.last_action_succeeded,
                 )
                 # If the win reward was already pushed to the buffer via the
                 # won-flag fallback above, don't count it again here. Capture
                 # the flag before reset() clears it below so we can also skip
                 # the duplicate terminal store.
-                win_already_stored = getattr(self, '_win_reward_stored', False)
+                win_already_stored = env.win_reward_stored
                 if win_already_stored:
                     reward = 0.0
-                self.episode_tracker.step(reward, ante, raw_state)
+                self.episode_tracker.step(reward, ante, raw_state, env_id=env.env_id)
                 # Only call end_episode if win wasn't already recorded
-                if not getattr(self, '_win_recorded', False):
-                    self.episode_tracker.end_episode(won, raw_state)
+                if not env.win_recorded:
+                    self.episode_tracker.end_episode(won, raw_state, env_id=env.env_id)
                 # End recording — save if won, discard if lost
                 # Wait a moment on wins so the win screen / final scoring
                 # animation gets captured before ffmpeg stops
                 if won:
                     await asyncio.sleep(3.0)
-                self.recorder.end_run(
+                env.recorder.end_run(
                     won=won,
                     ante_reached=ante,
                     final_score=int(raw_state.get("round", {}).get("chips", 0)),
@@ -916,9 +1025,9 @@ class Trainer:
                     total_steps=self.global_step,
                 )
 
-                self.reward_calc.reset()
-                self.game.reset()
-                self._reset_run_state()  # win flags, pending actions, etc.
+                env.reward_calc.reset()
+                env.game.reset()
+                self._reset_run_state(env)  # win flags, pending actions, etc.
                 prev_raw = None
 
                 # Credit the terminal reward to the real decision that ended
@@ -930,6 +1039,7 @@ class Trainer:
                 if not win_already_stored:
                     amended = self.ppo.amend_last_transition(
                         reward_delta=reward, done=True,
+                        env_id=env.env_id,
                     )
                     if not amended:
                         # Buffer empty (terminal on the first step of a fresh
@@ -940,15 +1050,15 @@ class Trainer:
                             np.zeros(14, dtype=np.float32),
                             0.0, reward, 0.0, True,
                             np.zeros(ACTION_HEAD_SIZE, dtype=np.float32),
-                            "GAME_OVER",
+                            "GAME_OVER", env_id=env.env_id,
                         )
                         self.global_step += 1
-                self._last_transition = None
+                env.last_transition = None
                 last_done = True
 
                 # Navigate back to menu so next poll doesn't see GAME_OVER again
                 try:
-                    await self.game.execute_action("menu")
+                    await env.game.execute_action("menu")
                 except Exception:
                     pass
 
@@ -956,23 +1066,23 @@ class Trainer:
 
             # Get state vector from game manager
             try:
-                state_vec = await self.game.step()
+                state_vec = await env.game.step()
             except Exception:
                 # API dropped (e.g. menu escape killed server) — wait and retry.
                 # Count consecutive silent skips so a persistent failure trips
                 # recovery instead of looping forever before the stuck-detector.
-                self._silent_skip_count = getattr(self, '_silent_skip_count', 0) + 1
-                if self._silent_skip_count >= 40:
-                    print(f"[STUCK] {self._silent_skip_count} consecutive "
+                env.silent_skip_count = env.silent_skip_count + 1
+                if env.silent_skip_count >= 40:
+                    print(f"[STUCK] {env.silent_skip_count} consecutive "
                           f"state-encode failures — restarting Balatro", flush=True)
-                    self._silent_skip_count = 0
+                    env.silent_skip_count = 0
                     # Close the crashed episode in the buffer — otherwise
                     # GAE bootstraps the new run's values into the dead run.
-                    self.ppo.amend_last_transition(done=True)
+                    self.ppo.amend_last_transition(done=True, env_id=env.env_id)
                     last_done = True
-                    await self._restart_balatro()
-                    self.reward_calc.reset()
-                    self.game.reset()
+                    await self._restart_balatro(env)
+                    env.reward_calc.reset()
+                    env.game.reset()
                     prev_raw = None
                     continue
                 await asyncio.sleep(0.3)
@@ -985,7 +1095,7 @@ class Trainer:
             # when the hard guard will block it anyway
             if game_state_name == "SHOP":
                 from environment.action_space import ACTION_REROLL
-                rerolls = getattr(self, '_shop_rerolls', 0)
+                rerolls = env.shop_rerolls
                 money_now = raw_state.get("money", 0)
                 reroll_cost = raw_state.get("round", {}).get("reroll_cost", 5)
                 min_joker_cost = 4
@@ -1009,25 +1119,25 @@ class Trainer:
                 # a wedged state the agent can't act in (e.g. a shop with an
                 # all-zero mask) trips recovery instead of looping forever past
                 # the spin/stuck detectors below.
-                self._silent_skip_count = getattr(self, '_silent_skip_count', 0) + 1
-                if self._silent_skip_count >= 40:
-                    print(f"[STUCK] {self._silent_skip_count} steps with no valid "
+                env.silent_skip_count = env.silent_skip_count + 1
+                if env.silent_skip_count >= 40:
+                    print(f"[STUCK] {env.silent_skip_count} steps with no valid "
                           f"action in {game_state_name} — restarting Balatro",
                           flush=True)
-                    self._silent_skip_count = 0
+                    env.silent_skip_count = 0
                     # Close the crashed episode in the buffer (see above)
-                    self.ppo.amend_last_transition(done=True)
+                    self.ppo.amend_last_transition(done=True, env_id=env.env_id)
                     last_done = True
-                    await self._restart_balatro()
-                    self.reward_calc.reset()
-                    self.game.reset()
+                    await self._restart_balatro(env)
+                    env.reward_calc.reset()
+                    env.game.reset()
                     prev_raw = None
                     continue
                 prev_raw = raw_state
                 continue
 
             # Valid action available — clear the silent-skip watchdog.
-            self._silent_skip_count = 0
+            env.silent_skip_count = 0
 
             # Get head index
             head_idx = get_head_index(game_state_name)
@@ -1051,7 +1161,7 @@ class Trainer:
 
             # Decode sampled action tensor to API call
             api_method, api_params = self._action_to_api_call(
-                action_np, raw_state
+                env, action_np, raw_state
             )
 
             # Shop spin detection: track ANY repeated shop state, not just
@@ -1063,14 +1173,14 @@ class Trainer:
                     str(raw_state.get("packs", {}).get("cards", [])),
                     len(raw_state.get("jokers", {}).get("cards", [])),
                 )
-                _prev_shop_fp = getattr(self, '_prev_shop_fingerprint', None)
+                _prev_shop_fp = env.prev_shop_fingerprint
                 if _shop_fp == _prev_shop_fp:
-                    self._shop_noop_count = getattr(self, '_shop_noop_count', 0) + 1
+                    env.shop_noop_count = env.shop_noop_count + 1
                 else:
-                    self._shop_noop_count = 0
-                self._prev_shop_fingerprint = _shop_fp
+                    env.shop_noop_count = 0
+                env.prev_shop_fingerprint = _shop_fp
 
-                noop_count = self._shop_noop_count
+                noop_count = env.shop_noop_count
                 if noop_count > 0 and noop_count <= 5:
                     noop_action_type = int(action_np[0])
                     noop_target = int(action_np[13])
@@ -1117,7 +1227,7 @@ class Trainer:
                               f"(slot {best_pack})", flush=True)
                         api_method = "buy"
                         api_params = {"pack": best_pack}
-                        self._shop_noop_count = 0
+                        env.shop_noop_count = 0
                     else:
                         # Priority 2: buy affordable shop card (joker/consumable)
                         noop_shop = raw_state.get("shop", {}).get("cards", [])
@@ -1138,16 +1248,16 @@ class Trainer:
                                   f"(slot {best_noop_buy})", flush=True)
                             api_method = "buy"
                             api_params = {"card": best_noop_buy}
-                            self._shop_noop_count = 0
+                            env.shop_noop_count = 0
                         elif noop_count >= 8:
                             print(f"[SHOP] SPIN recovery: forcing next_round "
                                   f"after {noop_count} spins", flush=True)
                             api_method = "next_round"
                             api_params = None
-                            self._shop_noop_count = 0
+                            env.shop_noop_count = 0
             else:
-                self._shop_noop_count = 0
-                self._prev_shop_fingerprint = None
+                env.shop_noop_count = 0
+                env.prev_shop_fingerprint = None
 
             # Stuck-state detector: if we keep getting the same state,
             # escalate from force-play → restart
@@ -1159,10 +1269,10 @@ class Trainer:
                 raw_state.get("money", -1),
                 str(raw_state.get("shop", {}).get("cards", [])) if game_state_name == "SHOP" else "",
             )
-            prev_fingerprint = getattr(self, '_prev_state_fingerprint', None)
+            prev_fingerprint = env.prev_state_fingerprint
             if state_fingerprint == prev_fingerprint:
-                self._state_stuck_count = getattr(self, '_state_stuck_count', 0) + 1
-                stuck = self._state_stuck_count
+                env.state_stuck_count = env.state_stuck_count + 1
+                stuck = env.state_stuck_count
 
                 if stuck == 3 and game_state_name == "SELECTING_HAND":
                     # First escalation: force-play best hand
@@ -1177,8 +1287,8 @@ class Trainer:
                         forced_cards = [0] if hand_cards else []
                     api_method = "play"
                     api_params = {"cards": forced_cards}
-                    self._pending_hand_rearrange = None
-                    self._pending_rearrange = None
+                    env.pending_hand_rearrange = None
+                    env.pending_rearrange = None
 
                 elif stuck >= 5 and game_state_name == "SHOP":
                     # Shop loop — force-leave via next_round BEFORE the generic
@@ -1189,7 +1299,7 @@ class Trainer:
                           f"forcing next_round", flush=True)
                     api_method = "next_round"
                     api_params = None
-                    self._state_stuck_count = 0
+                    env.state_stuck_count = 0
 
                 elif stuck >= 8:
                     # Buttons are permanently broken — restart Balatro
@@ -1203,45 +1313,45 @@ class Trainer:
                           f"action={api_method} params={api_params} "
                           f"keys={sorted(raw_state.keys())} "
                           f"raw={_json.dumps(raw_state, default=str)[:1500]}", flush=True)
-                    self._state_stuck_count = 0
-                    self._prev_state_fingerprint = None
+                    env.state_stuck_count = 0
+                    env.prev_state_fingerprint = None
                     # Close the crashed episode in the buffer, and drop the
                     # stale prev_raw — otherwise the next settle computes a
                     # junk delta between the dead run and the fresh one.
-                    self.ppo.amend_last_transition(done=True)
+                    self.ppo.amend_last_transition(done=True, env_id=env.env_id)
                     last_done = True
-                    await self._restart_balatro()
-                    self.reward_calc.reset()
-                    self.game.reset()
+                    await self._restart_balatro(env)
+                    env.reward_calc.reset()
+                    env.game.reset()
                     prev_raw = None
                     continue
             else:
-                self._state_stuck_count = 0
-            self._prev_state_fingerprint = state_fingerprint
+                env.state_stuck_count = 0
+            env.prev_state_fingerprint = state_fingerprint
 
             # Reorder jokers before playing a hand (using actual cards)
             _intended_joker_order = None
-            if api_method == "play" and getattr(self, '_pending_rearrange', None) is not None:
-                hand_cards, deck_cards = self._pending_rearrange
-                self._pending_rearrange = None
+            if api_method == "play" and env.pending_rearrange is not None:
+                hand_cards, deck_cards = env.pending_rearrange
+                env.pending_rearrange = None
                 try:
                     _intended_joker_order = await self._auto_rearrange_jokers(
-                        raw_state, hand_cards=hand_cards, deck_cards=deck_cards
+                        env, raw_state, hand_cards=hand_cards, deck_cards=deck_cards
                     )
                 except Exception as e:
                     err_msg = f"Pre-play: {e}"
                     print(f"[WARN] Joker rearrange failed: {e}")
-                    self.joker_logger.log_rearrange_failure("pre-play", str(e))
+                    env.joker_logger.log_rearrange_failure("pre-play", str(e))
 
             # Rearrange hand cards for optimal scoring order (face card first
             # for Photograph, highest chips first for Hanging Chad, etc.)
-            if api_method == "play" and getattr(self, '_pending_hand_rearrange', None) is not None:
-                new_hand_order = self._pending_hand_rearrange
-                fallback_cards = getattr(self, '_pending_hand_rearrange_fallback', None)
-                self._pending_hand_rearrange = None
-                self._pending_hand_rearrange_fallback = None
+            if api_method == "play" and env.pending_hand_rearrange is not None:
+                new_hand_order = env.pending_hand_rearrange
+                fallback_cards = env.pending_hand_rearrange_fallback
+                env.pending_hand_rearrange = None
+                env.pending_hand_rearrange_fallback = None
                 try:
-                    await self.game.execute_action("rearrange", {"hand": new_hand_order})
+                    await env.game.execute_action("rearrange", {"hand": new_hand_order})
                 except Exception as e:
                     print(f"[WARN] Hand rearrange failed: {e}")
                     # Rearrange failed — play cards at original indices instead
@@ -1252,7 +1362,7 @@ class Trainer:
             # Log play details for joker order review
             if api_method == "play":
                 self._log_play_for_joker_order(
-                    raw_state, _intended_joker_order
+                    env, raw_state, _intended_joker_order
                 )
 
             # Debounce state-TRANSITION actions: re-issuing next_round /
@@ -1265,14 +1375,13 @@ class Trainer:
             # name hasn't changed, wait instead of re-firing.
             TRANSITION_ACTIONS = {"next_round", "select", "skip", "cash_out"}
             if api_method in TRANSITION_ACTIONS:
-                last_m, last_t, last_s = getattr(
-                    self, '_last_transition_fire', (None, 0.0, None))
+                last_m, last_t, last_s = env.last_transition_fire
                 if (api_method == last_m
                         and game_state_name == last_s
                         and time.time() - last_t < 8.0):
                     await asyncio.sleep(1.0)
                     continue
-                self._last_transition_fire = (
+                env.last_transition_fire = (
                     api_method, time.time(), game_state_name)
 
             # Execute action (with retry on UI timing errors)
@@ -1280,7 +1389,7 @@ class Trainer:
             max_retries = 3
             for _attempt in range(max_retries):
                 try:
-                    await self.game.execute_action(api_method, api_params)
+                    await env.game.execute_action(api_method, api_params)
                     break  # success
                 except Exception as exc:
                     exc_str = str(exc)
@@ -1338,22 +1447,22 @@ class Trainer:
             # play). The action kwargs are likewise the PREVIOUS action's —
             # the sell-penalty and invalid-action penalty describe the
             # action that produced this delta.
-            _cached_contribs = getattr(self.game, '_joker_eval_cache', {}).get('contributions')
-            settled_reward = self.reward_calc.step(
+            _cached_contribs = getattr(env.game, '_joker_eval_cache', {}).get('contributions')
+            settled_reward = env.reward_calc.step(
                 prev_raw, raw_state,
-                action=getattr(self, '_last_api_method', None),
-                action_succeeded=getattr(self, '_last_action_succeeded', True),
-                scaling_values=self._get_scaling_snapshot(),
+                action=env.last_api_method,
+                action_succeeded=env.last_action_succeeded,
+                scaling_values=self._get_scaling_snapshot(env),
                 joker_contributions=_cached_contribs,
-                skip_economy=getattr(self, '_auto_action_this_step', False),
+                skip_economy=env.auto_action_this_step,
             )
-            self._auto_action_this_step = False
-            self._last_api_method = api_method
-            self._last_action_succeeded = action_succeeded
+            env.auto_action_this_step = False
+            env.last_api_method = api_method
+            env.last_action_succeeded = action_succeeded
 
             store_reward = 0.0
             if settled_reward != 0.0:
-                if not self.ppo.amend_last_transition(reward_delta=settled_reward):
+                if not self.ppo.amend_last_transition(reward_delta=settled_reward, env_id=env.env_id):
                     # Rollout boundary: the causing transition was consumed
                     # with the previous buffer — keep the reward on this
                     # step rather than dropping it.
@@ -1361,9 +1470,9 @@ class Trainer:
 
             # Track episode
             ante = raw_state.get("ante_num", 1)
-            self._current_ante = ante
-            self._current_score = int(raw_state.get("round", {}).get("chips", 0))
-            self.episode_tracker.step(settled_reward, ante, raw_state)
+            env.current_ante = ante
+            env.current_score = int(raw_state.get("round", {}).get("chips", 0))
+            self.episode_tracker.step(settled_reward, ante, raw_state, env_id=env.env_id)
 
             # Store transition with reward 0 — its own outcome is settled
             # (amended in) on the next iteration, or by the boundary settle
@@ -1371,7 +1480,7 @@ class Trainer:
             self.ppo.store_transition(
                 state_vec, action_np, log_prob, store_reward, value,
                 False, action_mask, game_state_name,
-                bc_flag=was_override,
+                bc_flag=was_override, env_id=env.env_id,
             )
             # Liveness heartbeat: touch on every REAL step so the
             # supervisor can distinguish a frozen trainer from a working
@@ -1382,7 +1491,7 @@ class Trainer:
             # Remember the last real (non-terminal) transition so terminal
             # rewards can be attached to the actual last state/action rather
             # than a zeroed placeholder.
-            self._last_transition = (
+            env.last_transition = (
                 state_vec, action_np, log_prob, value,
                 action_mask, game_state_name,
             )
@@ -1395,7 +1504,7 @@ class Trainer:
         last_value = 0.0
         if not last_done:
             try:
-                raw_state = await self.game.fetch_gamestate()
+                raw_state = await env.game.fetch_gamestate()
 
                 # Settle the final transition's outcome before the buffer is
                 # consumed — without this, the last decision of every rollout
@@ -1403,23 +1512,24 @@ class Trainer:
                 # happens on the NEXT iteration, which won't come).
                 if prev_raw is not None:
                     boundary_terminal = raw_state.get("state", "") == "GAME_OVER"
-                    final_reward = self.reward_calc.step(
+                    final_reward = env.reward_calc.step(
                         prev_raw, raw_state,
-                        action=getattr(self, '_last_api_method', None),
-                        action_succeeded=getattr(self, '_last_action_succeeded', True),
-                        scaling_values=self._get_scaling_snapshot(),
+                        action=env.last_api_method,
+                        action_succeeded=env.last_action_succeeded,
+                        scaling_values=self._get_scaling_snapshot(env),
                     )
                     if final_reward != 0.0 or boundary_terminal:
                         self.ppo.amend_last_transition(
                             reward_delta=final_reward,
                             done=True if boundary_terminal else None,
+                            env_id=env.env_id,
                         )
                     if boundary_terminal:
                         # Don't bootstrap V(GAME_OVER) into the dead episode.
                         last_done = True
 
                 if not last_done:
-                    state_vec = await self.game.step()
+                    state_vec = await env.game.step()
                     head_idx = get_head_index(raw_state.get("state", ""))
                     with torch.no_grad():
                         state_t = torch.tensor(state_vec, dtype=torch.float32).unsqueeze(0)
@@ -1432,7 +1542,7 @@ class Trainer:
 
         return last_value, last_done
 
-    async def _get_actionable_state(self) -> Optional[dict]:
+    async def _get_actionable_state(self, env) -> Optional[dict]:
         """Poll until we get a game state where the agent can act.
 
         Handles non-decision transitions automatically:
@@ -1447,7 +1557,7 @@ class Trainer:
         consecutive_fetch_fails = 0
         for _ in range(cfg.max_poll_attempts):
             try:
-                raw = await self.game.fetch_gamestate()
+                raw = await env.game.fetch_gamestate()
                 consecutive_fetch_fails = 0
             except Exception:
                 consecutive_fetch_fails += 1
@@ -1455,9 +1565,9 @@ class Trainer:
                 # hung/crashed game recovers in ~1 min instead of ~10 min.
                 if consecutive_fetch_fails >= 6:
                     print(f"[CRASH-RECOVERY] {consecutive_fetch_fails} consecutive fetch failures — triggering restart", flush=True)
-                    await self._restart_balatro()
-                    self.reward_calc.reset()
-                    self.game.reset()
+                    await self._restart_balatro(env)
+                    env.reward_calc.reset()
+                    env.game.reset()
                     return None
                 await asyncio.sleep(cfg.api_poll_delay)
                 continue
@@ -1467,17 +1577,17 @@ class Trainer:
             # Actionable states — the agent makes decisions here
             if state in ("SELECTING_HAND", "SHOP", "GAME_OVER",
                           "BLIND_SELECT"):
-                self._consecutive_api_failures = 0  # API is alive
+                env.consecutive_api_failures = 0  # API is alive
                 pack_attempts = 0  # reset pack retry counter
                 unknown_state_count = 0  # reset stuck counter
-                self._round_eval_count = 0  # reset win-screen detector
-                self._menu_loop_count = 0  # a run is live — menu loop over
+                env.round_eval_count = 0  # reset win-screen detector
+                env.menu_loop_count = 0  # a run is live — menu loop over
                 if state == "SHOP":
                     # Reset the reroll budget only on ENTRY to a shop —
                     # resetting on every poll made the per-shop reroll cap
                     # dead code (the counter never survived to the guards).
-                    if getattr(self, '_prev_actionable_state', None) != "SHOP":
-                        self._shop_rerolls = 0
+                    if env.prev_actionable_state != "SHOP":
+                        env.shop_rerolls = 0
                     # ── RAW STATE DUMP — see exactly what the API returns ──
                     import json as _json
                     _raw_shop = raw.get("shop", {})
@@ -1542,7 +1652,7 @@ class Trainer:
                             should_skip = True
                         if should_skip:
                             try:
-                                await self.game.execute_action("skip")
+                                await env.game.execute_action("skip")
                             except Exception:
                                 pass
                             await asyncio.sleep(0.2)
@@ -1561,7 +1671,7 @@ class Trainer:
                                 break
                     joker_cards = raw.get("jokers", {}).get("cards", [])
                     joker_keys = [j.get("key", "") for j in joker_cards]
-                    self.joker_logger.round_start(
+                    env.joker_logger.round_start(
                         ante=raw.get("ante_num", 1),
                         round_num=raw.get("round_num", 1),
                         blind_name=current_blind_name,
@@ -1593,10 +1703,10 @@ class Trainer:
                                       f"(idx {weakest_idx}) to un-debuff cards",
                                       flush=True)
                                 try:
-                                    await self.game.execute_action(
+                                    await env.game.execute_action(
                                         "sell", {"joker": weakest_idx})
                                     await asyncio.sleep(0.3)
-                                    raw = await self.game.fetch_gamestate()
+                                    raw = await env.game.fetch_gamestate()
                                 except Exception as e:
                                     print(f"[BOSS] Verdant Leaf sell failed: {e}",
                                           flush=True)
@@ -1607,22 +1717,22 @@ class Trainer:
                               flush=True)
 
                     # Auto-rearrange jokers at start of each hand round
-                    await self._auto_rearrange_jokers(raw)
+                    await self._auto_rearrange_jokers(env, raw)
                     # Auto-use consumables (Planet cards, well-timed Tarots, etc.)
                     pre_auto_money = raw.get("money", 0)
-                    raw = await self._auto_use_consumables(raw)
+                    raw = await self._auto_use_consumables(env, raw)
                     post_auto_money = raw.get("money", 0)
-                    self._auto_action_this_step = (pre_auto_money != post_auto_money)
+                    env.auto_action_this_step = (pre_auto_money != post_auto_money)
                 elif state == "SHOP":
                     # Auto-use non-targeting consumables in shop
                     # (Hermit for money doubling, Temperance, Wheel, etc.)
                     pre_auto_money = raw.get("money", 0)
-                    raw = await self._auto_use_consumables(raw)
+                    raw = await self._auto_use_consumables(env, raw)
                     # Auto-buy vouchers the NN doesn't understand
-                    raw = await self._auto_buy_vouchers(raw)
+                    raw = await self._auto_buy_vouchers(env, raw)
                     post_auto_money = raw.get("money", 0)
-                    self._auto_action_this_step = (pre_auto_money != post_auto_money)
-                self._prev_actionable_state = state
+                    env.auto_action_this_step = (pre_auto_money != post_auto_money)
+                env.prev_actionable_state = state
                 return raw
 
             # SMODS_BOOSTER_OPENED — select best card from pack
@@ -1644,16 +1754,16 @@ class Trainer:
                     print(f"[PACK-DBG] BAILOUT after {pack_attempts} attempts — "
                           f"force skipping (took nothing)", flush=True)
                     try:
-                        await self.game.execute_action("pack", {"skip": True})
+                        await env.game.execute_action("pack", {"skip": True})
                     except Exception:
                         pass
                     await asyncio.sleep(0.5)
                     # If we've bailed out too many times, game is probably broken
                     if pack_attempts > 25:
                         print(f"⚠️  PACK STUCK beyond recovery — triggering restart", flush=True)
-                        await self._restart_balatro()
-                        self.reward_calc.reset()
-                        self.game.reset()
+                        await self._restart_balatro(env)
+                        env.reward_calc.reset()
+                        env.game.reset()
                         return None
                     continue
 
@@ -1704,7 +1814,7 @@ class Trainer:
                             print(f"[PACK] SOUL CARD! Selling {w_name} (idx {weakest_soul_idx}) "
                                   f"to make room for Legendary joker", flush=True)
                             try:
-                                await self.game.execute_action("sell", {"joker": weakest_soul_idx})
+                                await env.game.execute_action("sell", {"joker": weakest_soul_idx})
                                 await asyncio.sleep(0.5)
                             except Exception as e:
                                 print(f"[PACK] Soul sell failed: {e}", flush=True)
@@ -1719,7 +1829,7 @@ class Trainer:
                     pick_idx = soul_idx
                     # Skip all other evaluation — go straight to pick logic
                     try:
-                        await self.game.execute_action("pack", {"card": pick_idx})
+                        await env.game.execute_action("pack", {"card": pick_idx})
                     except Exception as e:
                         print(f"[PACK] Soul pick failed: {e}", flush=True)
                     await asyncio.sleep(cfg.api_poll_delay)
@@ -1746,7 +1856,7 @@ class Trainer:
                         print(f"[PACK] No safe spectral pick in {spec_keys} "
                               f"— skipping pack", flush=True)
                         try:
-                            await self.game.execute_action("pack", {"skip": True})
+                            await env.game.execute_action("pack", {"skip": True})
                         except Exception:
                             pass
                         await asyncio.sleep(cfg.api_poll_delay)
@@ -1772,16 +1882,16 @@ class Trainer:
                             pack_params: dict = {"card": pick_idx}
                             if target_indices:
                                 pack_params["targets"] = target_indices
-                            await self.game.execute_action("pack", pack_params)
+                            await env.game.execute_action("pack", pack_params)
                         except Exception as e:
                             pass  # print(f"PACK tarot {pick_idx} failed: {e}")
                             # Re-check state before skipping — the select may have
                             # partially succeeded and the pack is already closing.
                             await asyncio.sleep(0.5)
                             try:
-                                recheck = await self.game.fetch_gamestate()
+                                recheck = await env.game.fetch_gamestate()
                                 if recheck.get("state", "") == "SMODS_BOOSTER_OPENED":
-                                    await self.game.execute_action("pack", {"skip": True})
+                                    await env.game.execute_action("pack", {"skip": True})
                             except Exception:
                                 pass
                         await asyncio.sleep(cfg.api_poll_delay)
@@ -1789,7 +1899,7 @@ class Trainer:
                     else:
                         # No worthwhile tarot — skip
                         try:
-                            await self.game.execute_action("pack", {"skip": True})
+                            await env.game.execute_action("pack", {"skip": True})
                         except Exception:
                             pass
                         await asyncio.sleep(cfg.api_poll_delay)
@@ -1856,7 +1966,7 @@ class Trainer:
                             # Nothing safe to sell — skip the pack rather than
                             # swap out a protected joker.
                             try:
-                                await self.game.execute_action("pack", {"skip": True})
+                                await env.game.execute_action("pack", {"skip": True})
                             except Exception:
                                 pass
                             await asyncio.sleep(cfg.api_poll_delay)
@@ -1902,10 +2012,10 @@ class Trainer:
                                 worst_name = current_jokers[worst_idx].get("label") or current_jokers[worst_idx].get("key", "?")
                                 print(f"[PACK] selling joker {worst_idx} ({worst_name}) "
                                       f"to swap for pack card {best_swap}", flush=True)
-                                await self.game.execute_action("sell", {"joker": worst_idx})
+                                await env.game.execute_action("sell", {"joker": worst_idx})
                                 await asyncio.sleep(0.5)
                                 # Verify pack is still open before picking
-                                recheck = await self.game.fetch_gamestate()
+                                recheck = await env.game.fetch_gamestate()
                                 if recheck.get("state", "") == "SMODS_BOOSTER_OPENED":
                                     pick_idx = best_swap
                                     # Fall through to generic pick logic below
@@ -1922,7 +2032,7 @@ class Trainer:
                         if pick_idx < 0:
                             # No improvement or sell failed — skip remaining picks
                             try:
-                                await self.game.execute_action("pack", {"skip": True})
+                                await env.game.execute_action("pack", {"skip": True})
                             except Exception as e:
                                 pass
                             await asyncio.sleep(cfg.api_poll_delay)
@@ -1988,14 +2098,14 @@ class Trainer:
                             target_attempts = [preferred_targets] + target_attempts
                         for targets in target_attempts:
                             try:
-                                await self.game.execute_action("pack", {"card": try_idx, "targets": targets})
+                                await env.game.execute_action("pack", {"card": try_idx, "targets": targets})
                                 selected = True
                                 break
                             except Exception as e:
                                 pass  # print(f"PACK card {try_idx} targets={targets} failed: {e}")
                     else:
                         try:
-                            await self.game.execute_action("pack", {"card": try_idx})
+                            await env.game.execute_action("pack", {"card": try_idx})
                             selected = True
                         except Exception as e:
                             pass  # print(f"PACK card {try_idx} failed: {e}")
@@ -2014,11 +2124,11 @@ class Trainer:
                 # discards the whole pack ("freeze then take nothing").
                 if not selected and pack_attempts >= 12:
                     try:
-                        recheck = await self.game.fetch_gamestate()
+                        recheck = await env.game.fetch_gamestate()
                         if recheck.get("state", "") == "SMODS_BOOSTER_OPENED":
                             print(f"[PACK-DBG] giving up after {pack_attempts} "
                                   f"failed picks — skipping pack", flush=True)
-                            await self.game.execute_action("pack", {"skip": True})
+                            await env.game.execute_action("pack", {"skip": True})
                     except Exception:
                         pass
 
@@ -2027,11 +2137,11 @@ class Trainer:
 
             # ROUND_EVAL — auto cash out
             if state == "ROUND_EVAL":
-                round_eval_count = getattr(self, '_round_eval_count', 0) + 1
-                self._round_eval_count = round_eval_count
+                round_eval_count = env.round_eval_count + 1
+                env.round_eval_count = round_eval_count
                 try:
-                    await self.game.execute_action("cash_out")
-                    self._round_eval_count = 0
+                    await env.game.execute_action("cash_out")
+                    env.round_eval_count = 0
                 except Exception:
                     pass
 
@@ -2041,15 +2151,15 @@ class Trainer:
                     ante = raw.get("ante_num", 1)
                     print(f"[WIN-RECOVERY] Stuck at ROUND_EVAL (ante={ante}, "
                           f"polls={round_eval_count}) — going to menu", flush=True)
-                    self._round_eval_count = 0
+                    env.round_eval_count = 0
                     try:
-                        await self.game.execute_action("menu")
+                        await env.game.execute_action("menu")
                     except Exception:
                         # Menu may also fail if paused — try restart
                         print("[WIN-RECOVERY] Menu failed — triggering restart", flush=True)
-                        await self._restart_balatro()
-                        self.reward_calc.reset()
-                        self.game.reset()
+                        await self._restart_balatro(env)
+                        env.reward_calc.reset()
+                        env.game.reset()
                         return None
                     await asyncio.sleep(1.0)
 
@@ -2065,8 +2175,8 @@ class Trainer:
                 # run-starts for 25+ minutes with a frozen log. Covers both
                 # failure shapes: start raising AND start "succeeding" but
                 # bouncing straight back to MENU.
-                self._menu_loop_count = getattr(self, '_menu_loop_count', 0) + 1
-                if self._menu_loop_count == 1:
+                env.menu_loop_count = env.menu_loop_count + 1
+                if env.menu_loop_count == 1:
                     # Let the menu settle before the first start attempt.
                     # Firing start mid-transition (GAME_OVER overlay still
                     # closing at speed 8) can make the mod's start_run a
@@ -2074,26 +2184,26 @@ class Trainer:
                     # a full game restart — 17 of those wedges in one night
                     # cost ~4x throughput.
                     await asyncio.sleep(2.0)
-                if self._menu_loop_count >= 8:
-                    print(f"[MENU] {self._menu_loop_count} consecutive MENU "
+                if env.menu_loop_count >= 8:
+                    print(f"[MENU] {env.menu_loop_count} consecutive MENU "
                           f"polls — start endpoint wedged, restarting "
                           f"Balatro", flush=True)
-                    self._menu_loop_count = 0
-                    await self._restart_balatro()
-                    self.reward_calc.reset()
-                    self.game.reset()
+                    env.menu_loop_count = 0
+                    await self._restart_balatro(env)
+                    env.reward_calc.reset()
+                    env.game.reset()
                     return None
 
                 # Start recording the new run
-                self.recorder.start_run()
+                env.recorder.start_run()
                 seed = ''.join(random.choices(string.ascii_uppercase, k=8))
                 try:
-                    await self.game.execute_action(
+                    await env.game.execute_action(
                         "start", {"deck": "RED", "stake": "WHITE", "seed": seed}
                     )
                 except Exception as e:
                     print(f"[MENU] start failed "
-                          f"(attempt {self._menu_loop_count}): {e}", flush=True)
+                          f"(attempt {env.menu_loop_count}): {e}", flush=True)
                 await asyncio.sleep(0.5)
                 continue
 
@@ -2135,9 +2245,9 @@ class Trainer:
                 if unknown_state_count > 60:  # 30+ seconds in transient
                     print(f"[CRASH-RECOVERY] Stuck in transient state '{state}' for "
                           f"{unknown_state_count} polls — triggering restart", flush=True)
-                    await self._restart_balatro()
-                    self.reward_calc.reset()
-                    self.game.reset()
+                    await self._restart_balatro(env)
+                    env.reward_calc.reset()
+                    env.game.reset()
                     return None
                 continue
 
@@ -2147,20 +2257,20 @@ class Trainer:
                 print(f"[UNKNOWN-STATE] '{state}' (poll #{unknown_state_count})", flush=True)
             if unknown_state_count > 30:
                 print(f"[CRASH-RECOVERY] Stuck in unknown state '{state}' for {unknown_state_count} polls — triggering restart", flush=True)
-                await self._restart_balatro()
-                self.reward_calc.reset()
-                self.game.reset()
+                await self._restart_balatro(env)
+                env.reward_calc.reset()
+                env.game.reset()
                 return None
             await asyncio.sleep(cfg.api_poll_delay)
 
         # All poll attempts exhausted — Balatro is likely crashed
-        self._consecutive_api_failures += 1
-        if self._consecutive_api_failures >= 3:
-            print(f"[CRASH-RECOVERY] {self._consecutive_api_failures} consecutive poll failures — triggering restart", flush=True)
-            await self._restart_balatro()
+        env.consecutive_api_failures += 1
+        if env.consecutive_api_failures >= 3:
+            print(f"[CRASH-RECOVERY] {env.consecutive_api_failures} consecutive poll failures — triggering restart", flush=True)
+            await self._restart_balatro(env)
             # Reset episode state after restart
-            self.reward_calc.reset()
-            self.game.reset()
+            env.reward_calc.reset()
+            env.game.reset()
         return None  # Timed out
 
     def _encode_executed_action(self, api_method: str,
@@ -2235,7 +2345,7 @@ class Trainer:
         # target distribution is uniform for them, so it cannot matter.
         return a
 
-    def _action_to_api_call(self, action: np.ndarray,
+    def _action_to_api_call(self, env, action: np.ndarray,
                             raw_state: dict) -> tuple[str, Optional[dict]]:
         """Convert sampled action tensor to BalatroBot API call.
 
@@ -2255,7 +2365,7 @@ class Trainer:
 
             # Inject scaling tracker values so compute_joker_scoring knows
             # the accumulated values for scaling jokers (Square, Ride the Bus, etc.)
-            self.game.inject_scaling_values(jokers_raw)
+            env.game.inject_scaling_values(jokers_raw)
 
             try:
                 plan = plan_optimal_action(hand_cards, deck_cards, jokers_raw, raw_state)
@@ -2277,15 +2387,15 @@ class Trainer:
                         # New hand order: optimal play order first, then non-played
                         new_hand_order = list(optimal_order) + non_played
                         # Store rearrange request — executed before play in the main loop
-                        self._pending_hand_rearrange = new_hand_order
+                        env.pending_hand_rearrange = new_hand_order
                         # Store original indices as fallback if rearrange fails
-                        self._pending_hand_rearrange_fallback = list(optimal_order)
+                        env.pending_hand_rearrange_fallback = list(optimal_order)
                         # After rearrange, played cards will be at indices 0..N-1
                         cards = list(range(len(optimal_order)))
                     else:
                         cards = optimal_order
                     # Store hand/deck cards for joker reordering before play
-                    self._pending_rearrange = (hand_cards, deck_cards)
+                    env.pending_rearrange = (hand_cards, deck_cards)
                     return "play", {"cards": cards}
                 else:
                     cards = list(cards)[:5]
@@ -2338,9 +2448,9 @@ class Trainer:
 
         # ── Pending upgrade buy: after selling a joker for an upgrade,
         # force-buy the target on the very next shop action ──
-        pending_buy = getattr(self, '_pending_upgrade_buy', None)
+        pending_buy = env.pending_upgrade_buy
         if pending_buy is not None and game_state == "SHOP":
-            self._pending_upgrade_buy = None
+            env.pending_upgrade_buy = None
             shop_cards = raw_state.get("shop", {}).get("cards", [])
             p_idx = pending_buy
             if p_idx < len(shop_cards):
@@ -2398,7 +2508,7 @@ class Trainer:
                             weak_name = jokers_raw[weakest_i].get("label", "?")
                             print(f"[SHOP] Selling {weak_name} (idx {weakest_i}) "
                                   f"to buy MUST-BUY {name}", flush=True)
-                            self._pending_upgrade_buy = target_idx
+                            env.pending_upgrade_buy = target_idx
                             return "sell", {"joker": weakest_i}
                     return "gamestate", None  # can't make room
                 return "buy", {"card": target_idx}
@@ -2501,7 +2611,7 @@ class Trainer:
                           f"+{(swap_score/current_score - 1)*100:.0f}%)",
                           flush=True)
                     # Queue the buy for the very next step
-                    self._pending_upgrade_buy = target_idx
+                    env.pending_upgrade_buy = target_idx
                     return "sell", {"joker": weakest_idx}
                 else:
                     return "gamestate", None
@@ -2726,7 +2836,7 @@ class Trainer:
                 return "gamestate", None
 
             # Track rerolls per shop
-            self._shop_rerolls = getattr(self, '_shop_rerolls', 0) + 1
+            env.shop_rerolls = env.shop_rerolls + 1
 
             # Reroll cap: only spend surplus above interest floor.
             # Interest floor = $25 base, $50 with Seed Money, $125 with Money Tree.
@@ -2744,7 +2854,7 @@ class Trainer:
             affordable = surplus // max(reroll_cost, 1)
             # Allow 1 peek reroll even with 0 surplus, but cap at 8
             max_rerolls = max(1, min(affordable, 8))
-            if self._shop_rerolls > max_rerolls:
+            if env.shop_rerolls > max_rerolls:
                 return "gamestate", None
 
             return "reroll", None
@@ -2911,12 +3021,12 @@ class Trainer:
                         return "sell", {"joker": worst_idx}
 
             # Reset reroll counter for next shop visit
-            self._shop_rerolls = 0
+            env.shop_rerolls = 0
             return "next_round", None
 
         return "gamestate", None
 
-    def _log_play_for_joker_order(self, raw_state: dict,
+    def _log_play_for_joker_order(self, env, raw_state: dict,
                                    intended_order: list[str] | None):
         """Log joker order details for the current play action."""
         from environment.hand_eval import (
@@ -2965,7 +3075,7 @@ class Trainer:
                     brainstorm_copies = "NONE (no valid target)"
                 break
 
-        self.joker_logger.log_play(
+        env.joker_logger.log_play(
             hand_type=hand_type,
             played_cards=played_card_strs,
             intended_order=intended_order,
@@ -2974,7 +3084,7 @@ class Trainer:
             order_matched=order_matched,
         )
 
-    async def _auto_rearrange_jokers(self, raw_state: dict,
+    async def _auto_rearrange_jokers(self, env, raw_state: dict,
                                       hand_cards: list[dict] | None = None,
                                       deck_cards: list[dict] | None = None
                                       ) -> list[str] | None:
@@ -3004,13 +3114,13 @@ class Trainer:
                         jk = jokers[idx].get("key", "")
                         jn = _api_key_to_name(jk) or jk
                         joker_names.append(jn)
-                await self.game.execute_action("rearrange", {"jokers": new_order})
+                await env.game.execute_action("rearrange", {"jokers": new_order})
                 return joker_names
         except Exception as e:
             print(f"[WARN] Joker rearrange failed: {e}", flush=True)
         return None
 
-    async def _auto_buy_vouchers(self, raw_state: dict) -> dict:
+    async def _auto_buy_vouchers(self, env, raw_state: dict) -> dict:
         """Auto-buy vouchers in the shop when affordable.
 
         Most vouchers are strong upgrades. Skip only the ones that add
@@ -3113,11 +3223,11 @@ class Trainer:
             # Buy it
             try:
                 # print(f"[SHOP] AUTO-BUY voucher {v_idx} ({key}) for ${cost}", flush=True)
-                await self.game.execute_action("buy", {"voucher": v_idx})
+                await env.game.execute_action("buy", {"voucher": v_idx})
                 await asyncio.sleep(0.3)
                 # Re-fetch state after purchase
                 try:
-                    raw_state = await self.game.fetch_gamestate()
+                    raw_state = await env.game.fetch_gamestate()
                     money = raw_state.get("money", 0)
                 except Exception:
                     pass
@@ -3126,7 +3236,7 @@ class Trainer:
 
         return raw_state
 
-    async def _auto_use_consumables(self, raw_state: dict) -> dict:
+    async def _auto_use_consumables(self, env, raw_state: dict) -> dict:
         """Automatically use consumable cards when heuristics say it's optimal.
 
         Called at the start of SELECTING_HAND. Uses Planet cards immediately,
@@ -3145,17 +3255,17 @@ class Trainer:
                 if action is None:
                     break
 
-                await self.game.execute_action("use", action)
+                await env.game.execute_action("use", action)
                 # Re-fetch state after use (cards may have changed)
-                raw_state = await self.game.fetch_gamestate()
+                raw_state = await env.game.fetch_gamestate()
             except Exception:
                 break  # consumable use is best-effort
 
         return raw_state
 
-    def _get_scaling_snapshot(self) -> dict[int, float]:
+    def _get_scaling_snapshot(self, env) -> dict[int, float]:
         """Get current scaling values from game state manager."""
-        tracker = self.game._scaling_tracker
+        tracker = env.game._scaling_tracker
         return dict(tracker._joker_values)
 
     def _log_update(self, metrics: dict):
@@ -3255,6 +3365,9 @@ def parse_args() -> TrainConfig:
                         help="Save checkpoint every N updates")
     parser.add_argument("--no-record", action="store_true",
                         help="Disable ffmpeg win recording")
+    parser.add_argument("--num-envs", type=int, default=1,
+                        help="Parallel Balatro instances "
+                             "(ports 12346..12346+N-1; env 0 records)")
 
     args = parser.parse_args()
 
@@ -3268,6 +3381,7 @@ def parse_args() -> TrainConfig:
         log_interval=args.log_interval,
         checkpoint_interval=args.checkpoint_interval,
         record_wins=not args.no_record,
+        num_envs=args.num_envs,
     )
 
     return config, args.checkpoint
