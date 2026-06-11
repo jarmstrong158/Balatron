@@ -41,7 +41,17 @@ CHECK_INTERVAL_S = 30
 SERVER_BOOT_TIMEOUT_S = 120
 TRAINER_GRACE_S = 60  # after starting the trainer, wait before re-checking
 HEARTBEAT_PATH = os.path.join(LOG_DIR, "heartbeat")
-HEARTBEAT_STALE_S = 300  # no env step in 5 min = trainer wedged
+HEARTBEAT_STALE_S = 300  # no env step in 5 min = trainer FROZEN
+
+# Throughput stall detection: a trainer can keep stepping (fresh
+# heartbeat) while churning through wedge/restart cycles at a fraction
+# of normal speed — overnight 06-11 it ran at ~19 steps/min vs ~80
+# normal for 9 hours and the freeze check never fired. The trainer
+# publishes its global step counter in the heartbeat; we compute
+# steps/min over a rolling window and rebuild the stack when sustained
+# throughput drops below the floor.
+STALL_WINDOW_S = 1500          # 25 min of samples before judging
+STALL_MIN_STEPS_PER_MIN = 25.0  # normal ~80; overnight degraded ~19
 
 
 def log(msg: str):
@@ -93,6 +103,17 @@ def heartbeat_age() -> float:
         return time.time() - os.path.getmtime(HEARTBEAT_PATH)
     except OSError:
         return 0.0
+
+
+def heartbeat_step():
+    """Trainer's global step counter from the heartbeat file, or None if
+    unavailable (old single-field format, missing file, partial write)."""
+    try:
+        with open(HEARTBEAT_PATH) as f:
+            parts = f.read().split()
+        return int(float(parts[1])) if len(parts) >= 2 else None
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def kill_trainer(pid: str):
@@ -151,6 +172,8 @@ def main():
     log(f"supervisor started (pid {os.getpid()}), checking every "
         f"{CHECK_INTERVAL_S}s")
     port_down_checks = 0
+    # (timestamp, global_step) samples for throughput stall detection
+    step_samples: list = []
     while True:
         if os.path.exists(STOP_FILE):
             log("SUPERVISOR_STOP file found — exiting (stack left as-is)")
@@ -201,9 +224,40 @@ def main():
                     age = heartbeat_age()
                     if age > HEARTBEAT_STALE_S:
                         log(f"trainer pid {pid} alive but heartbeat is "
-                            f"{age:.0f}s stale — killing wedged stack")
+                            f"{age:.0f}s stale — killing FROZEN stack")
                         kill_trainer(pid)
                         kill_strays()
+                        step_samples.clear()
+                    else:
+                        # Throughput: stepping but too slowly = stall
+                        # (e.g. chronic wedge/restart churn). Judge only
+                        # on a full window of samples.
+                        now = time.time()
+                        step = heartbeat_step()
+                        if step is not None:
+                            if step_samples and step < step_samples[-1][1]:
+                                # step went backwards (resumed from an
+                                # older checkpoint) — restart the window
+                                step_samples.clear()
+                            step_samples.append((now, step))
+                            # keep only the window
+                            cutoff = now - STALL_WINDOW_S
+                            step_samples[:] = [s for s in step_samples
+                                               if s[0] >= cutoff]
+                            span = (step_samples[-1][0] - step_samples[0][0]
+                                    if len(step_samples) >= 2 else 0)
+                            if span >= STALL_WINDOW_S * 0.9:
+                                delta = step_samples[-1][1] - step_samples[0][1]
+                                rate = delta / (span / 60.0)
+                                if rate < STALL_MIN_STEPS_PER_MIN:
+                                    log(f"trainer pid {pid} STALLED: "
+                                        f"{rate:.0f} steps/min over "
+                                        f"{span/60:.0f} min (floor "
+                                        f"{STALL_MIN_STEPS_PER_MIN:.0f}) — "
+                                        f"killing degraded stack")
+                                    kill_trainer(pid)
+                                    kill_strays()
+                                    step_samples.clear()
         except Exception as e:  # never let one bad cycle kill the supervisor
             log(f"ERROR in supervise cycle: {e}")
 

@@ -549,15 +549,16 @@ class Trainer:
         os.makedirs(config.checkpoint_dir, exist_ok=True)
 
     def _touch_heartbeat(self):
-        """Update logs/heartbeat so the supervisor can tell a frozen
-        trainer (process alive, zero progress) from a working one. Called
-        on every stored transition; the supervisor kills the trainer if
-        this file goes stale (>5 min without a single environment step
-        means wedged — normal steps land every few seconds)."""
+        """Update logs/heartbeat so the supervisor can tell a frozen or
+        DEGRADED trainer from a working one. Called on every stored
+        transition. Format: "<unix_time> <global_step>" — the timestamp
+        catches freezes (stale mtime), the step counter lets the
+        supervisor compute steps/min and catch slow-churn stalls (chronic
+        wedge cycles kept the heartbeat fresh while throughput fell 4x)."""
         try:
             hb = os.path.join("logs", "heartbeat")
             with open(hb, "w") as f:
-                f.write(str(time.time()))
+                f.write(f"{time.time()} {self.global_step}")
         except OSError:
             pass  # never let liveness reporting break training
 
