@@ -323,6 +323,15 @@ The mod should be installed to:
 %APPDATA%\Balatro\Mods\balatrobot\
 ```
 
+> ⚠️ **After installing or updating the mod**, three local crash patches must be
+> re-applied — they live in the mod directory, *not* in this repo, and a mod
+> update silently wipes them. At high game speed, deferred animation events can
+> fire after a fast programmatic state transition destroyed the UI object they
+> reference, crashing the game (`round_eval`/`shop` "(a nil value)") or hanging
+> `cash_out`. See [DECISIONS.md](DECISIONS.md) gotcha #5 for the three files
+> (`round_eval_fix.toml`, `shop_nil_fix.toml`, `cash_out.lua`) and the pattern
+> for patching new crashes of this class.
+
 ### 4. Install the BalatroBot CLI
 
 ```bash
@@ -342,6 +351,8 @@ Start-Process -WindowStyle Hidden python -ArgumentList '-u','supervise.py' -Work
 ```
 
 Actions are logged to `logs/supervisor.log`, trainer output to `logs/trainer_<timestamp>.log`. Stop it by creating a `SUPERVISOR_STOP` file in the repo root. For overnight runs, also disable standby (`powercfg /change standby-timeout-ac 0`) — a sleeping machine kills everything, including the supervisor.
+
+The supervisor **debounces** game restarts (3 consecutive down-checks, ~90s) because the trainer's internal watchdog also restarts a hung game and is faster — acting immediately would race it and leave two server instances fighting over the port. The trainer heals the game; the supervisor heals the trainer (and the game only when nothing else did).
 
 ### Manual training (two terminals)
 
