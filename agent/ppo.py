@@ -385,8 +385,13 @@ class PPOTrainer:
             for batch in self.buffer.get_batches(cfg.num_minibatches):
                 batch_metrics = self._update_batch(batch)
 
+                # approx_kl MUST be in this list: it was accumulated only
+                # into epoch_kl (the early-stop check) while the metrics
+                # dict kept its initial 0.0 — the printed KL read 0.0000
+                # forever even when clip_fraction showed healthy drift.
                 for k in ["policy_loss", "value_loss", "entropy",
-                          "bc_loss", "total_loss", "clip_fraction"]:
+                          "bc_loss", "total_loss", "clip_fraction",
+                          "approx_kl"]:
                     metrics[k] += batch_metrics[k]
 
                 epoch_kl += batch_metrics["approx_kl"]
