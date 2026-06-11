@@ -342,8 +342,13 @@ class EpisodeTracker:
         # tracks its own in-flight episode; lifetime/session stats stay
         # shared since this is all one process)
         self._eps: dict = {}
-        ep.highest_hand = 0.0
-        ep.highest_hand_type = ""
+        # Discard the whole per-episode accumulator — the next step()
+        # creates a fresh one. The old code reset only highest_hand and
+        # never reward/length/ante, so the printed R was a cumulative
+        # sum within the session masquerading as a per-episode mean
+        # (N=3 exposed it: splitting across three streams "dropped" R
+        # 3-5x with run quality unchanged).
+        self._eps.pop(env_id, None)
 
     def get_recent_stats(self, window: int = 20) -> dict:
         """Get statistics over the last N episodes."""
