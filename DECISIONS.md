@@ -109,8 +109,16 @@ not yet true) makes a pick return an error.
   simultaneous-highlight cap (always 1), not the pick count.
 
 ### 5. Base-game crash fixes live outside this repo
-Five fixes patch Balatro/BalatroBot itself and are **not** version-controlled
+Six fixes patch Balatro/BalatroBot itself and are **not** version-controlled
 here — they must be re-applied if the mod is reinstalled/updated:
+- `%APPDATA%/Balatro/Mods/balatrobot/lovely/blind_select_nil_fix.toml` —
+  nil-guard in `button_callbacks.lua` `select_blind` (~2557): its
+  0.2s-delayed event indexes `G.blind_select.alignment` while a later event
+  in the same flow nils it — fast programmatic blind selection loses the
+  race (15 crashes/2.5h, unmasked by the screenwipe fix). **These nil-races
+  surface one at a time as each dominant crash is patched** (shop →
+  screenwipe → blind_select); if a 7th appears at the same cadence, the
+  systemic lever is lowering game speed 8 → 4–6.
 - `%APPDATA%/Balatro/Mods/balatrobot/lovely/screenwipe_nil_fix.toml` —
   nil-guards on `G.screenwipe` in `button_callbacks.lua` `wipe_off`
   (~lines 3177/3213): the screen-wipe transition schedules deferred events
