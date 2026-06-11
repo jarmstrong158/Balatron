@@ -350,6 +350,8 @@ One detached process keeps the entire stack alive — it starts the server + gam
 Start-Process -WindowStyle Hidden python -ArgumentList '-u','supervise.py' -WorkingDirectory 'C:\Users\jarms\repos\balatron'
 ```
 
+The supervisor runs **multi-instance training**: `NUM_ENVS` parallel Balatro games (ports 12346+) feed one network through per-env rollout buffers — one brain, many bodies. There is no "merging" at save time: every update consumes all envs' transitions in one gradient step, and checkpoints are the single network's weights exactly as in single-instance mode. Health checks, debounce, and kills are all port-scoped. Env 0 records win videos; the others play uncaptured.
+
 Actions are logged to `logs/supervisor.log`, trainer output to `logs/trainer_<timestamp>.log`. Stop it by creating a `SUPERVISOR_STOP` file in the repo root. For overnight runs, also disable standby (`powercfg /change standby-timeout-ac 0`) — a sleeping machine kills everything, including the supervisor.
 
 The supervisor **debounces** game restarts (3 consecutive down-checks, ~90s) because the trainer's internal watchdog also restarts a hung game and is faster — acting immediately would race it and leave two server instances fighting over the port. The trainer heals the game; the supervisor heals the trainer (and the game only when nothing else did).
@@ -384,8 +386,10 @@ Game speed is set via the `BALATROBOT_GAMESPEED` environment variable (e.g. `set
 ```powershell
 cd balatron
 $env:PYTHONUTF8 = "1"
-python -u -m training.train --total-timesteps 1500000 --device cpu --checkpoint-interval 2
+python -u -m training.train --total-timesteps 1500000 --device cpu --checkpoint-interval 2 --num-envs 2
 ```
+
+`--num-envs N` plays N parallel game instances (ports 12346..12346+N-1, one server each); default 1.
 
 `PYTHONUTF8=1` is required when output is redirected or piped — the trainer prints emoji that crash on Windows cp1252. `--device cpu` is the practical choice: the wall-clock bottleneck is live-game rollout collection, not the (small) network, so a GPU buys almost nothing here. `--checkpoint-interval 2` saves every 2 PPO updates so a crash loses minutes, not hours.
 

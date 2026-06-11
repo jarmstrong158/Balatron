@@ -51,6 +51,19 @@ overrides one at a time. Legality masks stay forever; bias masks are the
 trainer wheels that come off. BC can never exceed the teacher — the anneal
 to zero is what lets PPO surpass it.
 
+### Multi-instance training: one brain, many bodies
+N parallel Balatro games (ports 12346+) feed ONE network. Per-env
+`RolloutBuffer`s keep amend-last credits and GAE temporal adjacency correct;
+`update()` computes GAE per env then concatenates for minibatching — the
+"convergence" happens every update, never at save time (checkpoints are the
+single network's weights, unchanged). All per-run state lives in `EnvSession`
+(24 attributes + game client/reward calc/recorder); anything left as a
+Trainer singleton would bleed across games (a stale win flag from env 0
+marking env 1's loss as a win). Game kills must be **port-owner-PID scoped**
+— `taskkill /IM Balatro.exe` murders every instance. Env 0 owns the win
+recorder; others get a NullRecorder. Deployed N=2 on 2026-06-11: combined
+~309 steps/min vs ~196 single (sublinear due to shared CPU; still +58%%).
+
 ---
 
 ## Gotchas & Hard-Won Lessons
