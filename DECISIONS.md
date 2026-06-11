@@ -128,8 +128,14 @@ If a new "(a nil value)" crash appears at high game speed, look for a delayed
   (external kill, likely Windows sleep), sitting idle until noticed.
 - **Fix: `supervise.py`** — a detached process that owns the stack: every
   30s it ensures port 12346 is listening (else kills strays and relaunches
-  the server) and the trainer is running (else relaunches from the newest
-  checkpoint with `PYTHONUTF8=1`, logging to `logs/trainer_<ts>.log`).
+  the server, after a 3-check ~90s debounce so it doesn't race the
+  trainer's own faster recovery) and the trainer is running (else
+  relaunches from the newest checkpoint with `PYTHONUTF8=1`, logging to
+  `logs/trainer_<ts>.log`). It also checks **liveness, not just
+  existence**: the trainer stamps `logs/heartbeat` on every environment
+  step, and a trainer alive but >5 min silent is killed along with the
+  game — counters can't catch a freeze that stops the loop itself (a
+  boot-splash zombie with a live socket froze the trainer mid-MENU-loop).
   Launch it instead of starting server/trainer by hand; stop it by creating
   a `SUPERVISOR_STOP` file in the repo root. Actions log to
   `logs/supervisor.log`. For overnight runs also disable standby:
