@@ -626,14 +626,18 @@ class Trainer:
         # so nothing leaks into the next run.
         self._reset_run_state()
 
-        # Kill existing Balatro process
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "Balatro.exe"],
-                capture_output=True, timeout=10,
-            )
-        except Exception as e:
-            print(f"[CRASH-RECOVERY] taskkill failed: {e}", flush=True)
+        # Kill existing Balatro process AND its balatrobot.exe wrapper —
+        # each restart spawns a fresh wrapper via start_balatro.bat, and
+        # killing only Balatro.exe leaked one zombie wrapper per restart
+        # (38 accumulated in one night of crash recovery).
+        for image in ("Balatro.exe", "balatrobot.exe"):
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", image],
+                    capture_output=True, timeout=10,
+                )
+            except Exception as e:
+                print(f"[CRASH-RECOVERY] taskkill {image} failed: {e}", flush=True)
 
         await asyncio.sleep(3.0)  # Wait for process to fully die
 
