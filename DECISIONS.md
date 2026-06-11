@@ -100,11 +100,18 @@ not yet true) makes a pick return an error.
   simultaneous-highlight cap (always 1), not the pick count.
 
 ### 5. Base-game crash fixes live outside this repo
-Three fixes patch Balatro/BalatroBot itself and are **not** version-controlled
+Four fixes patch Balatro/BalatroBot itself and are **not** version-controlled
 here — they must be re-applied if the mod is reinstalled/updated:
 - `%APPDATA%/Balatro/Mods/balatrobot/src/lua/endpoints/cash_out.lua` — a
   ~300-poll timeout fallback so `cash_out` can't hang forever (original in
   `cash_out.lua.bak`).
+- `%APPDATA%/Balatro/Mods/balatrobot/src/lua/endpoints/start.lua` — a
+  600-poll timeout fallback (original in `start.lua.bak`). The endpoint waits
+  for BLIND_SELECT with a `no_delete` condition event and **no timeout**;
+  when `start_run` silently no-ops (menu race at speed 8), the connection
+  hung ~30s per attempt, zombie events accumulated, and retries never
+  succeeded without a game restart — 17 wedges in one night cost ~4×
+  throughput. Pairs with the trainer-side 2s menu-settle delay (`d803ecb`).
 - `%APPDATA%/Balatro/Mods/balatrobot/lovely/round_eval_fix.toml` — nil-guards
   on `G.round_eval` in `common_events.lua` (lines 1072 & 1195) to stop the
   endless-mode "attempt to index field 'round_eval' (a nil value)" crash.
@@ -114,10 +121,12 @@ here — they must be re-applied if the mod is reinstalled/updated:
   exits the shop inside that window and the pending event crashes the game
   ("attempt to index field 'shop' (a nil value)").
 
-These are all the same race class: deferred animation events firing after
-fast programmatic state transitions tore down the UI object they reference.
-If a new "(a nil value)" crash appears at high game speed, look for a delayed
-`E_MANAGER:add_event` near the crash line and add the same one-line guard.
+Two recurring race classes, both triggered by fast programmatic transitions:
+- **Crashes** — deferred animation events firing after the UI object they
+  reference was torn down → one-line nil-guard via a lovely TOML patch.
+- **Hangs** — endpoint condition-events waiting for a state with no timeout
+  (`cash_out`, `start`) → poll-limit fallback that responds with a clean
+  error instead of holding the connection forever.
 
 ### 6. Print UTF-8 safely / recover from process death
 - The trainer prints emoji that crash on Windows `cp1252` when stdout is
