@@ -142,7 +142,12 @@ def start_server() -> bool:
     kill_strays()
     time.sleep(3)
     env = dict(os.environ,
-               BALATROBOT_GAMESPEED="8",   # 8x — higher destabilizes (DECISIONS gotcha 7)
+               # 4x: dropped from 8x on 2026-06-11 after a day-long crash
+               # wave — deferred-animation nil-races (DECISIONS gotcha 5)
+               # kept surfacing at new sites every ~12 min at 8x, eating
+               # 11+ hours of training. Half speed that trains beats full
+               # speed that churns. Never raise (DECISIONS gotcha 7).
+               BALATROBOT_GAMESPEED="4",
                BALATROBOT_ANIMATION_FPS="120")
     server_log = open(os.path.join(LOG_DIR, "server.log"), "a")
     subprocess.Popen(
