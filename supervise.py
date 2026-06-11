@@ -226,25 +226,26 @@ def main():
             return
 
         try:
-            server_ok = port_listening()
-            if not server_ok:
-                # Debounce: the TRAINER's internal watchdog also restarts
-                # the game and is faster (~45s). Acting on the first down
-                # check raced it — both spawned servers, kill_strays killed
-                # the trainer's fresh instance, and two wrappers fought
-                # over the port. Require 3 consecutive down checks (~90s)
-                # so the trainer's own recovery gets to land first.
-                port_down_checks += 1
-                if port_down_checks >= 3:
-                    log(f"port 12346 down {port_down_checks} checks — "
-                        f"(re)starting server")
-                    server_ok = start_server()
-                    port_down_checks = {p: 0 for p in PORTS}
+            # Per-port health with debounce: the TRAINER's internal
+            # watchdog also restarts its own game and is faster (~45s);
+            # acting on the first down check raced it. 3 checks (~90s)
+            # gives the trainer's recovery room to land first.
+            server_ok = True
+            for p in PORTS:
+                if port_listening(p):
+                    port_down_checks[p] = 0
+                    continue
+                port_down_checks[p] += 1
+                if port_down_checks[p] >= 3:
+                    log(f"port {p} down {port_down_checks[p]} checks — "
+                        f"(re)starting its server")
+                    if not start_server(p):
+                        server_ok = False
+                    port_down_checks[p] = 0
                 else:
-                    log(f"port 12346 down (check {port_down_checks}/3) — "
+                    log(f"port {p} down (check {port_down_checks[p]}/3) — "
                         f"waiting for trainer's own recovery")
-            else:
-                port_down_checks = {p: 0 for p in PORTS}
+                    server_ok = False
 
             if server_ok:
                 pid = trainer_pid()
