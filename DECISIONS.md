@@ -100,7 +100,7 @@ not yet true) makes a pick return an error.
   simultaneous-highlight cap (always 1), not the pick count.
 
 ### 5. Base-game crash fixes live outside this repo
-Two fixes patch Balatro/BalatroBot itself and are **not** version-controlled
+Three fixes patch Balatro/BalatroBot itself and are **not** version-controlled
 here — they must be re-applied if the mod is reinstalled/updated:
 - `%APPDATA%/Balatro/Mods/balatrobot/src/lua/endpoints/cash_out.lua` — a
   ~300-poll timeout fallback so `cash_out` can't hang forever (original in
@@ -108,6 +108,16 @@ here — they must be re-applied if the mod is reinstalled/updated:
 - `%APPDATA%/Balatro/Mods/balatrobot/lovely/round_eval_fix.toml` — nil-guards
   on `G.round_eval` in `common_events.lua` (lines 1072 & 1195) to stop the
   endless-mode "attempt to index field 'round_eval' (a nil value)" crash.
+- `%APPDATA%/Balatro/Mods/balatrobot/lovely/shop_nil_fix.toml` — nil-guard on
+  `G.shop` in `game.lua` (~line 3243): `update_shop` schedules a NON-blockable
+  0.2s-delayed event reading `G.shop.T.y`; a fast programmatic `next_round`
+  exits the shop inside that window and the pending event crashes the game
+  ("attempt to index field 'shop' (a nil value)").
+
+These are all the same race class: deferred animation events firing after
+fast programmatic state transitions tore down the UI object they reference.
+If a new "(a nil value)" crash appears at high game speed, look for a delayed
+`E_MANAGER:add_event` near the crash line and add the same one-line guard.
 
 ### 6. Print UTF-8 safely / recover from process death
 - The trainer prints emoji that crash on Windows `cp1252` when stdout is

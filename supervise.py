@@ -133,6 +133,7 @@ def start_trainer() -> bool:
 def main():
     log(f"supervisor started (pid {os.getpid()}), checking every "
         f"{CHECK_INTERVAL_S}s")
+    port_down_checks = 0
     while True:
         if os.path.exists(STOP_FILE):
             log("SUPERVISOR_STOP file found — exiting (stack left as-is)")
@@ -141,8 +142,23 @@ def main():
         try:
             server_ok = port_listening()
             if not server_ok:
-                log("port 12346 not listening — (re)starting server")
-                server_ok = start_server()
+                # Debounce: the TRAINER's internal watchdog also restarts
+                # the game and is faster (~45s). Acting on the first down
+                # check raced it — both spawned servers, kill_strays killed
+                # the trainer's fresh instance, and two wrappers fought
+                # over the port. Require 3 consecutive down checks (~90s)
+                # so the trainer's own recovery gets to land first.
+                port_down_checks += 1
+                if port_down_checks >= 3:
+                    log(f"port 12346 down {port_down_checks} checks — "
+                        f"(re)starting server")
+                    server_ok = start_server()
+                    port_down_checks = 0
+                else:
+                    log(f"port 12346 down (check {port_down_checks}/3) — "
+                        f"waiting for trainer's own recovery")
+            else:
+                port_down_checks = 0
 
             if server_ok:
                 pid = trainer_pid()
