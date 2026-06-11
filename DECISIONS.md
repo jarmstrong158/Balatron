@@ -115,10 +115,13 @@ here — they must be re-applied if the mod is reinstalled/updated:
   nil-guard in `button_callbacks.lua` `select_blind` (~2557): its
   0.2s-delayed event indexes `G.blind_select.alignment` while a later event
   in the same flow nils it — fast programmatic blind selection loses the
-  race (15 crashes/2.5h, unmasked by the screenwipe fix). **These nil-races
-  surface one at a time as each dominant crash is patched** (shop →
-  screenwipe → blind_select); if a 7th appears at the same cadence, the
-  systemic lever is lowering game speed 8 → 4–6.
+  race (15 crashes/2.5h, unmasked by the screenwipe fix). Both this patch and
+  the screenwipe one were later EXTENDED to also guard their cleanup/remove
+  events (crash sites 2577/3231 — double invocations racing teardown).
+  **These nil-races surface one at a time as each dominant crash is patched**
+  (shop → screenwipe → blind_select → cleanup events); when the 7th site
+  appeared at unchanged cadence, the systemic lever fired: game speed 8 → 4
+  (see gotcha 7).
 - `%APPDATA%/Balatro/Mods/balatrobot/lovely/screenwipe_nil_fix.toml` —
   nil-guards on `G.screenwipe` in `button_callbacks.lua` `wipe_off`
   (~lines 3177/3213): the screen-wipe transition schedules deferred events
@@ -187,9 +190,13 @@ Two recurring race classes, both triggered by fast programmatic transitions:
 ### 7. Don't raise game speed to train faster — it destabilizes the game
 Rollout collection (the live game) is the real wall-clock bottleneck, not the
 net — so cranking `BALATROBOT_GAMESPEED` *looks* like the obvious speedup. It
-isn't: high speeds repeatedly cause UNKNOWN-state stalls, desyncs, `round_eval`
-nil-crashes, and hung packs. Speed went `100 → 16 → 8` for exactly this reason.
-**Keep it at 8.** Stability at 8 beats churn at higher speeds. (The GPU doesn't
+isn't: high speeds repeatedly cause UNKNOWN-state stalls, desyncs, deferred-event
+nil-crashes, and hung packs. Speed went `100 → 16 → 8 → 4` for exactly this
+reason — at 8× the nil-race crash class surfaced at a new site every ~12 minutes
+no matter how many were patched (six guards in one day, 11+ hours of training
+lost). **Keep it at 4.** Half speed that trains beats full speed that churns.
+Speed lives in TWO synced places: `supervise.py` and `start_balatro.bat` (the
+trainer's crash-recovery launch path). (The GPU doesn't
 help here either — the net is tiny; the minutes go to the game playing, not the
 PPO update.)
 

@@ -378,7 +378,7 @@ uvx balatrobot serve --fast
 
 This launches the Balatro game with the BalatroBot mod injected and starts the JSON-RPC API server.
 
-Game speed is set via the `BALATROBOT_GAMESPEED` environment variable (e.g. `set BALATROBOT_GAMESPEED=8` before launching). **8× is the recommended setting** — higher speeds look faster but repeatedly cause stalls, desyncs, and crashes that cost more time than they save (this project ran 100× → 16× → 8× before settling). The trainer auto-restarts Balatro if the game hangs or crashes regardless.
+Game speed is set via the `BALATROBOT_GAMESPEED` environment variable (e.g. `set BALATROBOT_GAMESPEED=4` before launching). **4× is the recommended setting** — higher speeds look faster but repeatedly cause stalls, desyncs, and deferred-event nil-crashes that cost more time than they save (this project ran 100× → 16× → 8× → 4×; at 8× the crash class surfaced at a new site every ~12 minutes and ate 11+ hours of training in a day). The trainer auto-restarts Balatro if the game hangs or crashes regardless.
 
 **Terminal 2 — Start training:**
 ```powershell
