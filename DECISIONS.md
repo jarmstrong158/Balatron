@@ -109,8 +109,22 @@ not yet true) makes a pick return an error.
   simultaneous-highlight cap (always 1), not the pick count.
 
 ### 5. Base-game crash fixes live outside this repo
-Six fixes patch Balatro/BalatroBot itself and are **not** version-controlled
-here — they must be re-applied if the mod is reinstalled/updated:
+Seven fixes patch Balatro/BalatroBot itself and are **not** version-controlled
+here — they must be re-applied if the mod is reinstalled/updated.
+
+**ROOT CAUSE of the 06-10/11 crash wave (found last, explains everything —
+and it was NOT game speed; 4× crashed at the same cadence as 8×):** the game
+protects its UI flows with controller locks (`G.CONTROLLER.locks.toggle_shop`
+etc.), but the mod's endpoints call `G.FUNCS.*` directly, **bypassing them**.
+When a lagging transition times out client-side, the trainer re-issues the
+action, and the second invocation's deferred events race the first one's
+teardown — every nil-crash site in the wave (`shop`, `screenwipe`,
+`blind_select`, `area`) was a double-fire. Two-layer fix:
+`next_round.lua` now rejects calls while the toggle_shop lock is held
+(original in `next_round.lua.bak`), and the trainer debounces transition
+actions (`next_round`/`select`/`skip`/`cash_out` never re-issued within 8s
+while the state name is unchanged — commit `fbfefc6`). The nil-guard TOMLs
+below remain as defense in depth:
 - `%APPDATA%/Balatro/Mods/balatrobot/lovely/blind_select_nil_fix.toml` —
   nil-guard in `button_callbacks.lua` `select_blind` (~2557): its
   0.2s-delayed event indexes `G.blind_select.alignment` while a later event
