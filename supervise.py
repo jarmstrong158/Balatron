@@ -73,16 +73,19 @@ CHECKPOINT_GLOB = os.path.join(REPO, "checkpoints",
 # fresh peak to ~1/100th over ~10h, dragging update cadence from ~5 min to
 # ~70 min.
 #
-# The threshold is RELATIVE (current FPS vs this trainer's own observed
-# peak), NOT a fixed floor: the healthy fresh FPS varies ~10x run to run
-# (~1800 on a clean start, but ~150 if the stack was still settling when the
-# trainer launched). A fixed floor is either uselessly lenient against the
-# high baseline (1800 -> let it fall 60x before acting) or a recycle loop
-# against the low one. Peak-relative auto-adapts and is self-protecting
-# against startup churn (during churn the peak is low too, so current is not
-# far below it). Recycle when current < FRACTION * peak, once mature.
-FPS_RECYCLE_FRACTION = 0.40      # recycle when FPS < 40% of this run's peak
-FPS_RECYCLE_MIN_SAMPLES = 3      # need >=3 updates so the peak is real
+# The threshold is an ABSOLUTE FPS floor, NOT relative to the run's peak.
+# Peak-relative was tried (0.40 * peak) and was WRONG: the fresh FPS is a
+# first-update BURST (~1800-2060) that settles to a healthy ~250 within
+# ~30 min, so "13% of peak" flagged a perfectly fast trainer and recycled
+# the whole stack every 30 min — a churn loop that looked like a crash. The
+# burst peak is not a sustainable baseline, so absolute FPS is what actually
+# signals "slow": the genuine degradation that prompted this runs the rate
+# down to ~15-40 over hours (update cadence ~40-70 min). Require the floor to
+# be breached for SUSTAIN consecutive updates so a single deep-run dip (one
+# long ante-8 boss update) doesn't trip it — real degradation is monotonic
+# and stays under. The 1817->250 settle never touches 40, so no early trip.
+FPS_RECYCLE_FLOOR = 40           # recycle when FPS is genuinely low
+FPS_RECYCLE_SUSTAIN = 3          # ... for this many consecutive updates
 RECYCLE_MIN_AGE_S = 1800         # never recycle a trainer younger than 30min
 
 
@@ -219,27 +222,23 @@ def newest_checkpoint_age() -> float:
     return time.time() - max(os.path.getmtime(p) for p in cps)
 
 
-def trainer_fps_stats():
-    """(peak, current, count) of per-update FPS from the newest trainer log.
-
-    Returns (None, None, 0) when there is no log or no FPS line yet — the
-    caller treats that as 'not degraded' so a just-started trainer is never
-    recycled on missing data. The recycle uses peak-relative degradation
-    (see the FPS_RECYCLE_* constants for why a fixed floor doesn't work).
+def trainer_recent_fps(n: int):
+    """The last n per-update FPS values from the newest trainer log (newest
+    last). Fewer than n if the trainer hasn't printed that many updates yet;
+    empty if no log or no FPS line — the caller treats too-few as 'not
+    degraded' so a just-started trainer is never recycled on thin data.
     """
     logs = glob.glob(os.path.join(LOG_DIR, "trainer_*.log"))
     if not logs:
-        return None, None, 0
+        return []
     newest = max(logs, key=os.path.getmtime)
     try:
         with open(newest, encoding="utf-8", errors="replace") as f:
             txt = f.read()
     except OSError:
-        return None, None, 0
+        return []
     vals = [int(x) for x in re.findall(r"\| FPS\s+(\d+) \|", txt)]
-    if not vals:
-        return None, None, 0
-    return max(vals), vals[-1], len(vals)
+    return vals[-n:]
 
 
 def start_server(port: int = PORT) -> bool:
@@ -361,21 +360,21 @@ def main():
                         trainer_seen_at = time.time()
 
                     # Degradation recycle: a mature trainer whose per-update
-                    # FPS has decayed below FRACTION of its own peak gets a
-                    # clean full-stack restart (same mechanism as the FROZEN
-                    # path) to reset the ~1/n throughput decay. Peak-relative
-                    # (not a fixed floor) so it adapts to a ~10x-varying fresh
-                    # baseline; min-age + min-samples guard against tripping on
-                    # a still-settling trainer, so there is no recycle loop.
+                    # FPS has sat below the absolute floor for SUSTAIN
+                    # consecutive updates gets a clean full-stack restart (same
+                    # mechanism as the FROZEN path) to reset the ~1/n decay.
+                    # Absolute floor + sustained-breach (not peak-relative)
+                    # avoids recycling the healthy ~250 settle and ignores
+                    # one-off deep-run dips.
                     trainer_age = time.time() - trainer_seen_at
                     if trainer_age > RECYCLE_MIN_AGE_S:
-                        peak, cur, nfps = trainer_fps_stats()
-                        if (peak is not None
-                                and nfps >= FPS_RECYCLE_MIN_SAMPLES
-                                and cur < FPS_RECYCLE_FRACTION * peak):
-                            log(f"trainer pid {pid} FPS degraded to {cur} "
-                                f"({cur * 100 // peak}% of peak {peak}) after "
-                                f"{int(trainer_age / 60)}min — recycling stack")
+                        recent = trainer_recent_fps(FPS_RECYCLE_SUSTAIN)
+                        if (len(recent) >= FPS_RECYCLE_SUSTAIN
+                                and all(v < FPS_RECYCLE_FLOOR for v in recent)):
+                            log(f"trainer pid {pid} FPS {recent} below floor "
+                                f"{FPS_RECYCLE_FLOOR} for {FPS_RECYCLE_SUSTAIN} "
+                                f"updates after {int(trainer_age / 60)}min — "
+                                f"recycling stack")
                             kill_trainer(pid)
                             kill_strays()
                             step_samples.clear()
