@@ -268,6 +268,8 @@ balatron/
 |   |-- train.py            # Main training loop, episode management, auto-play heuristics
 |
 |-- recorder.py             # Automated win recording via ffmpeg gdigrab
+|-- supervise.py            # Stack supervisor: multi-port health, recovery, orphan reaper
+|-- dashboard.py            # Live training dashboard (stdlib HTTP, port 8777)
 |
 |-- scripts/
 |   |-- sim_bloodstone.py   # Simulation utilities
@@ -356,6 +358,8 @@ Actions are logged to `logs/supervisor.log`, trainer output to `logs/trainer_<ti
 
 The supervisor **debounces** game restarts (3 consecutive down-checks, ~90s) because the trainer's internal watchdog also restarts a hung game and is faster — acting immediately would race it and leave two server instances fighting over the port. The trainer heals the game; the supervisor heals the trainer (and the game only when nothing else did).
 
+Every cycle the supervisor also **reaps orphaned launchers**. The live process tree is `uvx.exe → python (balatrobot serve) → python (serve) → Balatro.exe`; on each restart the game (port owner) is killed but the middle `serve` launcher gets reparented and survives. Left alone it leaks ~1 process per restart — a single overnight run reached **140 orphan processes (~3 GB)** that thrashed the scheduler and paged the trainer out, collapsing throughput on a clean `1/n` curve (1291 → 14 FPS) *without* any memory leak or game-side cause. `reap_orphan_launchers()` walks the ancestor chain of every live `Balatro.exe` and kills only `serve` launchers outside it (a naive direct-parent test would `/T`-kill the game under the *outer* of the two nested launchers; a >180s age guard spares a still-booting one). See [DECISIONS.md](DECISIONS.md) for the full root-cause.
+
 The supervisor checks **four health layers, not just existence**: the trainer stamps `logs/heartbeat` (`<unix_time> <global_step>`) on every environment step. A trainer that hasn't stepped in 5 minutes is **frozen**. One stepping at a hard crawl (under 10 steps/min over a 40-minute window) is **dead-slow** — the floor is deliberately low because healthy deep runs (long ante-6 boss fights) legitimately drop to ~13–20 steps/min, and the first deployment's 25/min floor killed exactly such a run. Chronic wedge/restart **churn** holds a step rate above any safe floor while updates crawl, so it's caught by checkpoint cadence instead: a trainer up for 150+ minutes with no checkpoint that recent gets rebuilt (one night of churn ran ~190 min/checkpoint vs ~70–90 normal, undetected for 9 hours).
 
 The full recovery hierarchy:
@@ -367,7 +371,23 @@ The full recovery hierarchy:
 | Trainer freezes (alive, no progress) | Supervisor heartbeat staleness | ~6 min |
 | Trainer crawls (<10 steps/min) | Supervisor rate floor | ~40 min |
 | Trainer churns (no checkpoints) | Supervisor checkpoint cadence | ~2.5 h |
+| Orphan launchers pile up (slow creep) | Supervisor reaper (ancestor-walk) | ~30 s/cycle |
 | Machine sleeps (kills everything) | Nothing — prevent it | `powercfg /change standby-timeout-ac 0` |
+
+### Monitoring (live dashboard)
+
+A single stdlib-only file serves a live, auto-refreshing dashboard — one place to answer *how many wins, is he improving, is training healthy* without grepping logs:
+
+```powershell
+python dashboard.py        # http://localhost:8777, refreshes every 30s
+```
+
+It reads `logs/` read-only (safe to run alongside training) and shows:
+
+- **Outcomes** — lifetime wins/win-rate/best-ante, plus mean-ante and deep-run (ante ≥6/≥8) trend per 200-game bucket. Wins are too rare to trend; the depth curves are the real "is he improving" signal.
+- **Learning health** (per PPO update) — reward, entropy (a cliff = exploration collapse), `KL` against the `target_kl` line, and `BC` loss against its flat-line watch threshold (the pre-committed "flat after 50 updates → raise `bc_coef`" trigger).
+- **Diagnosis** — a final-ante histogram of the last 1,000 games (where the wall is) and a joker win-lift table (which jokers show up in winning runs more than chance).
+- **Ops** — live steps/min, 24-hour restart count, and heartbeat age (turns red if stale >5 min).
 
 ### Manual training (two terminals)
 
