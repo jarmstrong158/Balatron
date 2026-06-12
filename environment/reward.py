@@ -38,6 +38,13 @@ REWARD_BOSS_BLIND_CLEARED = 1.5  # Extra reward for boss blind
 # Score rewards (log-scaled)
 REWARD_SCORE_RATIO = 0.5         # Multiplied by log10(score / target) when clearing
 REWARD_SCORE_PROGRESS = 0.1      # Per-action: log10(chips_gained) during round
+REWARD_HAND_HIGH_WATER = 0.1     # Per log10-DECADE when a new best single-hand
+                                 # score is set this run. Potential-delta (only
+                                 # the increase is paid, so the run telescopes
+                                 # to a bounded coef*log10(best)); log scaling
+                                 # makes "bigger = more" pay per order of
+                                 # magnitude, never linearly. Set 0 to disable
+                                 # (A/B vs REWARD_SCORE_PROGRESS).
 
 # Economy rewards
 REWARD_MONEY_GAIN = 0.02         # Per dollar gained
@@ -124,6 +131,7 @@ class RewardCalculator:
         self._prev_chips = 0.0
         self._prev_score_total = 0.0
         self._max_ante_reached = 0
+        self._max_hand_score = 0.0  # best single-hand score this run (high-water)
         self._run_reward = 0.0
         self._prev_scaling_values: dict[int, float] = {}  # slot_id → value
         self._prev_joker_ids: set[int] = set()  # track joker IDs to detect sells
@@ -184,6 +192,9 @@ class RewardCalculator:
 
         # Score progress during round
         reward += self._check_score_progress(prev_state, new_state)
+
+        # New best single-hand score this run (high-water mark)
+        reward += self._check_hand_high_water(prev_state, new_state)
 
         # Economy changes (skip if auto-actions changed money this step)
         if not skip_economy:
@@ -343,6 +354,37 @@ class RewardCalculator:
                 return REWARD_SCORE_PROGRESS * math.log10(gained + 1)
 
         return 0.0
+
+    def _check_hand_high_water(self, prev_state: dict, new_state: dict) -> float:
+        """Reward setting a new best single-hand score this run.
+
+        Tracks the largest single hand (chip gain in one play) seen this run
+        and pays only the INCREASE in log10 of that best — a potential-based
+        delta (like diversity/interest), so the whole run telescopes to a
+        bounded coef * log10(best_final) rather than a runaway per-step sum.
+        Log scaling means "bigger score = more reward" is paid per order of
+        magnitude, never linearly, so a monster hand can't drown the
+        win/ante signals.
+
+        Distinct from _check_score_progress (which pays on *every* scoring
+        hand): this fires only when the engine's single-hand ceiling rises,
+        the quantity that matters for Phase 2 (naneinf is one giant hand) —
+        hence the Phase-2 amplification.
+        """
+        if new_state.get("state") != "SELECTING_HAND":
+            return 0.0
+
+        prev_chips = prev_state.get("round", {}).get("chips", 0)
+        new_chips = new_state.get("round", {}).get("chips", 0)
+        gained = new_chips - prev_chips
+        if gained <= self._max_hand_score:
+            return 0.0
+
+        old_best = self._max_hand_score
+        self._max_hand_score = gained
+        phi_delta = math.log10(gained + 1) - math.log10(old_best + 1)
+        phase_mult = 3.0 if self.phase == 2 else 1.0
+        return REWARD_HAND_HIGH_WATER * phi_delta * phase_mult
 
     def _check_economy(self, prev_state: dict, new_state: dict) -> float:
         """Reward/penalty for money changes."""
