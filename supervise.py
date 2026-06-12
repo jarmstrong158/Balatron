@@ -121,6 +121,50 @@ def kill_strays():
                        capture_output=True, timeout=15)
 
 
+def reap_orphan_launchers() -> int:
+    """Kill 'balatrobot serve' launchers that no longer have a live Balatro.exe
+    child.
+
+    The process tree is uvx.exe -> python.exe (balatrobot serve) -> Balatro.exe.
+    On a restart we kill the port owner (the game) plus the tracked uvx handle,
+    but uvx has already exited after bootstrapping, so the middle python
+    launcher gets reparented and survives. ~1 orphan leaks per restart; over a
+    night that's 100+ idle-but-resident processes (~40MB each) that thrash the
+    scheduler and page the trainer out, collapsing FPS on a clean 1/n curve.
+
+    A launcher is an orphan iff NO live Balatro.exe is among its descendants.
+    The live tree is balatrobot.exe -> python(serve) -> python(serve) ->
+    Balatro.exe — TWO nested serve launchers — so a direct-parent test would
+    wrongly flag the outer launcher (a live grandparent) and /T-kill the game
+    under it. Instead we protect the whole ancestor chain of every live game
+    and reap only launchers outside it. Port-agnostic, safe with N parallel
+    games. The >180s age guard avoids reaping a launcher that booted seconds
+    ago and hasn't spawned its game yet (boot is well under that)."""
+    ps = (
+        "$now=Get-Date; $all=Get-CimInstance Win32_Process; "
+        "$byId=@{}; foreach($p in $all){ $byId[[int]$p.ProcessId]=$p }; "
+        "$prot=New-Object System.Collections.Generic.HashSet[int]; "
+        "foreach($b in ($all|Where-Object {$_.Name -eq 'Balatro.exe'})){ "
+        "$cur=[int]$b.ParentProcessId; $g=0; "
+        "while($cur -and $byId.ContainsKey($cur) -and $g -lt 20){ "
+        "[void]$prot.Add($cur); $cur=[int]$byId[$cur].ParentProcessId; $g++ } }; "
+        "$o=$all|Where-Object { $_.Name -eq 'python.exe' -and "
+        "$_.CommandLine -match 'balatrobot' -and $_.CommandLine -match 'serve' "
+        "-and -not $prot.Contains([int]$_.ProcessId) "
+        "-and ($now-$_.CreationDate).TotalSeconds -gt 180 }; "
+        "$o | ForEach-Object { taskkill /F /T /PID $_.ProcessId 2>$null "
+        "| Out-Null }; ($o | Measure-Object).Count"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+        return int(out) if out.isdigit() else 0
+    except Exception:
+        return 0
+
+
 def heartbeat_age() -> float:
     """Seconds since the trainer last made a real environment step.
     Returns 0 if the heartbeat file doesn't exist yet (fresh trainer
@@ -226,6 +270,13 @@ def main():
             return
 
         try:
+            # Reap orphaned balatrobot launchers every cycle — each restart
+            # leaks one, and left unchecked they pile up overnight and choke
+            # the machine (see reap_orphan_launchers docstring).
+            reaped = reap_orphan_launchers()
+            if reaped:
+                log(f"reaped {reaped} orphan balatrobot launcher(s)")
+
             # Per-port health with debounce: the TRAINER's internal
             # watchdog also restarts its own game and is faster (~45s);
             # acting on the first down check raced it. 3 checks (~90s)

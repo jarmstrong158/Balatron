@@ -4,6 +4,13 @@ Single-file, stdlib-only. Reads logs/ and serves an auto-refreshing page.
 
     python dashboard.py            # serves http://localhost:8777
     python dashboard.py --port N
+
+Every section answers a specific question:
+  Outcomes      — is he getting deeper into runs? (mean ante, deep-run rates)
+  Learning      — is the policy moving healthily? (R, entropy, KL/CF vs
+                  target_kl, BC loss vs the flat-line decision threshold)
+  Diagnosis     — where does he die, and which jokers correlate with wins?
+  Ops           — heartbeat, steps/min, trainer restarts in the last 24h
 """
 
 import argparse
@@ -13,11 +20,15 @@ import json
 import os
 import re
 import time
+from collections import Counter
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 CHUNK = 200          # games per trend bucket
 ERA_START = "2026-06-08"  # start of the current training era for trend charts
+TARGET_KL = 0.03     # early-stop threshold in ppo.py
+BC_FLAT_LINE = 3.7   # pre-committed decision: BC loss flat here after 50 clean updates -> raise bc_coef
 
 UPDATE_RE = re.compile(
     r"Update\s+(\d+) \| Step\s+([\d,]+) \| FPS\s+(\d+) \| Ep\s+(\d+) \| "
@@ -25,6 +36,7 @@ UPDATE_RE = re.compile(
     r"VL\s+([\d.]+) \| Ent\s+([\d.]+) \| KL\s+([\d.]+) \| CF\s+([\d.]+) \| "
     r"BC\s+([\d.]+)@([\d.]+)\((\d+)%\) \| LR\s+([\d.e+-]+)"
 )
+SUPERVISOR_TS_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\] trainer started")
 
 # previous heartbeat sample for steps/min between page loads
 _last_hb = {"t": None, "step": None}
@@ -61,19 +73,45 @@ def read_history():
     return rows
 
 
-def read_updates(limit=12):
+def read_updates():
+    """Parse all PPO update lines from recent trainer logs.
+
+    Restart-resumes can replay an update number; dedupe keeps the latest
+    occurrence so the curve reflects what actually trained.
+    """
     logs = sorted(glob.glob(os.path.join(LOGS, "trainer_*.log")), key=os.path.getmtime)
-    updates = []
-    for path in logs[-3:]:  # trainer restarts split the stream across files
+    by_no = {}
+    for path in logs[-5:]:
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     m = UPDATE_RE.search(line)
                     if m:
-                        updates.append(m.groups())
+                        g = m.groups()
+                        by_no[int(g[0])] = {
+                            "no": int(g[0]), "step": int(g[1].replace(",", "")),
+                            "r": float(g[4]), "ante": float(g[5]),
+                            "ent": float(g[9]), "kl": float(g[10]), "cf": float(g[11]),
+                            "bc": float(g[12]), "bc_coef": float(g[13]),
+                            "bc_frac": int(g[14]), "lr": g[15],
+                        }
         except OSError:
             pass
-    return updates[-limit:]
+    return [by_no[k] for k in sorted(by_no)]
+
+
+def read_restarts_24h():
+    cutoff = datetime.now() - timedelta(hours=24)
+    count = 0
+    try:
+        with open(os.path.join(LOGS, "supervisor.log"), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = SUPERVISOR_TS_RE.match(line)
+                if m and datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S") >= cutoff:
+                    count += 1
+    except OSError:
+        return None
+    return count
 
 
 def chunk_trend(rows):
@@ -84,12 +122,9 @@ def chunk_trend(rows):
         if len(g) < 50:
             break
         chunks.append({
-            "label": g[0]["ts"][5:16],
-            "n": len(g),
             "mean_ante": sum(x["ante"] for x in g) / len(g),
             "a6": 100.0 * sum(1 for x in g if x["ante"] >= 6) / len(g),
             "a8": 100.0 * sum(1 for x in g if x["ante"] >= 8) / len(g),
-            "wins": sum(1 for x in g if x.get("won")),
         })
     return chunks
 
@@ -107,30 +142,83 @@ def wins_by_day(rows):
     return sorted(days.items())
 
 
-def svg_line(series, w=860, h=200, pad=34, fmt="{:.2f}"):
-    """series: list of (name, color, [values]). All same length, shared x."""
-    n = max(len(v) for _, _, v in series)
+def last_win_info(rows):
+    """(hours since last win, games played since) or None."""
+    last_idx = None
+    for i, r in enumerate(rows):
+        if r.get("won"):
+            last_idx = i
+    if last_idx is None:
+        return None
+    try:
+        ts = datetime.strptime(rows[last_idx]["ts"], "%Y-%m-%dT%H:%M:%S")
+    except (KeyError, ValueError):
+        return None
+    hours = (datetime.now() - ts).total_seconds() / 3600.0
+    return hours, len(rows) - 1 - last_idx
+
+
+def joker_win_table(rows, top_n=8, min_held=20):
+    """Jokers most common in winning runs, with lift vs overall hold rate.
+
+    Lift > 1 means the joker shows up in wins more often than in games
+    generally — a (correlational) hint at what builds work.
+    """
+    wins = [r for r in rows if r.get("won")]
+    if len(wins) < 5:
+        return [], len(wins)
+    held_all = Counter(j for r in rows for j in set(r.get("jokers") or []))
+    held_win = Counter(j for r in wins for j in set(r.get("jokers") or []))
+    out = []
+    for joker, wc in held_win.most_common():
+        tc = held_all[joker]
+        if tc < min_held:
+            continue
+        lift = (wc / len(wins)) / (tc / len(rows))
+        out.append((joker, wc, tc, lift))
+        if len(out) >= top_n:
+            break
+    return out, len(wins)
+
+
+def rolling(vals, window=5):
+    out = []
+    for i in range(len(vals)):
+        w = vals[max(0, i - window + 1):i + 1]
+        out.append(sum(w) / len(w))
+    return out
+
+
+def svg_line(series, w=860, h=200, pad=34, fmt="{:.2f}", hlines=()):
+    """series: list of (name, color, [values]). hlines: list of (value, label)."""
+    n = max((len(v) for _, _, v in series), default=0)
     if n < 2:
         return "<p class='dim'>not enough data yet</p>"
-    lo = min(min(v) for _, _, v in series)
-    hi = max(max(v) for _, _, v in series)
+    vals = [x for _, _, v in series for x in v] + [hv for hv, _ in hlines]
+    lo, hi = min(vals), max(vals)
     if hi - lo < 1e-9:
         hi = lo + 1.0
     lo, hi = lo - (hi - lo) * 0.08, hi + (hi - lo) * 0.08
 
+    def y_of(val):
+        return h - pad + (pad - h + 18) * (val - lo) / (hi - lo)
+
     def pt(i, val):
         x = pad + (w - pad - 8) * i / (n - 1)
-        y = h - pad + (pad - h + 8) * (val - lo) / (hi - lo)
-        return f"{x:.1f},{y:.1f}"
+        return f"{x:.1f},{y_of(val):.1f}"
 
     out = [f"<svg viewBox='0 0 {w} {h}' style='width:100%;max-width:{w}px'>"]
     for frac in (0.0, 0.5, 1.0):
         val = lo + (hi - lo) * frac
-        y = h - pad + (pad - h + 8) * frac
+        y = y_of(val)
         out.append(f"<line x1='{pad}' y1='{y:.0f}' x2='{w-8}' y2='{y:.0f}' stroke='#333' stroke-width='1'/>")
         out.append(f"<text x='2' y='{y+4:.0f}' fill='#888' font-size='11'>{fmt.format(val)}</text>")
-    for name, color, vals in series:
-        pts = " ".join(pt(i, v) for i, v in enumerate(vals))
+    for hval, hlabel in hlines:
+        y = y_of(hval)
+        out.append(f"<line x1='{pad}' y1='{y:.1f}' x2='{w-8}' y2='{y:.1f}' stroke='#777' stroke-width='1' stroke-dasharray='5,4'/>")
+        out.append(f"<text x='{w-10}' y='{y-4:.0f}' fill='#999' font-size='11' text-anchor='end'>{html.escape(hlabel)}</text>")
+    for name, color, v in series:
+        pts = " ".join(pt(i, val) for i, val in enumerate(v))
         out.append(f"<polyline points='{pts}' fill='none' stroke='{color}' stroke-width='2'/>")
     legend_x = pad
     for name, color, _ in series:
@@ -141,12 +229,32 @@ def svg_line(series, w=860, h=200, pad=34, fmt="{:.2f}"):
     return "".join(out)
 
 
+def svg_bars(pairs, w=430, h=190, pad=30, color="#e0a93e"):
+    """pairs: list of (label, value)."""
+    if not pairs:
+        return "<p class='dim'>not enough data yet</p>"
+    hi = max(v for _, v in pairs) or 1
+    bw = (w - pad - 8) / len(pairs)
+    out = [f"<svg viewBox='0 0 {w} {h}' style='width:100%;max-width:{w}px'>"]
+    for i, (label, v) in enumerate(pairs):
+        bh = (h - pad - 22) * v / hi
+        x = pad + i * bw
+        y = h - pad - bh
+        out.append(f"<rect x='{x+2:.1f}' y='{y:.1f}' width='{bw-4:.1f}' height='{bh:.1f}' fill='{color}' rx='2'/>")
+        out.append(f"<text x='{x+bw/2:.1f}' y='{y-4:.0f}' fill='#ccc' font-size='11' text-anchor='middle'>{v}</text>")
+        out.append(f"<text x='{x+bw/2:.1f}' y='{h-pad+14:.0f}' fill='#888' font-size='11' text-anchor='middle'>{html.escape(str(label))}</text>")
+    out.append("</svg>")
+    return "".join(out)
+
+
 def render():
     life = read_lifetime()
     rows = read_history()
     chunks = chunk_trend(rows)
     updates = read_updates()
     hb_t, hb_step = read_heartbeat()
+    restarts = read_restarts_24h()
+    lw = last_win_info(rows)
 
     rate = None
     now = time.time()
@@ -162,8 +270,10 @@ def render():
         ("Episodes", f"{life['episodes']:,}"),
         ("Win rate", f"{win_rate:.2f}%"),
         ("Best ante", f"{life['highest_ante']}"),
+        ("Last win", f"{lw[0]:.0f}h / {lw[1]} games" if lw else "none in window"),
         ("Global step", f"{hb_step:,}" if hb_step else "?"),
         ("Steps/min", f"{rate:.0f}" if rate else "(refresh)"),
+        ("Restarts 24h", f"{restarts}" if restarts is not None else "?"),
         ("Heartbeat", f"{hb_age:.0f}s ago" if hb_age is not None else "MISSING"),
     ]
     card_html = "".join(
@@ -174,16 +284,39 @@ def render():
     if hb_age is not None and hb_age > 300:
         hb_warn = "<p class='warn'>heartbeat stale &gt;5min — trainer may be down</p>"
 
+    # --- Outcomes ---
     ante_chart = svg_line([("mean ante / 200 games", "#e0a93e", [c["mean_ante"] for c in chunks])])
     deep_chart = svg_line([
         ("ante ≥ 6 %", "#5ab0f0", [c["a6"] for c in chunks]),
         ("ante ≥ 8 %", "#e05a5a", [c["a8"] for c in chunks]),
     ], fmt="{:.0f}%")
 
+    # --- Learning health (per PPO update) ---
+    small = dict(w=430, h=180, pad=34)
+    r_chart = svg_line([("R (rolling 5)", "#7dd87d", rolling([u["r"] for u in updates]))], **small)
+    ent_chart = svg_line([("entropy", "#c08ae0", [u["ent"] for u in updates])], **small)
+    kl_chart = svg_line([
+        ("KL", "#5ab0f0", [u["kl"] for u in updates]),
+        ("clip frac", "#e0a93e", [u["cf"] for u in updates]),
+    ], fmt="{:.3f}", hlines=[(TARGET_KL, f"target_kl {TARGET_KL}")], **small)
+    bc_chart = svg_line(
+        [("BC loss", "#e05a5a", [u["bc"] for u in updates])],
+        hlines=[(BC_FLAT_LINE, f"flat-line watch {BC_FLAT_LINE}")], **small)
+
+    # --- Diagnosis ---
+    recent_antes = Counter(r["ante"] for r in rows[-1000:])
+    max_ante = max(recent_antes) if recent_antes else 8
+    death_hist = svg_bars([(a, recent_antes.get(a, 0)) for a in range(1, max_ante + 1)])
+    jokers, n_wins = joker_win_table(rows)
+    joker_rows = "".join(
+        f"<tr><td>{html.escape(j)}</td><td>{wc}/{n_wins}</td><td>{tc}</td><td>{lift:.1f}×</td></tr>"
+        for j, wc, tc, lift in jokers
+    ) or "<tr><td colspan='4' class='dim'>not enough wins in window yet</td></tr>"
+
     upd_rows = "".join(
-        f"<tr><td>{u[0]}</td><td>{u[1]}</td><td>{u[4]}</td><td>{u[5]}</td>"
-        f"<td>{u[10]}</td><td>{u[11]}</td><td>{u[12]}@{u[13]} ({u[14]}%)</td><td>{u[15]}</td></tr>"
-        for u in reversed(updates)
+        f"<tr><td>{u['no']}</td><td>{u['step']:,}</td><td>{u['r']:.2f}</td><td>{u['ante']:.1f}</td>"
+        f"<td>{u['kl']:.4f}</td><td>{u['cf']:.3f}</td><td>{u['bc']:.2f}@{u['bc_coef']:.2f} ({u['bc_frac']}%)</td><td>{u['lr']}</td></tr>"
+        for u in reversed(updates[-10:])
     ) or "<tr><td colspan='8' class='dim'>no update lines parsed yet</td></tr>"
 
     day_rows = "".join(
@@ -196,11 +329,13 @@ def render():
 <meta http-equiv='refresh' content='30'>
 <title>Balatron</title>
 <style>
- body {{ background:#16161c; color:#ddd; font:14px/1.5 'Segoe UI',sans-serif; margin:24px; }}
+ body {{ background:#16161c; color:#ddd; font:14px/1.5 'Segoe UI',sans-serif; margin:24px; max-width:920px; }}
  h1 {{ font-size:20px; }} h2 {{ font-size:15px; color:#aaa; margin:26px 0 8px; }}
+ h3 {{ font-size:13px; color:#999; margin:10px 0 2px; font-weight:500; }}
  .cards {{ display:flex; gap:12px; flex-wrap:wrap; }}
  .card {{ background:#1f1f29; border-radius:8px; padding:12px 18px; min-width:96px; text-align:center; }}
- .num {{ font-size:22px; font-weight:600; color:#fff; }} .lbl {{ font-size:11px; color:#999; }}
+ .num {{ font-size:20px; font-weight:600; color:#fff; white-space:nowrap; }} .lbl {{ font-size:11px; color:#999; }}
+ .grid {{ display:grid; grid-template-columns:1fr 1fr; gap:4px 24px; }}
  table {{ border-collapse:collapse; }} td,th {{ padding:3px 12px; border-bottom:1px solid #2a2a35; text-align:right; }}
  th {{ color:#999; font-weight:500; }} td:first-child, th:first-child {{ text-align:left; }}
  .dim {{ color:#777; }} .warn {{ color:#e05a5a; font-weight:600; }}
@@ -210,10 +345,30 @@ def render():
 <p class='note'>auto-refreshes every 30s · reads logs/ directly · trend buckets = {CHUNK} games since {ERA_START}</p>
 {hb_warn}
 <div class='cards'>{card_html}</div>
-<h2>Mean ante (is he getting deeper?)</h2>{ante_chart}
-<h2>Deep-run rates (leading indicators for wins)</h2>{deep_chart}
+
+<h2>Outcomes — is he getting deeper?</h2>
+{ante_chart}
+{deep_chart}
+
+<h2>Learning health — per PPO update ({len(updates)} parsed)</h2>
+<div class='grid'>
+ <div><h3>Mean episode reward — should trend up</h3>{r_chart}</div>
+ <div><h3>Entropy — gradual decline ok, cliff = exploration collapse</h3>{ent_chart}</div>
+ <div><h3>Policy movement — healthy: KL 0.01–0.05, CF 0.1–0.2</h3>{kl_chart}</div>
+ <div><h3>BC imitation loss — flat at watch line after 50 updates → raise bc_coef</h3>{bc_chart}</div>
+</div>
+
+<h2>Diagnosis</h2>
+<div class='grid'>
+ <div><h3>Final ante, last 1,000 games — where the wall is</h3>{death_hist}</div>
+ <div><h3>Jokers held in winning runs (lift = vs overall hold rate)</h3>
+  <table><tr><th>Joker</th><th>In wins</th><th>Held overall</th><th>Lift</th></tr>{joker_rows}</table>
+  <p class='note'>correlation, not causation — small win sample</p></div>
+</div>
+
 <h2>Recent PPO updates</h2>
 <table><tr><th>Update</th><th>Step</th><th>R</th><th>Ante</th><th>KL</th><th>CF</th><th>BC</th><th>LR</th></tr>{upd_rows}</table>
+
 <h2>By day (rolling 5,000-game window)</h2>
 <table><tr><th>Date</th><th>Games</th><th>Wins</th><th>Win %</th><th>Mean ante</th></tr>{day_rows}</table>
 </body></html>"""
