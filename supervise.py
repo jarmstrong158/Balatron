@@ -25,6 +25,7 @@ Stop:
 import datetime
 import glob
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -64,6 +65,19 @@ STALL_MIN_STEPS_PER_MIN = 10.0   # below this = hard crawl, not deep play
 CHECKPOINT_STALL_S = 9000        # 150 min without a checkpoint = churn
 CHECKPOINT_GLOB = os.path.join(REPO, "checkpoints",
                                "balatron_phase1_update*.pt")
+
+# Degradation recycle: the trainer's per-update FPS (printed in its log)
+# decays ~1/n over the process's multi-hour lifetime — a long-lived-process
+# accumulation that is NOT memory, orphan launchers, or external CPU (all
+# ruled out 06-12); root cause still open. A fresh trainer resets FPS to
+# ~150; left alone it crawls to ~15 over ~10h, dragging update cadence from
+# ~5 min to ~70 min. Recycle a MATURE, DEGRADED trainer so throughput stays
+# high without a human noticing. The min-age guard keeps a freshly-started
+# trainer (whose first updates may dip during startup churn) from tripping
+# it, so there is no recycle loop: a fresh trainer sits at ~150, far above
+# the floor, for hours before it qualifies again.
+FPS_RECYCLE_FLOOR = 30           # per-update FPS below this = degraded
+RECYCLE_MIN_AGE_S = 3600         # never recycle a trainer younger than 1h
 
 
 def log(msg: str):
@@ -199,6 +213,26 @@ def newest_checkpoint_age() -> float:
     return time.time() - max(os.path.getmtime(p) for p in cps)
 
 
+def latest_trainer_fps():
+    """Most recent per-update 'FPS N' from the newest trainer log, or None.
+
+    Used by the degradation-recycle check. None when no log or no update
+    line has printed yet (fresh trainer) — the caller treats None as 'not
+    degraded' so a just-started trainer is never recycled on missing data.
+    """
+    logs = glob.glob(os.path.join(LOG_DIR, "trainer_*.log"))
+    if not logs:
+        return None
+    newest = max(logs, key=os.path.getmtime)
+    try:
+        with open(newest, encoding="utf-8", errors="replace") as f:
+            txt = f.read()
+    except OSError:
+        return None
+    matches = re.findall(r"\| FPS\s+(\d+) \|", txt)
+    return int(matches[-1]) if matches else None
+
+
 def start_server(port: int = PORT) -> bool:
     """Launch one BalatroBot server + game on a port; wait for it."""
     kill_port_owner(port)
@@ -316,6 +350,26 @@ def main():
                 else:
                     if trainer_seen_at is None:
                         trainer_seen_at = time.time()
+
+                    # Degradation recycle: a mature trainer whose per-update
+                    # FPS has decayed below the floor gets a clean full-stack
+                    # restart (same mechanism as the FROZEN path) to reset the
+                    # ~1/n throughput decay. Guarded by min-age so a fresh
+                    # trainer can't trip it — no recycle loop.
+                    trainer_age = time.time() - trainer_seen_at
+                    if trainer_age > RECYCLE_MIN_AGE_S:
+                        fps = latest_trainer_fps()
+                        if fps is not None and fps < FPS_RECYCLE_FLOOR:
+                            log(f"trainer pid {pid} FPS degraded to {fps} "
+                                f"(floor {FPS_RECYCLE_FLOOR}) after "
+                                f"{int(trainer_age/60)}min — recycling stack")
+                            kill_trainer(pid)
+                            kill_strays()
+                            step_samples.clear()
+                            trainer_seen_at = None
+                            time.sleep(3)
+                            continue
+
                     # Liveness: a trainer that exists but has made zero
                     # environment steps in HEARTBEAT_STALE_S is wedged
                     # (frozen fetch, hung start endpoint, boot-splash
