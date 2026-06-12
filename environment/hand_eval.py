@@ -4,7 +4,7 @@ Balatron — Hand Evaluator
 Poker hand classification, score estimation, combo enumeration,
 draw probability computation, and strategic assessment for the RL agent.
 
-Produces 40 float features (indices 520-559) for the state vector.
+Produces 40 float features (indices 777-816) for the state vector.
 Only active during SELECTING_HAND game state.
 
 See NOTES.md for feature layout.
@@ -1621,7 +1621,7 @@ def assess_strategy(gamestate: dict) -> np.ndarray:
         gamestate: full gamestate dict from the API
 
     Returns:
-        numpy array of shape (40,) with features for indices 520-559
+        numpy array of shape (40,) with features for indices 777-816
     """
     features = np.zeros(HAND_EVAL_FEATURES, dtype=np.float32)
 

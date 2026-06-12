@@ -4,7 +4,7 @@ Balatron — Neural Network
 Shared trunk + 3 policy heads + 1 value head for PPO.
 
 Architecture:
-    Input (520) → Shared Trunk (768 → 768 → 512)
+    Input (817) → Shared Trunk (768 → 768 → 512)
     → Play Head   (512 → 256 → 45)  — SELECTING_HAND
     → Shop Head   (512 → 256 → 45)  — SHOP, SMODS_BOOSTER_OPENED
     → Blind Head  (512 → 128 → 45)  — BLIND_SELECT
@@ -124,7 +124,7 @@ class BalatronNetwork(nn.Module):
     """Actor-critic network for Balatron PPO agent.
 
     Forward pass:
-        state_vector (520) → trunk (512) → {policy_head, value_head}
+        state_vector (817) → trunk (512) → {policy_head, value_head}
 
     The policy head is selected by the game state. During training,
     we batch by game state so each sample uses the correct head.
@@ -171,7 +171,7 @@ class BalatronNetwork(nn.Module):
         """Forward pass through trunk + selected policy head + value head.
 
         Args:
-            state: input state vector, shape (batch, 520)
+            state: input state vector, shape (batch, 817)
             head_idx: which policy head to use (HEAD_PLAY, HEAD_SHOP, HEAD_BLIND)
 
         Returns:
@@ -191,7 +191,7 @@ class BalatronNetwork(nn.Module):
         Groups by head index, runs each group, then reassembles.
 
         Args:
-            states: shape (batch, 520)
+            states: shape (batch, 817)
             head_indices: shape (batch,) — int tensor of head indices per sample
 
         Returns:
@@ -226,7 +226,7 @@ class BalatronNetwork(nn.Module):
         with value estimation in a single call.
 
         Args:
-            state: shape (batch, 520)
+            state: shape (batch, 817)
             head_idx: which policy head
             action_mask: shape (batch, 45) — 1.0 for valid actions
             action: optional pre-selected action for log_prob computation

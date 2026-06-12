@@ -55,68 +55,28 @@ balatron/
 
 ---
 
-## State Vector Layout (520 floats)
+## State Vector Layout (817 floats)
+
+Section sizes are the constants in `environment/game_state.py`;
+`STATE_VECTOR_SIZE` is their sum. That file is authoritative for the
+exact per-field encoding — keep the totals below in sync with it.
 
 ```
-Section 1: Game Meta (10)
-  [0]  ante / 8                          # Current ante, normalized
-  [1]  round / 24                        # Current round, normalized
-  [2]  log10(money)                      # Log-scaled money
-  [3]  hands_left / 8                    # Remaining hands
-  [4]  discards_left / 6                 # Remaining discards
-  [5]  reroll_cost / 20                  # Current reroll cost
-  [6]  log10(chips)                      # Current chips scored (log scale / 15)
-  [7]  log10(blind_score)               # Required score (log scale / 15)
-  [8]  is_boss                           # 1.0 if boss blind
-  [9]  blinds_skipped / 8               # Cumulative blinds skipped
-
-Section 2: Poker Hand Levels (39 = 13 × 3)
-  Per hand type (High Card → Flush Five):
-    level / 20, log10(chips), log10(mult)
-
-Section 3: Deck Composition (61 = 52 + 9)
-  52 rank×suit counts (4 suits × 13 ranks), each / 4.0
-  9 enhancement/seal counts:
-    BONUS, MULT, WILD, GLASS, STEEL, STONE, GOLD, LUCKY, sealed
-
-Section 4: Vouchers (32)
-  Binary flags for each voucher owned
-
-Section 5: Joker Slots (160 = 5 × 32)
-  Per slot (zero-padded if empty):
-    [0]   tier_weight / 10
-    [1-9] effect flags: chip, mult, xmult, economy, chip_scaling,
-          mult_scaling, xmult_scaling, copy, in_hand_effect
-    [10]  log(chip_value)
-    [11]  log(mult_value)
-    [12]  log(xmult_value)
-    [13]  log(money_per_round)
-    [14]  log(scaling_increment)
-    [15]  log(scaling_start_value)
-    [16-21] flags: retrigger, rule_mod, game_param, consumable_creation,
-            survival, boss_blind
-    [22]  effect_probability
-    [23]  has_expiry
-    [24-27] edition one-hot: foil, holo, polychrome, negative
-    [28]  debuffed
-    [29]  eternal
-    [30]  perishable
-    [31]  log(current_scaled_value)       # Runtime from ScalingTracker
-
-Section 6: Hand Cards (96 = 12 × 8)
-  Per card slot (zero-padded):
-    rank/12, suit/3, enhancement/8, seal/4, edition/4,
-    debuffed, base_chips/11, is_face
-
-Section 7: Consumables (12 = 2 × 6)
-  Per slot:
-    type (0.33=tarot, 0.67=planet, 1.0=spectral),
-    key_hash, is_negative, cost/10, placeholder×2
-
-Section 8: Shop (130 = 3×30 + 2×5 + 2×5)
-  Shop Jokers (3 × 30): fingerprint[0:28] + cost/20 + affordable
-  Shop Vouchers (2 × 5): voucher_id/32 + cost/20 + affordable + placeholder×2
-  Shop Packs (2 × 5): type (0.25=arcana..1.0=buffoon) + cost/12 + affordable + is_mega + placeholder
+ #   Section              Size   Composition
+ 1   Game Meta             45    ante/round/money/hands/discards/reroll/
+                                 chips/target/boss + blind statuses + slots
+ 2   Poker Hand Levels     79    13 hand types × (level, chips, mult) + play counts
+ 3   Deck Composition      61    52 rank×suit counts + 9 enhancement/seal counters
+ 4   Vouchers              32    binary flag per voucher
+ 5   Joker Slots          270    5 slots × 54-field fingerprint
+ 6   Hand Cards            96    12 slots × 8 fields
+ 7   Consumables           12    2 slots × 6 fields
+ 8   Shop Jokers          162    3 slots × 54-field fingerprint
+ 9   Shop Vouchers         10    2 slots × 5 fields
+10   Shop Packs            10    2 slots × 5 fields
+11   Hand-Eval Features    40    scoring/risk features (indices 777–816)
+     ----------------------------------------------------------------
+     TOTAL                817
 ```
 
 ### State Vector Design Notes
@@ -208,13 +168,13 @@ Invalid actions are masked to -inf before softmax so the network can only pick l
 
 ---
 
-## Network Architecture (1.88M parameters)
+## Network Architecture (2.11M parameters)
 
 ```
-Input (520)
+Input (817)
   |
   Shared Trunk (3 layers, LayerNorm + ReLU each):
-    520 -> 768 (401K params)
+    817 -> 768 (628K params)
     768 -> 768 (591K params)
     768 -> 512 (394K params)
   |
@@ -406,7 +366,7 @@ cards, hand, shop, vouchers, packs, pack
 
 - **Phase:** Live training — Phase 1 in progress
 - **data/jokers.py:** COMPLETE — 150 jokers, validation, tier_weights pending
-- **environment/game_state.py:** COMPLETE — API client, EventDetector, ScalingTracker, 520-float state vector
+- **environment/game_state.py:** COMPLETE — API client, EventDetector, ScalingTracker, 817-float state vector
 - **environment/action_space.py:** COMPLETE — 14 action types, 45-dim head, masking, ActionDecoder
 - **environment/reward.py:** COMPLETE — 4-tier shaped rewards, log-scaled, RewardConfig
 - **agent/network.py:** COMPLETE — 1.88M params, shared trunk, 3 policy heads + value head
