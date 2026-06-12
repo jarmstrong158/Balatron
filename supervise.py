@@ -69,15 +69,21 @@ CHECKPOINT_GLOB = os.path.join(REPO, "checkpoints",
 # Degradation recycle: the trainer's per-update FPS (printed in its log)
 # decays ~1/n over the process's multi-hour lifetime — a long-lived-process
 # accumulation that is NOT memory, orphan launchers, or external CPU (all
-# ruled out 06-12); root cause still open. A fresh trainer resets FPS to
-# ~150; left alone it crawls to ~15 over ~10h, dragging update cadence from
-# ~5 min to ~70 min. Recycle a MATURE, DEGRADED trainer so throughput stays
-# high without a human noticing. The min-age guard keeps a freshly-started
-# trainer (whose first updates may dip during startup churn) from tripping
-# it, so there is no recycle loop: a fresh trainer sits at ~150, far above
-# the floor, for hours before it qualifies again.
-FPS_RECYCLE_FLOOR = 30           # per-update FPS below this = degraded
-RECYCLE_MIN_AGE_S = 3600         # never recycle a trainer younger than 1h
+# ruled out 06-12); root cause still open. Left alone it crawls from its
+# fresh peak to ~1/100th over ~10h, dragging update cadence from ~5 min to
+# ~70 min.
+#
+# The threshold is RELATIVE (current FPS vs this trainer's own observed
+# peak), NOT a fixed floor: the healthy fresh FPS varies ~10x run to run
+# (~1800 on a clean start, but ~150 if the stack was still settling when the
+# trainer launched). A fixed floor is either uselessly lenient against the
+# high baseline (1800 -> let it fall 60x before acting) or a recycle loop
+# against the low one. Peak-relative auto-adapts and is self-protecting
+# against startup churn (during churn the peak is low too, so current is not
+# far below it). Recycle when current < FRACTION * peak, once mature.
+FPS_RECYCLE_FRACTION = 0.40      # recycle when FPS < 40% of this run's peak
+FPS_RECYCLE_MIN_SAMPLES = 3      # need >=3 updates so the peak is real
+RECYCLE_MIN_AGE_S = 1800         # never recycle a trainer younger than 30min
 
 
 def log(msg: str):
@@ -213,24 +219,27 @@ def newest_checkpoint_age() -> float:
     return time.time() - max(os.path.getmtime(p) for p in cps)
 
 
-def latest_trainer_fps():
-    """Most recent per-update 'FPS N' from the newest trainer log, or None.
+def trainer_fps_stats():
+    """(peak, current, count) of per-update FPS from the newest trainer log.
 
-    Used by the degradation-recycle check. None when no log or no update
-    line has printed yet (fresh trainer) — the caller treats None as 'not
-    degraded' so a just-started trainer is never recycled on missing data.
+    Returns (None, None, 0) when there is no log or no FPS line yet — the
+    caller treats that as 'not degraded' so a just-started trainer is never
+    recycled on missing data. The recycle uses peak-relative degradation
+    (see the FPS_RECYCLE_* constants for why a fixed floor doesn't work).
     """
     logs = glob.glob(os.path.join(LOG_DIR, "trainer_*.log"))
     if not logs:
-        return None
+        return None, None, 0
     newest = max(logs, key=os.path.getmtime)
     try:
         with open(newest, encoding="utf-8", errors="replace") as f:
             txt = f.read()
     except OSError:
-        return None
-    matches = re.findall(r"\| FPS\s+(\d+) \|", txt)
-    return int(matches[-1]) if matches else None
+        return None, None, 0
+    vals = [int(x) for x in re.findall(r"\| FPS\s+(\d+) \|", txt)]
+    if not vals:
+        return None, None, 0
+    return max(vals), vals[-1], len(vals)
 
 
 def start_server(port: int = PORT) -> bool:
@@ -352,17 +361,21 @@ def main():
                         trainer_seen_at = time.time()
 
                     # Degradation recycle: a mature trainer whose per-update
-                    # FPS has decayed below the floor gets a clean full-stack
-                    # restart (same mechanism as the FROZEN path) to reset the
-                    # ~1/n throughput decay. Guarded by min-age so a fresh
-                    # trainer can't trip it — no recycle loop.
+                    # FPS has decayed below FRACTION of its own peak gets a
+                    # clean full-stack restart (same mechanism as the FROZEN
+                    # path) to reset the ~1/n throughput decay. Peak-relative
+                    # (not a fixed floor) so it adapts to a ~10x-varying fresh
+                    # baseline; min-age + min-samples guard against tripping on
+                    # a still-settling trainer, so there is no recycle loop.
                     trainer_age = time.time() - trainer_seen_at
                     if trainer_age > RECYCLE_MIN_AGE_S:
-                        fps = latest_trainer_fps()
-                        if fps is not None and fps < FPS_RECYCLE_FLOOR:
-                            log(f"trainer pid {pid} FPS degraded to {fps} "
-                                f"(floor {FPS_RECYCLE_FLOOR}) after "
-                                f"{int(trainer_age/60)}min — recycling stack")
+                        peak, cur, nfps = trainer_fps_stats()
+                        if (peak is not None
+                                and nfps >= FPS_RECYCLE_MIN_SAMPLES
+                                and cur < FPS_RECYCLE_FRACTION * peak):
+                            log(f"trainer pid {pid} FPS degraded to {cur} "
+                                f"({cur * 100 // peak}% of peak {peak}) after "
+                                f"{int(trainer_age / 60)}min — recycling stack")
                             kill_trainer(pid)
                             kill_strays()
                             step_samples.clear()
