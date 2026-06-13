@@ -67,15 +67,15 @@ API Action Command --> Balatro Game
 
 ### Hybrid Decision System
 
-Balatron uses a **hybrid architecture** that combines neural network learning with hard-coded Balatro expertise:
+Balatron uses a **hybrid architecture** — but the split is **judgment vs. computation**, and the policy owns the judgment. As of the 06-13 audit (`policy_authority`), the network's chosen action actually **executes**: it decides play-vs-discard, which joker to buy, when to reroll/skip/sell/leave. The heuristic layer was demoted from *making* those calls (it used to override them, which made the net decorative and unable to learn) to **tactical computation + hard legality only**. That's what makes this a genuine RL agent — the policy's decisions have causal stake in outcomes.
 
 | Layer | Responsibility | Examples |
 |-------|---------------|----------|
-| **Neural Network** | Strategic decisions under uncertainty | When to reroll, which jokers to prioritize, when to leave the shop, blind skip timing |
-| **Action Mask** | Logit biasing to guide exploration | Boost scoring jokers in shop, suppress bad jokers, penalize unaffordable items |
-| **Heuristic Guards** | Validate and override bad decisions | Block selling your only joker, prevent buying when it tanks interest, force-buy Blueprint/Brainstorm, auto-buy Hermit, Soul card priority in packs |
-| **Scoring Engine** | Full Balatro math for hand evaluation | Compute exact scores with joker effects, retriggers, editions, enhancements, boss debuffs |
-| **Strategic Advisor** | Optimal hand/discard selection | `plan_optimal_action()` — evaluates all possible plays against blind target with draw probability |
+| **Neural Network (policy)** | **All judgment calls** — and they execute | Play vs. discard, which joker to buy, when to reroll/skip/sell/leave shop |
+| **Heuristic — tactical math** | The *computation* behind the policy's decision (rules, not strategy) | Which exact cards score best for the chosen play, optimal joker order, draw probabilities |
+| **Heuristic — hard legality** | Block only structurally invalid actions | Affordability, slot limits, never sell your only joker, force-buy Blueprint/Brainstorm |
+| **Scoring Engine** | Full Balatro math for hand evaluation | Exact scores with joker effects, retriggers, editions, enhancements, boss debuffs |
+| **Observation features** | Surface the computed math *to* the policy so its judgment is informed | Hand-eval block (gap-to-target, draw odds), shop context (per-joker marginal value, build coverage) |
 
 ### Neural Network
 
@@ -156,15 +156,21 @@ Rewards are carefully structured to align with Balatro's exponential scoring:
 
 | Reward | Value | Description |
 |--------|-------|-------------|
-| Game Win (Ante 8 clear) | +10.0 | Phase 1 primary goal |
+| Game Win (Ante 8 clear) | +15.0 | Phase 1 primary goal — largest single signal |
 | Game Loss | -5.0 + 0.3/ante | Harsh base penalty, softened by progress |
 | Naneinf Achievement | +50.0 | Phase 2 ultimate goal |
-| Ante Cleared | +3.0 + 0.5/ante | Scales with difficulty |
+| Ante Cleared | +3.0 + 1.0/ante | Scales steeply with depth |
 | Blind Cleared | +1.0 (+1.5 boss) | Per-blind progress signal |
 | Score vs Target | +0.5 * log10(ratio) | Log-scaled overkill bonus |
-| Money Gain | +0.02/dollar | Economy awareness |
-| Money Spent | -0.01/dollar | Light spending penalty (spending is necessary) |
+| Score Progress | +0.02 * log10(chips) | Small per-hand nudge (cut from 0.1 — was the dense reward dominating the signal) |
+| Money Gain / Spent | +0.01 / -0.01 per $ | Economy is a means, not the goal |
 | Scaling Growth | +0.05/log-unit | Encourages scaling joker investment |
+
+> These weights were **rebalanced toward outcomes** (06-13): the dense per-step
+> shaping was shrunk and depth/win rewards steepened, after a plateau audit
+> showed the policy was optimizing comfortable mid-game scoring instead of
+> winning. The single-hand high-water bonus is **Phase-2 only** (it farms chips
+> against depth in Phase 1). See [DECISIONS.md](DECISIONS.md) / Context Keeper.
 
 All score-based rewards use **log10 scaling** because Balatro scores grow exponentially — the agent learns to push the *exponent* higher.
 
@@ -181,7 +187,7 @@ The hybrid design has a structural catch: when heuristics override most conseque
 
 2. **Annealed imitation loss.** Overridden steps are flagged as *teacher corrections*, and an auxiliary behavior-cloning term — `bc_coef · (−log π(executed action))`, only on flagged steps — distills the heuristic layer into the policy. `bc_coef` anneals linearly from 0.5 to 0 over 200 updates (anchored to first engagement, persisted in checkpoints across restarts). Early on the policy imitates the teacher; as the coefficient decays, PPO's reward signal — which *can* disagree with the teacher — takes over.
 
-This is the AlphaGo-style recipe (supervised warm-start, then RL surpasses the teacher), and it's what makes the long-term plan safe: once the heuristics are distilled into the policy, the hard overrides and bias masks can be lifted one at a time without the win rate falling off a cliff. Legality masks stay forever; bias masks are trainer wheels.
+This is the AlphaGo-style recipe (supervised warm-start, then RL surpasses the teacher). **The hard overrides have now been lifted** (Path A / `policy_authority`, 06-13): the policy's judgment calls execute directly, and the override fraction dropped from ~8% to 0%. One side effect surfaced immediately — distilling a deterministic teacher left the policy over-confident (real entropy ~0.22, exploit-only), so `entropy_coef` was raised (0.01 → 0.025) to restore the exploration it needs to actually surpass the teacher. Still on the trainer-wheels list (deferred): annealing the soft **bias masks** out of the action logits. Legality masks stay forever.
 
 ---
 
