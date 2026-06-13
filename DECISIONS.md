@@ -51,6 +51,26 @@ overrides one at a time. Legality masks stay forever; bias masks are the
 trainer wheels that come off. BC can never exceed the teacher — the anneal
 to zero is what lets PPO surpass it.
 
+### Path A: policy authority (the override lift, finally done) — 06-13
+A 4-agent deep audit found the lift in the BC-kickstart plan above was never
+actually executed: `_action_to_api_call` still let the heuristic re-decide
+play-vs-discard, which exact cards, and **scan the whole shop to buy "the best"
+joker over the net's pick**. PPO trained on the heuristic's action, so the
+policy had zero causal stake — it imitated the teacher to the teacher's ceiling
+(~mean ante 4) and then *regressed* (4.0 → 3.4); entropy sat flat ~2.6.
+**Fix (`self.policy_authority`, default True):** the policy now executes its own
+judgment calls — play-vs-discard and which joker to buy. The heuristic is
+demoted to **tactical computation** (the best *cards* for the policy's chosen
+action) + hard-legality guards (affordability, BAD/must-buy jokers). This is the
+correct NN-for-judgment / heuristic-for-computation split. **Expect performance
+to drop first**, then climb past the old ceiling — the policy is taking over
+decisions the heuristic used to make perfectly. Flip the flag to revert.
+Also fixed in the same batch: a non-learnable `ln(19)` target-entropy constant
+that *pinned* entropy (gate target log-prob/entropy on "type has a target", like
+the card bits); `REWARD_HAND_HIGH_WATER` farms chips in Phase 1 so it's Phase-2
+only; the blind-clear score-ratio read post-SHOP chips (always 0); and a
+cross-env `_verdant_leaf_sold` state leak. See Context Keeper `dec-010`.
+
 ### Multi-instance training: one brain, many bodies
 N parallel Balatro games (ports 12346+) feed ONE network. Per-env
 `RolloutBuffer`s keep amend-last credits and GAE temporal adjacency correct;
