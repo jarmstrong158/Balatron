@@ -9,7 +9,7 @@ core logic. The machine-queryable mirror lives in `.context/` (Context Keeper).
 ## Architecture & Design Decisions
 
 ### Hybrid: PPO policy on top of a heuristic layer
-The agent is **not** pure RL. A PPO actor-critic (817-dim state → shared trunk
+The agent is **not** pure RL. A PPO actor-critic (833-dim state → shared trunk
 → 3 state-specific policy heads + value head, ReLU) makes the *judgment* calls
 (shop strategy, when to leave, risk, build direction), while a heavy heuristic
 layer (`hand_eval.py`, `action_space.py`, shop logic in `train.py`) computes the

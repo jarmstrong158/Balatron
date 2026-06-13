@@ -49,6 +49,11 @@ SHOP_VOUCHER_SIZE = 5
 SHOP_VOUCHER_SLOTS = 2
 SHOP_PACK_SIZE = 5
 SHOP_PACK_SLOTS = 2
+# Shop-decision context (06-13): marginal-value + build-state signals so the
+# policy can make INFORMED shop buys (which joker, reroll, leave) under Path A,
+# instead of choosing from raw joker fingerprints with no "how much does this
+# help MY build / am I keeping pace" context. Populated during SHOP only.
+SHOP_CONTEXT_SIZE = 16
 
 STATE_VECTOR_SIZE = (
     GAME_META_SIZE
@@ -62,6 +67,7 @@ STATE_VECTOR_SIZE = (
     + SHOP_VOUCHER_SLOTS * SHOP_VOUCHER_SIZE
     + SHOP_PACK_SLOTS * SHOP_PACK_SIZE
     + HAND_EVAL_FEATURES  # 40 hand evaluation features
+    + SHOP_CONTEXT_SIZE   # 16 shop-decision context features
 )
 
 # Rank/suit mappings for dense encoding
@@ -977,6 +983,9 @@ class GameStateManager:
         # Section 9: Hand Evaluation Features (40)
         offset = self._encode_hand_eval(vec, offset, raw)
 
+        # Section 10: Shop-Decision Context (16)
+        offset = self._encode_shop_context(vec, offset, raw)
+
         assert offset == STATE_VECTOR_SIZE, f"Vector size mismatch: {offset} != {STATE_VECTOR_SIZE}"
         return vec
 
@@ -1668,6 +1677,108 @@ class GameStateManager:
             except Exception:
                 pass  # leave as zeros on error
         return offset + HAND_EVAL_FEATURES
+
+    def _encode_shop_context(self, vec: np.ndarray, offset: int, raw: dict) -> int:
+        """Encode shop-decision context (16 floats), populated during SHOP only.
+
+        Under Path A the policy owns the shop buy/reroll/leave decisions, but
+        from the raw shop-joker fingerprints alone it has no sense of how much
+        each joker improves ITS build or whether it's keeping pace. These
+        features surface the computed signals (marginal value, build power,
+        coverage, economy/slot pressure) so the judgment is informed. Zero
+        outside SHOP, mirroring the hand-eval block's play-only gating.
+
+        Layout: [0-2] per-shop-joker relative value (slots 0-2),
+        [3] build power (log), [4-9] coverage chip/mult/xmult/econ/scaling/
+        retrigger, [10] slots-used ratio, [11] reroll headroom, [12] best
+        shop value, [13] has-any-scoring-joker, [14] ante, [15] #positive/3.
+        """
+        end = offset + SHOP_CONTEXT_SIZE
+        try:
+            if raw.get("state", "") != "SHOP":
+                return end  # irrelevant outside the shop — leave zeros
+
+            from environment.action_space import (
+                _estimate_joker_value, _joker_is_scoring, _api_key_to_name,
+                _is_non_joker_card,
+            )
+            from environment.hand_eval import estimate_score_for_hand_type
+            from data.jokers import JOKERS
+
+            jokers_raw = raw.get("jokers", {}).get("cards", [])
+            joker_count = len(jokers_raw)
+            joker_limit = raw.get("jokers", {}).get("limit", 5) or 5
+            money = raw.get("money", 0)
+            reroll_cost = raw.get("round", {}).get("reroll_cost", 5) or 5
+            ante = raw.get("ante_num", 1)
+            shop_cards = raw.get("shop", {}).get("cards", [])
+
+            try:
+                build_power = float(estimate_score_for_hand_type(jokers_raw, raw))
+            except Exception:
+                build_power = 0.0
+
+            # [0-2] per-shop-joker relative value; [12] best; [15] #positive
+            rel_vals = []
+            for si in range(3):
+                rv = 0.0
+                if si < len(shop_cards):
+                    sc = shop_cards[si]
+                    try:
+                        if not _is_non_joker_card(sc):
+                            delta = float(_estimate_joker_value(sc, jokers_raw, raw))
+                            rv = min(delta / max(build_power, 1.0), 3.0) / 3.0
+                    except Exception:
+                        rv = 0.0
+                vec[offset + si] = rv
+                rel_vals.append(rv)
+            vec[offset + 12] = max(rel_vals) if rel_vals else 0.0
+            vec[offset + 15] = sum(1 for v in rel_vals if v > 0) / 3.0
+
+            # [3] build power (log-normalized)
+            vec[offset + 3] = _log_norm(build_power)
+
+            # [4-9] coverage flags + [13] has scoring joker
+            flags = {"chip": False, "mult": False, "xmult": False,
+                     "econ": False, "scaling": False, "retrig": False,
+                     "scoring": False}
+            for jc in jokers_raw:
+                try:
+                    if _joker_is_scoring(jc):
+                        flags["scoring"] = True
+                    name = _api_key_to_name(jc.get("key", ""))
+                    if not name or name not in JOKERS:
+                        continue
+                    s = JOKERS[name]
+                    if s.get("chip") or s.get("chip_scaling"):
+                        flags["chip"] = True
+                    if s.get("mult") or s.get("mult_scaling"):
+                        flags["mult"] = True
+                    if s.get("xmult") or s.get("xmult_scaling"):
+                        flags["xmult"] = True
+                    if s.get("economy") or (s.get("money_per_round") or 0) > 0:
+                        flags["econ"] = True
+                    if (s.get("scaling_increment") or 0) > 0:
+                        flags["scaling"] = True
+                    if s.get("retrigger_effect"):
+                        flags["retrig"] = True
+                except Exception:
+                    continue
+            vec[offset + 4] = 1.0 if flags["chip"] else 0.0
+            vec[offset + 5] = 1.0 if flags["mult"] else 0.0
+            vec[offset + 6] = 1.0 if flags["xmult"] else 0.0
+            vec[offset + 7] = 1.0 if flags["econ"] else 0.0
+            vec[offset + 8] = 1.0 if flags["scaling"] else 0.0
+            vec[offset + 9] = 1.0 if flags["retrig"] else 0.0
+            vec[offset + 13] = 1.0 if flags["scoring"] else 0.0
+
+            # [10] slot pressure, [11] reroll headroom, [14] ante
+            vec[offset + 10] = min(joker_count / max(joker_limit, 1), 1.0)
+            vec[offset + 11] = min(money / max(reroll_cost, 1), 5.0) / 5.0
+            vec[offset + 14] = min(ante / 8.0, 1.5)
+        except Exception:
+            pass  # never crash the encoder
+        return end
 
     def get_current_state_name(self) -> Optional[str]:
         """Get current BalatroBot game state name."""

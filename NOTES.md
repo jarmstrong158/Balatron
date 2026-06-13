@@ -55,7 +55,7 @@ balatron/
 
 ---
 
-## State Vector Layout (817 floats)
+## State Vector Layout (833 floats)
 
 Section sizes are the constants in `environment/game_state.py`;
 `STATE_VECTOR_SIZE` is their sum. That file is authoritative for the
@@ -75,8 +75,10 @@ exact per-field encoding — keep the totals below in sync with it.
  9   Shop Vouchers         10    2 slots × 5 fields
 10   Shop Packs            10    2 slots × 5 fields
 11   Hand-Eval Features    40    scoring/risk features (indices 777–816)
+12   Shop Context          16    marginal joker value / build coverage /
+                                 economy — SHOP only (indices 817–832)
      ----------------------------------------------------------------
-     TOTAL                817
+     TOTAL                833
 ```
 
 ### State Vector Design Notes
@@ -171,10 +173,10 @@ Invalid actions are masked to -inf before softmax so the network can only pick l
 ## Network Architecture (2.11M parameters)
 
 ```
-Input (817)
+Input (833)
   |
   Shared Trunk (3 layers, LayerNorm + ReLU each):
-    817 -> 768 (628K params)
+    833 -> 768 (641K params)
     768 -> 768 (591K params)
     768 -> 512 (394K params)
   |
@@ -366,7 +368,7 @@ cards, hand, shop, vouchers, packs, pack
 
 - **Phase:** Live training — Phase 1 in progress
 - **data/jokers.py:** COMPLETE — 150 jokers, validation, tier_weights pending
-- **environment/game_state.py:** COMPLETE — API client, EventDetector, ScalingTracker, 817-float state vector
+- **environment/game_state.py:** COMPLETE — API client, EventDetector, ScalingTracker, 833-float state vector
 - **environment/action_space.py:** COMPLETE — 14 action types, 45-dim head, masking, ActionDecoder
 - **environment/reward.py:** COMPLETE — 4-tier shaped rewards, log-scaled, RewardConfig
 - **agent/network.py:** COMPLETE — 1.88M params, shared trunk, 3 policy heads + value head
