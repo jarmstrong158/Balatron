@@ -312,12 +312,26 @@ class BalatronNetwork(nn.Module):
         # nats) at no-op bits instead of the action-type head.
         card_used = (type_action == 8).float()
 
+        # Gate the target dimension the same way as the cards. Action types
+        # WITHOUT a real target (play, discard, reroll, blind select/skip,
+        # skip pack, end shop) get a constant uniform target dist from
+        # _condition_target_on_action — a non-learnable ln(NUM_TARGETS)≈2.9-nat
+        # term with ZERO gradient. Folding it into the totals unconditionally
+        # pinned total_entropy at a fixed ~2.9 floor (the "entropy flat ~2.6,
+        # never converging" symptom) and wasted the entropy budget on a no-op
+        # dimension. Gate it off for no-target types so entropy reflects the
+        # heads that can actually learn. (audit 06-13 CRITICAL)
+        target_used = torch.zeros_like(card_used)
+        for _at in ACTION_TARGET_RANGES:
+            target_used = target_used + (type_action == _at).float()
+
         # Log probabilities
         type_log_prob = type_dist.log_prob(type_action)
         card_log_prob = card_dist.log_prob(card_action).sum(dim=-1)
         target_log_prob = cond_target_dist.log_prob(target_action)
 
-        total_log_prob = type_log_prob + card_used * card_log_prob + target_log_prob
+        total_log_prob = (type_log_prob + card_used * card_log_prob
+                          + target_used * target_log_prob)
 
         # Entropy — target entropy uses the CONDITIONED dist (the one that
         # is actually sampled from); the unconditional dist pushed mass
@@ -326,7 +340,8 @@ class BalatronNetwork(nn.Module):
         card_entropy = card_dist.entropy().sum(dim=-1)
         target_entropy = cond_target_dist.entropy()
 
-        total_entropy = type_entropy + card_used * card_entropy + target_entropy
+        total_entropy = (type_entropy + card_used * card_entropy
+                         + target_used * target_entropy)
 
         return action, total_log_prob, total_entropy, value
 

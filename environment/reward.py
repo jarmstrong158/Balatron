@@ -330,9 +330,11 @@ class RewardCalculator:
                             reward += REWARD_BOSS_BLIND_CLEARED
                         break
 
-            # Score ratio bonus — how much did we exceed the target?
-            round_data = new_state.get("round", {})
-            score = round_data.get("chips", 0)
+            # Score ratio bonus — how much did we exceed the target? Read the
+            # cleared-round score from PREV state (SELECTING_HAND): on the SHOP
+            # transition new_state.round.chips has already reset to 0, so the
+            # bonus was silently never paid (audit 06-13 RISK).
+            score = prev_state.get("round", {}).get("chips", 0)
             target = self._get_blind_target(prev_state)
             if target > 0 and score > 0:
                 ratio = score / target
@@ -387,7 +389,11 @@ class RewardCalculator:
         old_best = self._max_hand_score
         self._max_hand_score = gained
         phi_delta = math.log10(gained + 1) - math.log10(old_best + 1)
-        phase_mult = 3.0 if self.phase == 2 else 1.0
+        # Phase 2 (naneinf) ONLY. In Phase 1 (depth) this paid 0.1/decade for
+        # single-hand size — a 5x-larger-per-decade chip incentive than
+        # score_progress (0.02), pulling the policy back toward comfortable
+        # early-blind chip-farming and away from depth. Audit 06-13 CRITICAL.
+        phase_mult = 3.0 if self.phase == 2 else 0.0
         return REWARD_HAND_HIGH_WATER * phi_delta * phase_mult
 
     def _check_economy(self, prev_state: dict, new_state: dict) -> float:
@@ -754,8 +760,8 @@ class ConfigurableRewardCalculator(RewardCalculator):
                             reward += w.boss_blind_cleared
                         break
 
-            round_data = new_state.get("round", {})
-            score = round_data.get("chips", 0)
+            # Read cleared score from prev_state (see base class note).
+            score = prev_state.get("round", {}).get("chips", 0)
             target = self._get_blind_target(prev_state)
             if target > 0 and score > 0:
                 ratio = score / target

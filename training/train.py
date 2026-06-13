@@ -562,6 +562,7 @@ class EnvSession:
         # Per-run flags / pending actions (mirrors _reset_run_state)
         self.win_recorded = False
         self.win_reward_stored = False
+        self._verdant_leaf_sold = False  # per-blind boss auto-sell guard (per-env)
         self.pending_upgrade_buy = None
         self.pending_rearrange = None
         self.pending_hand_rearrange = None
@@ -608,6 +609,17 @@ class Trainer:
         # env 0 owns the real recorder; rec_port=12346 lets it target env 0's
         # specific game window (not an arbitrary same-titled parallel game).
         self.recorder = RunRecorder(enabled=config.record_wins, rec_port=12346)
+
+        # POLICY AUTHORITY (real-RL mode). When True, the network's chosen
+        # action actually executes: it owns play-vs-discard and which joker to
+        # buy. The heuristic layer is demoted to TACTICAL COMPUTATION only
+        # (which exact cards score best for the chosen action, hard-legality
+        # guards) — it no longer makes the judgment calls. This is the fix for
+        # the "decorative network" finding (audit 06-13): previously the
+        # heuristic re-decided everything and PPO trained on its choices, so
+        # the policy had no causal stake and couldn't learn. Set False to
+        # revert to the legacy heuristic-drives-everything behavior.
+        self.policy_authority = True
 
         # One session per parallel game instance; env 0 owns the real
         # win recorder, the rest get no-ops.
@@ -1672,7 +1684,7 @@ class Trainer:
                     blinds_data = raw.get("blinds", {})
                     current_blind_name = ""
                     current_blind_score = 0.0
-                    self._verdant_leaf_sold = False  # reset per blind
+                    env._verdant_leaf_sold = False  # reset per blind (per-env!)
                     if isinstance(blinds_data, dict):
                         for b in blinds_data.values():
                             if isinstance(b, dict) and b.get("status") == "CURRENT":
@@ -1694,9 +1706,9 @@ class Trainer:
                     if current_blind_name == "Verdant Leaf":
                         joker_cards_vl = raw.get("jokers", {}).get("cards", [])
                         # Only sell once per blind — check if we already sold
-                        _vl_sold = getattr(self, '_verdant_leaf_sold', False)
+                        _vl_sold = getattr(env, '_verdant_leaf_sold', False)
                         if len(joker_cards_vl) > 1 and not _vl_sold:
-                            self._verdant_leaf_sold = True
+                            env._verdant_leaf_sold = True
                             from environment.action_space import (
                                 _api_key_to_name as _vl_name,
                             )
@@ -2377,6 +2389,41 @@ class Trainer:
             # the accumulated values for scaling jokers (Square, Ride the Bus, etc.)
             env.game.inject_scaling_values(jokers_raw)
 
+            # REAL-RL MODE: respect the POLICY's play-vs-discard choice. The
+            # heuristic only computes the best CARDS for that chosen action
+            # (tactical scoring math, not a judgment call). The strategic
+            # decision of WHEN to discard vs play is the policy's to learn.
+            if self.policy_authority:
+                try:
+                    if action_type == 0:  # PLAY (policy chose it)
+                        top = find_best_hands(hand_cards, jokers_raw, raw_state, top_n=1)
+                        cards = list(top[0]["card_indices"])[:5] if top else []
+                        if not cards and hand_cards:
+                            cards = [0]
+                        optimal_order = optimize_play_order(cards, hand_cards, jokers_raw)
+                        if optimal_order != sorted(optimal_order):
+                            played_set = set(optimal_order)
+                            non_played = [i for i in range(len(hand_cards))
+                                          if i not in played_set]
+                            env.pending_hand_rearrange = list(optimal_order) + non_played
+                            env.pending_hand_rearrange_fallback = list(optimal_order)
+                            cards = list(range(len(optimal_order)))
+                        else:
+                            cards = optimal_order
+                        env.pending_rearrange = (hand_cards, deck_cards)
+                        return "play", {"cards": cards}
+                    else:  # DISCARD (policy chose it)
+                        advice = find_best_discard(hand_cards, deck_cards,
+                                                   jokers_raw, raw_state)
+                        discard_indices = list(advice["discard_indices"])[:5]
+                        if not discard_indices and hand_cards:
+                            discard_indices = [0]
+                        return "discard", {"cards": discard_indices}
+                except Exception as exc:
+                    print(f"[WARN] RL card-selection failed ({exc}) — "
+                          f"falling back to planner", flush=True)
+                    # fall through to the legacy planner below
+
             try:
                 plan = plan_optimal_action(hand_cards, deck_cards, jokers_raw, raw_state)
                 action = plan["action"]
@@ -2536,6 +2583,16 @@ class Trainer:
                              shop_edition in ("POLYCHROME", "HOLO", "NEGATIVE"))
 
             if joker_count < joker_limit or is_negative:
+                # REAL-RL MODE: an open slot and the policy targeted an
+                # affordable, non-bad, non-must-buy joker (all checked above) —
+                # buy THAT one. Which joker to buy is a judgment call the policy
+                # owns; don't override it with a heuristic "best" scan.
+                if self.policy_authority:
+                    buy_name = name or joker_key
+                    print(f"[SHOP] Buying NN pick: {buy_name} (slot {target_idx})",
+                          flush=True)
+                    return "buy", {"card": target_idx}
+
                 # Open slot — scan ALL shop jokers and buy the best one,
                 # not just whichever one the NN happened to pick.
                 shop_cards_all = raw_state.get("shop", {}).get("cards", [])
