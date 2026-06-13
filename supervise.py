@@ -84,9 +84,17 @@ CHECKPOINT_GLOB = os.path.join(REPO, "checkpoints",
 # be breached for SUSTAIN consecutive updates so a single deep-run dip (one
 # long ante-8 boss update) doesn't trip it — real degradation is monotonic
 # and stays under. The 1817->250 settle never touches 40, so no early trip.
-FPS_RECYCLE_FLOOR = 40           # recycle when FPS is genuinely low
+FPS_RECYCLE_FLOOR = 40           # recycle when FPS is genuinely low (<=)
 FPS_RECYCLE_SUSTAIN = 3          # ... for this many consecutive updates
 RECYCLE_MIN_AGE_S = 1800         # never recycle a trainer younger than 30min
+# Hard age backstop. The FPS-floor recycle proved too slow/brittle overnight
+# 06-13: the trainer's fresh peak was unusually low (~334, not ~2000), it
+# decayed through the floor with a value landing exactly on 40 (breaking the
+# "consecutive < 40" streak), and once FPS is low each update takes ~an hour,
+# so the streak completes hours late. The trainer crawled 7.5h at FPS ~27.
+# This backstop recycles ANY trainer older than the limit regardless of FPS,
+# so it can never crawl all night. Resume-from-checkpoint is cheap.
+MAX_TRAINER_AGE_S = 10800        # 3h hard cap on a trainer's lifetime
 
 
 def log(msg: str):
@@ -220,6 +228,25 @@ def newest_checkpoint_age() -> float:
     if not cps:
         return 0.0
     return time.time() - max(os.path.getmtime(p) for p in cps)
+
+
+def trainer_age_s() -> float:
+    """Seconds since the current trainer started, parsed from its log
+    filename (trainer_<YYYYMMDDTHHMMSS>.log). Robust across supervisor
+    restarts (trainer_seen_at resets when the supervisor restarts, which
+    would hide a long-lived trainer's true age). 0 if unknown."""
+    logs = glob.glob(os.path.join(LOG_DIR, "trainer_*.log"))
+    if not logs:
+        return 0.0
+    newest = max(logs, key=os.path.getmtime)
+    m = re.search(r"trainer_(\d{8}T\d{6})\.log", os.path.basename(newest))
+    if not m:
+        return 0.0
+    try:
+        start = datetime.datetime.strptime(m.group(1), "%Y%m%dT%H%M%S")
+        return (datetime.datetime.now() - start).total_seconds()
+    except ValueError:
+        return 0.0
 
 
 def trainer_recent_fps(n: int):
@@ -359,28 +386,35 @@ def main():
                     if trainer_seen_at is None:
                         trainer_seen_at = time.time()
 
-                    # Degradation recycle: a mature trainer whose per-update
-                    # FPS has sat below the absolute floor for SUSTAIN
-                    # consecutive updates gets a clean full-stack restart (same
-                    # mechanism as the FROZEN path) to reset the ~1/n decay.
-                    # Absolute floor + sustained-breach (not peak-relative)
-                    # avoids recycling the healthy ~250 settle and ignores
-                    # one-off deep-run dips.
-                    trainer_age = time.time() - trainer_seen_at
-                    if trainer_age > RECYCLE_MIN_AGE_S:
-                        recent = trainer_recent_fps(FPS_RECYCLE_SUSTAIN)
-                        if (len(recent) >= FPS_RECYCLE_SUSTAIN
-                                and all(v < FPS_RECYCLE_FLOOR for v in recent)):
-                            log(f"trainer pid {pid} FPS {recent} below floor "
-                                f"{FPS_RECYCLE_FLOOR} for {FPS_RECYCLE_SUSTAIN} "
-                                f"updates after {int(trainer_age / 60)}min — "
-                                f"recycling stack")
-                            kill_trainer(pid)
-                            kill_strays()
-                            step_samples.clear()
-                            trainer_seen_at = None
-                            time.sleep(3)
-                            continue
+                    # Degradation recycle: clean full-stack restart (same
+                    # mechanism as the FROZEN path) to reset the ~1/n FPS
+                    # decay. Two triggers:
+                    #   (a) AGE BACKSTOP — any trainer older than the hard cap,
+                    #       regardless of FPS. The reliable safety net (the FPS
+                    #       trigger was too slow/brittle overnight 06-13).
+                    #   (b) FPS FLOOR — FPS <= floor for SUSTAIN consecutive
+                    #       updates: a faster catch for fast degradation. Uses
+                    #       <= so a value landing exactly on the floor still
+                    #       counts (a strict < let the streak reset and the
+                    #       trainer crawled all night).
+                    t_age = trainer_age_s()
+                    recent = trainer_recent_fps(FPS_RECYCLE_SUSTAIN)
+                    fps_degraded = (
+                        t_age > RECYCLE_MIN_AGE_S
+                        and len(recent) >= FPS_RECYCLE_SUSTAIN
+                        and all(v <= FPS_RECYCLE_FLOOR for v in recent)
+                    )
+                    if t_age > MAX_TRAINER_AGE_S or fps_degraded:
+                        why = (f"age {t_age/3600:.1f}h > {MAX_TRAINER_AGE_S/3600:.0f}h cap"
+                               if t_age > MAX_TRAINER_AGE_S
+                               else f"FPS {recent} <= floor {FPS_RECYCLE_FLOOR}")
+                        log(f"trainer pid {pid} {why} — recycling stack")
+                        kill_trainer(pid)
+                        kill_strays()
+                        step_samples.clear()
+                        trainer_seen_at = None
+                        time.sleep(3)
+                        continue
 
                     # Liveness: a trainer that exists but has made zero
                     # environment steps in HEARTBEAT_STALE_S is wedged
