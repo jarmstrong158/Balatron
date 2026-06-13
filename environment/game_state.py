@@ -864,8 +864,13 @@ class GameStateManager:
         self.api_url = f"http://127.0.0.1:{port}"
 
     async def connect(self):
-        """Open HTTP session."""
-        self._session = aiohttp.ClientSession()
+        """Open HTTP session. force_close: don't reuse keep-alive connections
+        the BalatroBot server may have already dropped — stale-connection reuse
+        is the main source of the 'Server disconnected' churn that stalled
+        training (361 in one 1.3h run)."""
+        self._session = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(force_close=True)
+        )
 
     async def disconnect(self):
         """Close HTTP session."""
@@ -895,8 +900,19 @@ class GameStateManager:
 
     async def _rpc_call(self, method: str, params: Optional[dict] = None,
                         timeout_s: float = 30.0) -> dict:
-        """Make a JSON-RPC 2.0 call to BalatroBot."""
+        """Make a JSON-RPC 2.0 call to BalatroBot, retrying transient drops.
+
+        A dropped/stale connection (ServerDisconnectedError) used to fail the
+        action outright and, after a few in a row, escalate to a full game
+        restart — the dominant source of throughput churn (the trainer spent
+        its life in crash-recovery at ~22 steps/min). We now rebuild the
+        session and retry, so a transient drop is transparent and ONLY a
+        genuinely-down server (actually-crashed game) falls through to the
+        restart path. A BalatroBot 'error' result (e.g. INVALID_STATE) is a
+        valid response and is NOT retried.
+        """
         import aiohttp
+        import asyncio
 
         payload = {
             "jsonrpc": "2.0",
@@ -907,11 +923,30 @@ class GameStateManager:
             payload["params"] = params
 
         timeout = aiohttp.ClientTimeout(total=timeout_s)
-        async with self._session.post(self.api_url, json=payload, timeout=timeout) as resp:
-            data = await resp.json()
-            if "error" in data:
-                raise RuntimeError(f"BalatroBot error: {data['error']}")
-            return data.get("result", {})
+        last_exc: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                if self._session is None or self._session.closed:
+                    await self.connect()
+                async with self._session.post(
+                        self.api_url, json=payload, timeout=timeout) as resp:
+                    data = await resp.json()
+                    if "error" in data:
+                        raise RuntimeError(f"BalatroBot error: {data['error']}")
+                    return data.get("result", {})
+            except (aiohttp.ClientConnectionError,
+                    aiohttp.ServerDisconnectedError) as e:
+                # Stale/dropped connection — rebuild the session and retry.
+                last_exc = e
+                try:
+                    await self.disconnect()
+                except Exception:
+                    self._session = None
+                if attempt < 2:
+                    await asyncio.sleep(0.15 * (attempt + 1))
+        # All retries exhausted: the server is genuinely unreachable. Surface
+        # the original error so the caller's crash-recovery path triggers.
+        raise last_exc if last_exc is not None else RuntimeError("rpc failed")
 
     async def fetch_gamestate(self) -> dict:
         """Fetch current game state from BalatroBot API.
