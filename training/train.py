@@ -85,7 +85,12 @@ class TrainConfig:
     gamma: float = 0.995
     gae_lambda: float = 0.95
     clip_epsilon: float = 0.2
-    entropy_coef: float = 0.01
+    entropy_coef: float = 0.025  # 0.01 -> 0.025 (06-13): post-BC the policy was
+                                 # over-confident (real entropy ~0.22, ~exploit-
+                                 # only) so under Path A it couldn't EXPLORE to
+                                 # surpass the heuristic. Bumped to push entropy
+                                 # toward ~0.6-0.8. Watch: if it doesn't rise,
+                                 # go 0.04; if play turns erratic, dial back.
     value_coef: float = 0.5
     # 8 epochs: rollouts cost ~25 min of live game, the update costs
     # seconds — extract more learning per rollout, target_kl bounds drift.
