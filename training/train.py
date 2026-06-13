@@ -562,6 +562,7 @@ class EnvSession:
         # Per-run flags / pending actions (mirrors _reset_run_state)
         self.win_recorded = False
         self.win_reward_stored = False
+        self.win_video_saved = False
         self.pending_upgrade_buy = None
         self.pending_rearrange = None
         self.pending_hand_rearrange = None
@@ -605,7 +606,9 @@ class Trainer:
         self.ppo = PPOTrainer(self.network, config.to_ppo_config())
         self.action_decoder = ActionDecoder()
         self.episode_tracker = EpisodeTracker()
-        self.recorder = RunRecorder(enabled=config.record_wins)
+        # env 0 owns the real recorder; rec_port=12346 lets it target env 0's
+        # specific game window (not an arbitrary same-titled parallel game).
+        self.recorder = RunRecorder(enabled=config.record_wins, rec_port=12346)
 
         # One session per parallel game instance; env 0 owns the real
         # win recorder, the rest get no-ops.
@@ -660,6 +663,7 @@ class Trainer:
         """
         env.win_recorded = False
         env.win_reward_stored = False
+        env.win_video_saved = False
         env.pending_upgrade_buy = None
         env.pending_rearrange = None
         env.pending_hand_rearrange = None
@@ -953,8 +957,36 @@ class Trainer:
                     env.last_transition = None
                     print(f"[WIN] Credited terminal win reward "
                           f"{win_reward:+.2f} to last transition", flush=True)
-                # DON'T end recording here — let GAME_OVER handle it so the
-                # winning hand, scoring animation, and win screen get captured
+
+                # Save the win clip NOW, at the moment of victory. The
+                # boss-beating hand and its scoring just played (we detect the
+                # win one state later, in the post-boss SHOP). In endless mode
+                # the run CONTINUES to an eventual loss, so waiting for
+                # GAME_OVER would film the death and name the file with the
+                # losing ante/score (e.g. win_ante10_score104095 for a death at
+                # ante 10). ante-1 = the ante actually cleared to win; prefer
+                # the boss-clearing score from prev_raw, falling back to the
+                # current state. The GAME_OVER block below is guarded by
+                # win_video_saved so it won't re-save (ffmpeg is already stopped
+                # anyway).
+                if not env.win_video_saved:
+                    cleared_ante = max(ante - 1, 8)
+                    win_score = int(
+                        (prev_raw or {}).get("round", {}).get("chips", 0)
+                        or raw_state.get("round", {}).get("chips", 0)
+                    )
+                    await asyncio.sleep(1.5)  # let the win animation finish
+                    env.recorder.end_run(
+                        won=True,
+                        ante_reached=cleared_ante,
+                        final_score=win_score,
+                        checkpoint_path=os.path.join(
+                            self.config.checkpoint_dir,
+                            f"balatron_phase{self.config.phase}_step{self.global_step}.pt",
+                        ),
+                        total_steps=self.global_step,
+                    )
+                    env.win_video_saved = True
 
             # Handle GAME_OVER — end episode, start new one
             if game_state_name == "GAME_OVER":
@@ -1016,19 +1048,23 @@ class Trainer:
                     self.episode_tracker.end_episode(won, raw_state, env_id=env.env_id)
                 # End recording — save if won, discard if lost
                 # Wait a moment on wins so the win screen / final scoring
-                # animation gets captured before ffmpeg stops
-                if won:
-                    await asyncio.sleep(3.0)
-                env.recorder.end_run(
-                    won=won,
-                    ante_reached=ante,
-                    final_score=int(raw_state.get("round", {}).get("chips", 0)),
-                    checkpoint_path=os.path.join(
-                        self.config.checkpoint_dir,
-                        f"balatron_phase{self.config.phase}_step{self.global_step}.pt",
-                    ),
-                    total_steps=self.global_step,
-                )
+                # animation gets captured before ffmpeg stops. Skip entirely if
+                # the win clip was already saved at the moment of victory (the
+                # endless run keeps going to a loss; we don't want to film the
+                # death or re-name the file with the losing score).
+                if not env.win_video_saved:
+                    if won:
+                        await asyncio.sleep(3.0)
+                    env.recorder.end_run(
+                        won=won,
+                        ante_reached=ante,
+                        final_score=int(raw_state.get("round", {}).get("chips", 0)),
+                        checkpoint_path=os.path.join(
+                            self.config.checkpoint_dir,
+                            f"balatron_phase{self.config.phase}_step{self.global_step}.pt",
+                        ),
+                        total_steps=self.global_step,
+                    )
 
                 env.reward_calc.reset()
                 env.game.reset()

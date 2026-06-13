@@ -25,8 +25,16 @@ class RunRecorder:
     NOTABLE_ANTE_THRESHOLD = 7  # Save runs that reach this ante even on loss
     MAX_NOTABLE_FILES = 10  # Keep only the N best notable recordings
 
-    def __init__(self, enabled: bool = True):
+    # All parallel game instances share the window title "Balatro", so
+    # ffmpeg's `title=Balatro` capture would grab an ARBITRARY instance — not
+    # the one whose wins we record (env 0). Before each recording we rename
+    # env 0's game window to a unique title and capture THAT.
+    GAME_WINDOW_TITLE = "Balatro"        # default title every instance shows
+    REC_WINDOW_TITLE = "Balatro-REC"     # unique title we stamp on env 0
+
+    def __init__(self, enabled: bool = True, rec_port: int = 12346):
         self.enabled = enabled
+        self.rec_port = rec_port  # the port whose game window we record (env 0)
         self._process: subprocess.Popen | None = None
         self._temp_path: str | None = None
         self._run_start_time: float = 0.0
@@ -64,6 +72,56 @@ class RunRecorder:
         except OSError:
             pass
 
+    @staticmethod
+    def _pid_for_port(port: int):
+        """PID listening on `port`, or None. Used to find env 0's game."""
+        try:
+            import psutil
+            for c in psutil.net_connections(kind="inet"):
+                if c.laddr and c.laddr.port == port and c.status == "LISTEN":
+                    return c.pid
+        except Exception:
+            pass
+        return None
+
+    def _retitle_record_window(self) -> str:
+        """Stamp a unique title on env 0's game window so ffmpeg captures THIS
+        instance, not an arbitrary same-titled parallel game. Renames only the
+        window currently titled "Balatro" (the game) for env 0's PID — never
+        the "Lovely x.y.z" mod console that shares the PID. Returns the title
+        ffmpeg should target: the unique one on success, the shared title as a
+        graceful fallback (so a single-instance run still records)."""
+        try:
+            import ctypes
+            import ctypes.wintypes as wt
+
+            pid = self._pid_for_port(self.rec_port)
+            if pid is None:
+                return self.GAME_WINDOW_TITLE
+
+            user32 = ctypes.windll.user32
+            found = []
+
+            EnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+
+            def _cb(hwnd, _lparam):
+                wpid = wt.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+                if wpid.value == pid and user32.IsWindowVisible(hwnd):
+                    buf = ctypes.create_unicode_buffer(256)
+                    user32.GetWindowTextW(hwnd, buf, 256)
+                    # Only the game window (skip the "Lovely ..." console).
+                    if buf.value in (self.GAME_WINDOW_TITLE, self.REC_WINDOW_TITLE):
+                        if buf.value != self.REC_WINDOW_TITLE:
+                            user32.SetWindowTextW(hwnd, self.REC_WINDOW_TITLE)
+                        found.append(hwnd)
+                return True
+
+            user32.EnumWindows(EnumProc(_cb), 0)
+            return self.REC_WINDOW_TITLE if found else self.GAME_WINDOW_TITLE
+        except Exception:
+            return self.GAME_WINDOW_TITLE
+
     def start_run(self):
         """Start recording a new run."""
         if not self.enabled:
@@ -77,13 +135,17 @@ class RunRecorder:
         self._temp_path = os.path.join(self.TEMP_DIR, f"temp_{ts}.mp4")
         self._run_start_time = time.monotonic()
 
+        # Rename env 0's game window to a unique title and capture THAT, so
+        # multi-instance runs don't film the wrong game (see method docstring).
+        capture_title = self._retitle_record_window()
+
         try:
-            # Capture the Balatro window directly by title
+            # Capture env 0's game window directly by its (now unique) title
             cmd = [
                 "ffmpeg",
                 "-f", "gdigrab",
                 "-framerate", "30",
-                "-i", "title=Balatro",
+                "-i", f"title={capture_title}",
                 "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",  # ensure even dimensions for libx264
                 "-vcodec", "libx264",
                 "-pix_fmt", "yuv420p",  # Windows-compatible pixel format
