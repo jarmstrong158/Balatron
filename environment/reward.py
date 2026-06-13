@@ -24,20 +24,24 @@ from typing import Optional
 # ============================================================
 
 # Terminal rewards
-REWARD_GAME_WIN = 10.0           # Cleared Ante 8 (Phase 1 goal)
+REWARD_GAME_WIN = 15.0           # Cleared Ante 8 (Phase 1 goal) — largest single signal
 REWARD_GAME_LOSS = -5.0          # Game over base penalty (harsh — dying is bad)
 REWARD_NANEINF = 50.0            # Achieved naneinf (Phase 2 goal)
 REWARD_PER_ANTE_SURVIVED = 0.3   # Bonus per ante reached before dying (less forgiveness)
 
 # Ante/round rewards
 REWARD_ANTE_CLEARED = 3.0        # Base reward for clearing an ante
-REWARD_ANTE_SCALING = 0.5        # Additional per ante number (ante 5 = 3.0 + 5*0.5 = 5.5)
+REWARD_ANTE_SCALING = 1.0        # Additional per ante number (ante 7 = 3.0 + 7*1.0 = 10.0) — steepen depth gradient
 REWARD_BLIND_CLEARED = 1.0       # Base reward for clearing any blind
 REWARD_BOSS_BLIND_CLEARED = 1.5  # Extra reward for boss blind
 
 # Score rewards (log-scaled)
 REWARD_SCORE_RATIO = 0.5         # Multiplied by log10(score / target) when clearing
-REWARD_SCORE_PROGRESS = 0.1      # Per-action: log10(chips_gained) during round
+REWARD_SCORE_PROGRESS = 0.02     # Per-action: log10(chips_gained) during round.
+                                 # Cut 0.1->0.02: was the dominant dense reward,
+                                 # paying for comfortable mid-game scoring the
+                                 # heuristics already do (the ante-4 plateau). Now
+                                 # a nudge so depth/win rewards dominate the signal.
 REWARD_HAND_HIGH_WATER = 0.1     # Per log10-DECADE when a new best single-hand
                                  # score is set this run. Potential-delta (only
                                  # the increase is paid, so the run telescopes
@@ -47,7 +51,7 @@ REWARD_HAND_HIGH_WATER = 0.1     # Per log10-DECADE when a new best single-hand
                                  # (A/B vs REWARD_SCORE_PROGRESS).
 
 # Economy rewards
-REWARD_MONEY_GAIN = 0.02         # Per dollar gained
+REWARD_MONEY_GAIN = 0.01         # Per dollar gained (halved — economy is a means to depth, not the goal)
 REWARD_MONEY_LOSS = -0.01        # Per dollar spent (lighter penalty — spending is necessary)
 REWARD_INTEREST_THRESHOLD = 0.01 # Bonus for maintaining $5+ increments (interest)
 
