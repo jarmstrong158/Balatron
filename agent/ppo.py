@@ -79,7 +79,11 @@ class PPOConfig:
     # the decision once it anneals out. Longer anneal than BC because we are
     # removing a far stronger crutch.
     prior_coef: float = 0.5          # Initial prior-KL weight (0 disables)
-    prior_anneal_updates: int = 400  # Updates to anneal prior_coef -> 0
+    prior_anneal_updates: int = 250  # Updates to anneal prior_coef -> 0. 400->250
+                                     # (06-14): policy absorbed the mask lift w/o
+                                     # cratering and already converged to the prior
+                                     # (prior-KL 0.40->0.11), so the teacher can be
+                                     # released ~2x sooner to start the surpass phase.
 
     # Device
     device: str = "cpu"              # "cpu" or "cuda"
