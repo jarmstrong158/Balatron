@@ -70,6 +70,17 @@ class PPOConfig:
     bc_coef: float = 0.5             # Initial BC loss weight (0 disables)
     bc_anneal_updates: int = 200     # Updates to anneal bc_coef -> 0
 
+    # Heuristic prior-KL (06-13 audit, dec-015): re-homes the guidance the
+    # bias mask used to inject directly into the logits. KL pull of the policy
+    # TYPE distribution toward the heuristic's masked preference, annealed
+    # linearly to zero over prior_anneal_updates (anchored at first engage,
+    # persisted in checkpoints). Replaces the in-softmax ±4-5 nat prior that
+    # floored entropy; lets the policy keep heuristic guidance early and own
+    # the decision once it anneals out. Longer anneal than BC because we are
+    # removing a far stronger crutch.
+    prior_coef: float = 0.5          # Initial prior-KL weight (0 disables)
+    prior_anneal_updates: int = 400  # Updates to anneal prior_coef -> 0
+
     # Device
     device: str = "cpu"              # "cpu" or "cuda"
 
@@ -297,6 +308,10 @@ class PPOTrainer:
         self.bc_start_update: Optional[int] = None
         self._bc_coef_now = 0.0
 
+        # Heuristic prior-KL anneal anchor (mirrors bc_start_update).
+        self.prior_start_update: Optional[int] = None
+        self._prior_coef_now = 0.0
+
     def store_transition(self, state: np.ndarray, action: np.ndarray,
                          log_prob: float, reward: float, value: float,
                          done: bool, mask: np.ndarray, game_state: str,
@@ -416,6 +431,16 @@ class PPOTrainer:
             frac = max(0.0, 1.0 - elapsed / cfg.bc_anneal_updates)
             self._bc_coef_now = cfg.bc_coef * frac
 
+        # Heuristic prior-KL coefficient: linear anneal to zero, same anchor
+        # scheme as BC (so resumes continue the anneal instead of restarting).
+        self._prior_coef_now = 0.0
+        if cfg.prior_coef > 0 and cfg.prior_anneal_updates > 0:
+            if self.prior_start_update is None:
+                self.prior_start_update = self.total_updates
+            elapsed = self.total_updates - self.prior_start_update
+            frac = max(0.0, 1.0 - elapsed / cfg.prior_anneal_updates)
+            self._prior_coef_now = cfg.prior_coef * frac
+
         # PPO epochs
         metrics = {
             "policy_loss": 0.0,
@@ -424,6 +449,8 @@ class PPOTrainer:
             "bc_loss": 0.0,
             "bc_coef": self._bc_coef_now,
             "bc_fraction": float(c_bc_flags.mean()) if n > 0 else 0.0,
+            "prior_kl": 0.0,
+            "prior_coef": self._prior_coef_now,
             "total_loss": 0.0,
             "approx_kl": 0.0,
             "clip_fraction": 0.0,
@@ -464,7 +491,7 @@ class PPOTrainer:
                 # dict kept its initial 0.0 — the printed KL read 0.0000
                 # forever even when clip_fraction showed healthy drift.
                 for k in ["policy_loss", "value_loss", "entropy",
-                          "bc_loss", "total_loss", "clip_fraction",
+                          "bc_loss", "prior_kl", "total_loss", "clip_fraction",
                           "approx_kl"]:
                     metrics[k] += batch_metrics[k]
 
@@ -483,7 +510,8 @@ class PPOTrainer:
         # Average metrics
         if num_batches > 0:
             for k in ["policy_loss", "value_loss", "entropy",
-                      "bc_loss", "total_loss", "approx_kl", "clip_fraction"]:
+                      "bc_loss", "prior_kl", "total_loss", "approx_kl",
+                      "clip_fraction"]:
                 metrics[k] /= num_batches
 
         # Explained variance (over the combined set)
@@ -522,6 +550,7 @@ class PPOTrainer:
         new_log_probs = torch.zeros(batch_size, device=self.device)
         entropy = torch.zeros(batch_size, device=self.device)
         new_values = torch.zeros(batch_size, device=self.device)
+        prior_kl = torch.zeros(batch_size, device=self.device)
 
         for h_idx in range(3):
             head_mask = head_indices == h_idx
@@ -532,13 +561,15 @@ class PPOTrainer:
             h_actions = actions[head_mask]
             h_masks = masks[head_mask]
 
-            _, h_log_probs, h_entropy, h_values = self.network.get_action_and_value(
-                h_states, h_idx, h_masks, action=h_actions
-            )
+            _, h_log_probs, h_entropy, h_values, h_prior_kl = \
+                self.network.get_action_and_value(
+                    h_states, h_idx, h_masks, action=h_actions
+                )
 
             new_log_probs[head_mask] = h_log_probs
             entropy[head_mask] = h_entropy
             new_values[head_mask] = h_values
+            prior_kl[head_mask] = h_prior_kl
 
         # Policy loss — clipped surrogate
         log_ratio = new_log_probs - old_log_probs
@@ -589,12 +620,19 @@ class PPOTrainer:
         else:
             bc_loss = torch.zeros((), device=self.device)
 
+        # Heuristic prior-KL term (annealing teacher). Minimizing KL(prior ||
+        # policy) pulls the policy TYPE distribution toward the heuristic's
+        # masked preference — the guidance the bias mask used to inject, now
+        # as a SEPARATE term that anneals out so the policy owns the decision.
+        prior_kl_loss = prior_kl.mean()
+
         # Total loss
         total_loss = (
             policy_loss
             + cfg.value_coef * value_loss
             - cfg.entropy_coef * entropy_loss
             + self._bc_coef_now * bc_loss
+            + self._prior_coef_now * prior_kl_loss
         )
 
         # Gradient step
@@ -612,6 +650,7 @@ class PPOTrainer:
             "value_loss": value_loss.item(),
             "entropy": entropy_loss.item(),
             "bc_loss": bc_loss.item(),
+            "prior_kl": prior_kl_loss.item(),
             "total_loss": total_loss.item(),
             "approx_kl": approx_kl,
             "clip_fraction": clip_fraction,
@@ -634,6 +673,7 @@ class PPOTrainer:
             "total_updates": self.total_updates,
             "total_steps": self.total_steps,
             "bc_start_update": self.bc_start_update,
+            "prior_start_update": self.prior_start_update,
             "config": self.config,
         }, path)
 
@@ -682,6 +722,9 @@ class PPOTrainer:
         self.total_updates = checkpoint.get("total_updates", 0)
         self.total_steps = checkpoint.get("total_steps", 0)
         self.bc_start_update = checkpoint.get("bc_start_update", None)
+        # Old checkpoints predate prior-KL → None means the anneal anchors at
+        # the first update after this change deploys (full prior_coef → 0).
+        self.prior_start_update = checkpoint.get("prior_start_update", None)
 
     def get_stats(self) -> dict:
         """Get trainer statistics."""

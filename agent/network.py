@@ -241,14 +241,22 @@ class BalatronNetwork(nn.Module):
         """
         action_logits, value = self.forward(state, head_idx)
 
-        # Apply mask: set invalid action logits to -inf.
-        # Use a large negative value instead of log(eps) to truly block
-        # actions with mask=0 (log(1e-8)≈-18 still allows rare selection).
-        masked_logits = torch.where(
-            action_mask > 0,
-            action_logits + torch.log(action_mask),
-            torch.tensor(-1e9, dtype=action_logits.dtype, device=action_logits.device),
-        )
+        # Mask handling — CRITICAL (06-13 audit, dec-015). The action_mask
+        # carries exp(HAND_BIAS_STRENGTH*k) HEURISTIC BIAS, not just legality.
+        # Folding log(mask) into the policy logits injected a ±4-5 nat prior
+        # (~57x the head's signal) that saturated the softmax, pinned entropy
+        # at a structural floor, and meant the policy never had to LEARN the
+        # masked decisions (3 independent audits converged on this). We now
+        # use the mask ONLY for hard legality in the distribution the policy
+        # samples from / is scored on, and re-home the heuristic guidance as a
+        # separate ANNEALING prior-KL term (computed below, applied in PPO).
+        neg_inf = torch.tensor(-1e9, dtype=action_logits.dtype,
+                               device=action_logits.device)
+        legal = action_mask > 0
+        masked_logits = torch.where(legal, action_logits, neg_inf)
+        # Heuristic prior = the mask's own (biased) distribution over types,
+        # kept ONLY to compute the annealing KL pull toward the teacher.
+        prior_logits = torch.where(legal, torch.log(action_mask), neg_inf)
 
         # Split into action type, card selection, target selection
         type_logits = masked_logits[:, :14]
@@ -343,7 +351,16 @@ class BalatronNetwork(nn.Module):
         total_entropy = (type_entropy + card_used * card_entropy
                          + target_used * target_entropy)
 
-        return action, total_log_prob, total_entropy, value
+        # Heuristic prior-KL (annealing teacher). Pull the policy's TYPE
+        # distribution toward the heuristic's masked preference. This re-homes
+        # the guidance the bias mask used to inject directly into the logits,
+        # but as a SEPARATE loss term that PPO anneals to zero — so the policy
+        # eventually owns the decision. KL=0 when only one type is legal
+        # (forced) or when the policy already matches the heuristic.
+        prior_type_dist = torch.distributions.Categorical(logits=prior_logits[:, :14])
+        prior_kl = torch.distributions.kl.kl_divergence(prior_type_dist, type_dist)
+
+        return action, total_log_prob, total_entropy, value, prior_kl
 
     def _condition_target_on_action(
         self,
