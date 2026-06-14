@@ -335,3 +335,13 @@ class RunRecorder:
         """Final cleanup — call on training shutdown."""
         self._stop_ffmpeg()
         self._delete_temp()
+
+
+class NullRecorder:
+    """No-op recorder for envs beyond the first — screen capture can only
+    follow one window, so only env 0 records wins. (Moved here from
+    training/train.py in the 06-14 monolith decoupling.)"""
+    def start_run(self): pass
+    def end_run(self, **kwargs): pass
+    def check_file_size(self): pass
+    def cleanup(self): pass
