@@ -30,6 +30,27 @@ ERA_START = "2026-06-08"  # start of the current training era for trend charts
 TARGET_KL = 0.03     # early-stop threshold in ppo.py
 BC_FLAT_LINE = 3.7   # pre-committed decision: BC loss flat here after 50 clean updates -> raise bc_coef
 
+# Regime boundaries: PPO updates where a metric's LEVEL shifted for a reason
+# that is NOT gameplay (a measurement/methodology change). Hard-won lesson —
+# this project has caught four display metrics "lying" (KL/CF read 0, R was a
+# cumulative mean, R under-counted ~6x under N=3, entropy carried a ln(19)
+# artifact). A trend read ACROSS one of these is meaningless, so the per-update
+# charts draw a dashed vertical line here and the "Metric trust" panel explains
+# why. Append new boundaries whenever a metric's accounting changes.
+#   (update_no, short chart label, long caveat)
+REGIMES = [
+    (333, "ent artifact",
+     "Entropy gating fix removed a ~ln(19) phantom term from unused heads — "
+     "pre-U333 entropy (read ~2.6) was an artifact, not real exploration."),
+    (379, "mask + prior-KL",
+     "Binary legality mask + annealing prior-KL deployed — entropy unfloored "
+     "(~0.24 -> ~0.5). Entropy is not comparable across this line."),
+    (435, "R x6 fix",
+     "R stepped ~6x: episode-tracker stats-isolation fix (N=3 had been "
+     "under-counting per-episode reward). Gameplay was unchanged (ante/WR flat) "
+     "— so compare R only WITHIN a regime, never across this line."),
+]
+
 UPDATE_RE = re.compile(
     r"Update\s+(\d+) \| Step\s+([\d,]+) \| FPS\s+(\d+) \| Ep\s+(\d+) \| "
     r"R\s+([-\d.]+) \| Ante\s+([\d.]+) \| WR\s+([\d.]+)% \| PL\s+([-\d.]+) \| "
@@ -196,16 +217,37 @@ def joker_win_table(rows, top_n=8, min_held=20):
     return out, len(wins)
 
 
-def rolling(vals, window=5):
+def rolling(vals, window=5, resets=()):
+    """Rolling mean that RESTARTS at each reset index — so the average never
+    smears across a regime boundary (a window spanning the U435 R-step would
+    turn an honest discontinuity into a fake gradual climb)."""
+    resets = set(resets)
     out = []
+    seg_start = 0
     for i in range(len(vals)):
-        w = vals[max(0, i - window + 1):i + 1]
+        if i in resets:
+            seg_start = i
+        w = vals[max(seg_start, i - window + 1):i + 1]
         out.append(sum(w) / len(w))
     return out
 
 
-def svg_line(series, w=860, h=200, pad=34, fmt="{:.2f}", hlines=()):
-    """series: list of (name, color, [values]). hlines: list of (value, label)."""
+def regime_vlines(updates):
+    """Map each regime boundary (by PPO update number) to an x-index in the
+    per-update charts. Only returns boundaries that fall strictly inside the
+    visible range (there must be data on both sides to mislead)."""
+    nums = [u["no"] for u in updates]
+    out = []
+    for uno, short, _ in REGIMES:
+        idx = next((i for i, n in enumerate(nums) if n >= uno), None)
+        if idx is not None and 0 < idx < len(nums):
+            out.append((idx, short))
+    return out
+
+
+def svg_line(series, w=860, h=200, pad=34, fmt="{:.2f}", hlines=(), vlines=()):
+    """series: list of (name, color, [values]). hlines: list of (value, label).
+    vlines: list of (x_index, label) — dashed vertical regime markers."""
     n = max((len(v) for _, _, v in series), default=0)
     if n < 2:
         return "<p class='dim'>not enough data yet</p>"
@@ -232,6 +274,12 @@ def svg_line(series, w=860, h=200, pad=34, fmt="{:.2f}", hlines=()):
         y = y_of(hval)
         out.append(f"<line x1='{pad}' y1='{y:.1f}' x2='{w-8}' y2='{y:.1f}' stroke='#777' stroke-width='1' stroke-dasharray='5,4'/>")
         out.append(f"<text x='{w-10}' y='{y-4:.0f}' fill='#999' font-size='11' text-anchor='end'>{html.escape(hlabel)}</text>")
+    for vi, vlabel in vlines:
+        if not (0 <= vi <= n - 1):
+            continue
+        x = pad + (w - pad - 8) * vi / (n - 1)
+        out.append(f"<line x1='{x:.1f}' y1='18' x2='{x:.1f}' y2='{h-pad}' stroke='#8a6a3a' stroke-width='1' stroke-dasharray='2,3'/>")
+        out.append(f"<text x='{x+3:.1f}' y='28' fill='#b98a4a' font-size='9'>{html.escape(vlabel)}</text>")
     for name, color, v in series:
         pts = " ".join(pt(i, val) for i, val in enumerate(v))
         out.append(f"<polyline points='{pts}' fill='none' stroke='{color}' stroke-width='2'/>")
@@ -308,15 +356,25 @@ def render():
 
     # --- Learning health (per PPO update) ---
     small = dict(w=430, h=180, pad=34)
-    r_chart = svg_line([("R (rolling 5)", "#7dd87d", rolling([u["r"] for u in updates]))], **small)
-    ent_chart = svg_line([("entropy", "#c08ae0", [u["ent"] for u in updates])], **small)
+    vl = regime_vlines(updates)             # dashed "methodology changed here" markers
+    reset_idx = [i for i, _ in vl]          # rolling mean restarts at each boundary
+    r_chart = svg_line([("R rolling-5 (shaped — accounting-sensitive)", "#7dd87d",
+                         rolling([u["r"] for u in updates], resets=reset_idx))],
+                       vlines=vl, **small)
+    ent_chart = svg_line([("entropy", "#c08ae0", [u["ent"] for u in updates])],
+                         vlines=vl, **small)
     kl_chart = svg_line([
         ("KL", "#5ab0f0", [u["kl"] for u in updates]),
         ("clip frac", "#e0a93e", [u["cf"] for u in updates]),
-    ], fmt="{:.3f}", hlines=[(TARGET_KL, f"target_kl {TARGET_KL}")], **small)
+    ], fmt="{:.3f}", hlines=[(TARGET_KL, f"target_kl {TARGET_KL}")], vlines=vl, **small)
     bc_chart = svg_line(
         [("BC loss", "#e05a5a", [u["bc"] for u in updates])],
-        hlines=[(BC_FLAT_LINE, f"flat-line watch {BC_FLAT_LINE}")], **small)
+        hlines=[(BC_FLAT_LINE, f"flat-line watch {BC_FLAT_LINE}")], vlines=vl, **small)
+
+    # Metric-trust panel — the "verify the path, don't read across a regime" lesson.
+    regime_caveats = "".join(
+        f"<li><b>U{uno}</b> — {html.escape(long)}</li>" for uno, _, long in REGIMES
+    )
 
     # --- Diagnosis ---
     recent_antes = Counter(r["ante"] for r in rows[-1000:])
@@ -367,17 +425,22 @@ def render():
 {hb_warn}
 <div class='cards'>{card_html}</div>
 
-<h2>Outcomes — is he getting deeper?</h2>
+<h2>Outcomes — is he getting deeper? <span class='note'>(ground truth — no accounting change moves these)</span></h2>
 {ante_chart}
 {deep_chart}
 
 <h2>Learning health — per PPO update ({len(updates)} parsed)</h2>
+<p class='note'>Dashed amber lines mark <b>regime boundaries</b> — points where a metric's level shifted for a measurement reason, not gameplay. Do not read a trend across one.</p>
 <div class='grid'>
- <div><h3>Mean episode reward — should trend up</h3>{r_chart}</div>
+ <div><h3>Episode reward — shaped &amp; accounting-sensitive (not ground truth)</h3>{r_chart}</div>
  <div><h3>Entropy — gradual decline ok, cliff = exploration collapse</h3>{ent_chart}</div>
  <div><h3>Policy movement — healthy: KL 0.01–0.05, CF 0.1–0.2</h3>{kl_chart}</div>
  <div><h3>BC imitation loss — flat at watch line after 50 updates → raise bc_coef</h3>{bc_chart}</div>
 </div>
+
+<h2>Metric trust — read <em>levels</em> with care</h2>
+<p class='note'>This project has caught four display metrics "lying" (KL/CF read 0, R was a cumulative mean, R under-counted ~6× under N=3, entropy carried a ln(19) artifact). A metric's level can jump for reasons that aren't gameplay — the amber lines above mark them. <b>Ground truth is ante</b> (Outcomes), which accounting can't move.</p>
+<ul class='note'>{regime_caveats}</ul>
 
 <h2>Diagnosis</h2>
 <div class='grid'>
