@@ -134,9 +134,11 @@ Target Selection Logits (19):
 | ROUND_EVAL | (none — game resolving) |
 | GAME_OVER | (none — run done) |
 
-### Masking
+### Masking (legality only) + prior-KL guidance
 
-Invalid actions are masked to -inf before softmax so the network can only pick legal moves. Feasibility checks include: money vs cost, hands/discards remaining, joker slot capacity, eternal modifier (can't sell), boss blind (can't skip).
+The action mask is **hard legality only** in the policy distribution: legal actions get the raw head logit, illegal get −1e9 before softmax (`network.py` `get_action_and_value`). Feasibility checks: money vs cost, hands/discards remaining, joker slot capacity, eternal modifier (can't sell), boss blind (can't skip).
+
+Heuristic *guidance* is **not** baked into the softmax anymore (06-14). The old design added `log(action_mask)` — `exp(HAND_BIAS_STRENGTH=5.0)` bias values — into the policy logits, which structurally floored entropy at ~0.24 and meant the policy never learned the masked decisions. That bias is now re-homed as a **separate annealing prior-KL teacher**: `KL(heuristic_prior ‖ policy_type_dist)` weighted by `prior_coef` (0.5, annealed to 0 over `prior_anneal_updates=400`). `HAND_BIAS_STRENGTH` still exists in `action_space.py` but only builds the prior — it never reaches the policy softmax. See DECISIONS "Binary mask + prior-KL".
 
 ---
 
@@ -144,29 +146,35 @@ Invalid actions are masked to -inf before softmax so the network can only pick l
 
 ### Reward Tiers (largest to smallest)
 
-| Tier | When | Default Weight | Notes |
+Values from `environment/reward.py` (constants `REWARD_*`). Win is gated on `ante > 8` (surviving past the ante-8 boss), NOT the API `won` flag — see DECISIONS gotcha #1.
+
+| Tier | When | Weight | Notes |
 |---|---|---|---|
-| Game win (Ante 8) | Terminal | +10.0 | Phase 1 goal |
 | naneinf achieved | Terminal | +50.0 | Phase 2 goal |
-| Game loss | Terminal | -2.0 + 0.5/ante survived | Partial credit for progress |
-| Ante cleared | Boss blind beaten | +2.0 + 0.5 * ante_num | Scales with difficulty |
-| Boss blind cleared | Boss round won | +1.0 extra | On top of blind cleared |
-| Blind cleared | Any blind beaten | +0.5 | Base round reward |
-| Score ratio | Blind cleared | +0.3 * log10(score/target) | Rewards overkill |
-| Score progress | Per hand played | +0.05 * log10(chips_gained) | Small shaping signal |
-| Money gain | Per action | +0.02 per dollar | Economy health |
-| Money spent | Per action | -0.01 per dollar | Lighter (spending necessary) |
-| Interest bonus | Per action | +0.01 per $5 tier held | Rewards banking |
+| Game win | Terminal (ante > 8) | +15.0 | Phase 1 goal; largest single signal |
+| Game loss | Terminal | -5.0 + 0.3 * ante | Partial credit for depth reached |
+| Ante cleared | Boss blind beaten | +3.0 + 1.0 * prev_ante | Steep depth gradient (ante 7 ≈ +10) |
+| Boss blind cleared | Boss round won | +1.5 extra | On top of blind cleared |
+| Blind cleared | Any blind beaten | +1.0 | Base round reward |
+| Score ratio | Blind cleared | +0.5 * log10(score/target) | Rewards overkill |
+| Hand high-water | New best single hand | +0.1/decade × **phase_mult** | **Phase 2 ONLY** (phase_mult=0 in Phase 1) |
+| xMult acquire | Buy xMult joker | +0.3 fixed / +0.5 scaling, phase-scaled | Strongest category |
 | Scaling growth | Per action | +0.05 * log growth | Rewards scaling joker investment |
-| Invalid action | Per action | -0.1 | Penalty for illegal moves |
+| Score progress | Per hand played | +0.02 * log10(chips_gained) | Small shaping signal |
+| Money gain / spent | Per action | +0.01 / -0.01 per dollar | Symmetric, small |
+| Diversity | Per core category | +0.02 each (max 0.10) | Potential-delta (telescopes) |
+| Interest bonus | Per action | +0.01 per $5 tier | Scale-phase damped |
+| Sell penalty | Sell scoring joker | up to -0.15, ×(1+w_execute) | Discourage dumping value |
+| Gold hoard | Hold excess in Scale phase | -0.02/dollar over buffer | Spend, don't bank |
+| Invalid action | Per action | -0.1 | Penalty for illegal/failed moves |
 
 ### Design Principles
 
-- All score-based rewards use log10 (Balatro scores grow exponentially)
-- Shaping rewards (per-action) are 10-100x smaller than outcome rewards
-- Economy rewards asymmetric: gaining > spending penalty
-- Phase 2 adds naneinf bonus and extreme-score scaling rewards
-- `RewardConfig` class allows hyperparameter sweeps over all weights
+- All score/chip rewards use log10 (Balatro scores grow exponentially) — a monster hand can't drown the win/ante signals
+- Outcome rewards (ante/blind/terminal ≈ +27/run to ante 4) dominate dense shaping (≈ +3/run) ~9:1
+- "Build quality" shapers (diversity, interest, scaling) are **potential-deltas** — gaining a category pays once, holding pays nothing
+- Three-phase weighting (`compute_phase_weights`: stabilize antes 1-2 / scale 3-5 / execute 6-8) modulates economy, xMult, sell, hoard
+- Phase 2 adds the naneinf bonus, extreme-score scaling, and the single-hand high-water reward (gated off in Phase 1)
 
 ---
 
@@ -205,17 +213,21 @@ Input (833)
 | Parameter | Value | Notes |
 |---|---|---|
 | learning_rate | 3e-4 | Adam, annealed linearly |
-| gamma | 0.99 | Discount factor |
+| gamma | 0.995 | Discount (0.995^300≈22% so early-ante shop choices feel the win) |
 | gae_lambda | 0.95 | GAE lambda |
 | clip_epsilon | 0.2 | Surrogate clipping |
 | clip_value | 0.2 | Value function clipping |
-| entropy_coef | 0.01 | Entropy bonus weight |
+| entropy_coef | 0.04 | Entropy bonus (0.01→0.025→0.04; escalated under Path A) |
 | value_coef | 0.5 | Value loss weight |
 | max_grad_norm | 0.5 | Gradient clipping |
-| num_epochs | 4 | PPO epochs per rollout |
+| num_epochs | 8 | PPO epochs per rollout (rollouts are expensive; extract more) |
 | num_minibatches | 4 | Minibatches per epoch |
-| rollout_steps | 2048 | Steps per rollout |
+| rollout_steps | 2048 | Steps per rollout (per env; ×N envs) |
 | target_kl | 0.03 | Early stopping threshold |
+| bc_coef | 0.5 | Behavior-cloning kickstart, anneals→0 over bc_anneal_updates=200 |
+| prior_coef | 0.5 | Heuristic prior-KL teacher, anneals→0 over prior_anneal_updates=400 |
+
+> Effective values come from `TrainConfig` (`training/config.py`), which overrides the lower `PPOConfig` defaults via `to_ppo_config()`. `bc_coef`/`prior_coef` use the `PPOConfig` defaults directly.
 
 ### Training Loop
 
@@ -366,17 +378,17 @@ cards, hand, shop, vouchers, packs, pack
 
 ## Current Status
 
-- **Phase:** Live training — Phase 1 in progress
-- **data/jokers.py:** COMPLETE — 150 jokers, validation, tier_weights pending
-- **environment/game_state.py:** COMPLETE — API client, EventDetector, ScalingTracker, 833-float state vector
-- **environment/action_space.py:** COMPLETE — 14 action types, 45-dim head, masking, ActionDecoder
-- **environment/reward.py:** COMPLETE — 4-tier shaped rewards, log-scaled, RewardConfig
-- **agent/network.py:** COMPLETE — 1.88M params, shared trunk, 3 policy heads + value head
-- **agent/ppo.py:** COMPLETE — RolloutBuffer, GAE, PPO update, checkpoints
-- **training/train.py:** COMPLETE — async orchestrator, episode tracking, LR annealing, CLI args
-- **API corrections applied:** All files updated to use 0-based indices, correct endpoint names, nested cost structure
-- **CUDA fixed:** torch 2.10.0+cu128, RTX 5070 Ti sm_120 verified working
-- **Training checkpoint:** `checkpoints/balatron_phase1_final.pt` — last confirmed at ~110,041 steps
+- **Phase:** Live training — Phase 1, Path A (policy authority), N=3 parallel instances
+- **data/jokers.py:** COMPLETE — 150 jokers, validation
+- **environment/game_state.py:** COMPLETE — API client, EventDetector, ScalingTracker, 833-float state vector (incl. 16-feature shop context)
+- **environment/action_space.py:** COMPLETE — 14 action types, 45-dim head, legality masking, ActionDecoder
+- **environment/reward.py:** COMPLETE — shaped rewards (see table), log-scaled, three-phase weighting
+- **agent/network.py:** COMPLETE — ~2.11M params, shared trunk, 3 policy heads + value head; legality-only mask + prior-KL
+- **agent/ppo.py:** COMPLETE — RolloutBuffer, GAE, PPO update, BC + prior-KL anneal, checkpoints
+- **training/ (decoupled 06-14):** `train.py` orchestrator (~1.9k lines) + `config.py`, `episode_tracker.py`, `joker_order_logger.py`, `env_session.py`, `action_executor.py`
+- **supervise.py:** memory-guardian supervisor (Steam-leak reclaim, fast crawl detection, cascading kills, singleton); `ensure_supervisor.py` watchdog
+- **dashboard.py:** live training dashboard on :8777 (reads `logs/metrics_history.log`)
+- **CUDA:** torch 2.10.0+cu128, RTX 5070 Ti sm_120 verified working (current runs are CPU/N=3)
 - **hand_eval.py:** Multiple scoring and decision bugs fixed (see Bug Fix Log below)
 - **pack.lua:** Buffoon Pack freeze fixed
 - **Consumable use:** Tarot/Celestial use was completely broken — now fixed

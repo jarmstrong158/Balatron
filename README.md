@@ -52,7 +52,7 @@ Game State Encoder (833-dim vector)
 PPO Neural Network (shared trunk + 3 policy heads)
     |
     v
-Action Mask (domain knowledge biasing)
+Action Mask (hard legality only)
     |
     v
 Heuristic Validator (hand eval, scoring math, economy guards)
@@ -187,7 +187,9 @@ The hybrid design has a structural catch: when heuristics override most conseque
 
 2. **Annealed imitation loss.** Overridden steps are flagged as *teacher corrections*, and an auxiliary behavior-cloning term — `bc_coef · (−log π(executed action))`, only on flagged steps — distills the heuristic layer into the policy. `bc_coef` anneals linearly from 0.5 to 0 over 200 updates (anchored to first engagement, persisted in checkpoints across restarts). Early on the policy imitates the teacher; as the coefficient decays, PPO's reward signal — which *can* disagree with the teacher — takes over.
 
-This is the AlphaGo-style recipe (supervised warm-start, then RL surpasses the teacher). **The hard overrides have now been lifted** (Path A / `policy_authority`, 06-13): the policy's judgment calls execute directly, and the override fraction dropped from ~8% to 0%. One side effect surfaced immediately — distilling a deterministic teacher left the policy over-confident (real entropy ~0.22, exploit-only), so `entropy_coef` was raised (0.01 → 0.025) to restore the exploration it needs to actually surpass the teacher. Still on the trainer-wheels list (deferred): annealing the soft **bias masks** out of the action logits. Legality masks stay forever.
+This is the AlphaGo-style recipe (supervised warm-start, then RL surpasses the teacher). **The hard overrides have now been lifted** (Path A / `policy_authority`, 06-13): the policy's judgment calls execute directly, and the override fraction dropped from ~8% to 0%. `entropy_coef` was escalated (0.01 → 0.025 → 0.04) to push exploration under Path A.
+
+3. **The bias masks have come off too (06-14).** The action mask used to inject `log(action_mask)` — `exp(HAND_BIAS_STRENGTH)` heuristic bias — directly into the policy logits. That bias was ~57× the network's own signal, so it *structurally floored entropy at ~0.24* and the policy never actually learned the masked decisions. The mask is now **hard legality only** (legal → raw logit, illegal → −1e9), and the heuristic guidance is re-homed as a **separate annealing prior-KL teacher**: `KL(heuristic_prior ‖ policy)`, weighted by `prior_coef` (0.5, annealed to 0 over 400 updates). The policy keeps the crutch early and owns the decision once it anneals out. Legality masks stay forever; the bias was the last trainer-wheel, and it's off.
 
 ---
 
@@ -271,11 +273,17 @@ balatron/
 |-- data/
 |   |-- jokers.py           # 150 joker schemas + tier weights
 |
-|-- training/
-|   |-- train.py            # Main training loop, episode management, auto-play heuristics
+|-- training/               # decoupled 06-14 (train.py was a 3.5k-line monolith)
+|   |-- train.py            # Orchestrator: rollout loop, PPO cadence, checkpoints, metrics
+|   |-- config.py           # TrainConfig (hyperparameters -> PPOConfig)
+|   |-- action_executor.py  # ActionExecutor: action->API translation + shop/pack auto-actions
+|   |-- env_session.py      # EnvSession: all per-instance state (one per parallel game)
+|   |-- episode_tracker.py  # EpisodeTracker: per-episode/lifetime stats, win log
+|   |-- joker_order_logger.py # JokerOrderLogger: per-round joker-ordering trace
 |
-|-- recorder.py             # Automated win recording via ffmpeg gdigrab
-|-- supervise.py            # Stack supervisor: multi-port health, recovery, orphan reaper
+|-- recorder.py             # Automated win recording via ffmpeg gdigrab (+ NullRecorder)
+|-- supervise.py            # Memory-guardian supervisor: crawl detection, recovery, Steam reclaim
+|-- ensure_supervisor.py    # Watchdog-for-the-watchdog (scheduled task resurrects the supervisor)
 |-- dashboard.py            # Live training dashboard (stdlib HTTP, port 8777)
 |
 |-- scripts/
@@ -359,15 +367,17 @@ One detached process keeps the entire stack alive — it starts the server + gam
 Start-Process -WindowStyle Hidden python -ArgumentList '-u','supervise.py' -WorkingDirectory 'C:\Users\jarms\repos\balatron'
 ```
 
-The supervisor runs **multi-instance training**: `NUM_ENVS` parallel Balatro games (ports 12346+, currently 3) feed one network through per-env rollout buffers — one brain, many bodies. Measured scaling: 196 steps/min (N=1) → 309 (N=2) → 433 (N=3), ~620k steps/day, a PPO update every ~5 minutes. There is no "merging" at save time: every update consumes all envs' transitions in one gradient step, and checkpoints are the single network's weights exactly as in single-instance mode. Health checks, debounce, and kills are all port-scoped. Env 0 records win videos; the others play uncaptured.
+The supervisor runs **multi-instance training**: `NUM_ENVS` parallel Balatro games (ports 12346–12348, currently **N=3**) feed one network through per-env rollout buffers — one brain, many bodies. Measured scaling: 196 steps/min (N=1) → 309 (N=2) → 433 (N=3). There is no "merging" at save time: every update consumes all envs' transitions in one gradient step, and checkpoints are the single network's weights exactly as in single-instance mode. Env 0 records win videos; the others play uncaptured.
 
-Actions are logged to `logs/supervisor.log`, trainer output to `logs/trainer_<timestamp>.log`. Stop it by creating a `SUPERVISOR_STOP` file in the repo root. For overnight runs, also disable standby (`powercfg /change standby-timeout-ac 0`) — a sleeping machine kills everything, including the supervisor.
+Actions are logged to `logs/supervisor.log` (plus a one-line `logs/supervisor_status.txt`), trainer output to `logs/trainer_<timestamp>.log`. Stop it by creating a `SUPERVISOR_STOP` file. For overnight runs, also disable standby (`powercfg /change standby-timeout-ac 0`).
 
-The supervisor **debounces** game restarts (3 consecutive down-checks, ~90s) because the trainer's internal watchdog also restarts a hung game and is faster — acting immediately would race it and leave two server instances fighting over the port. The trainer heals the game; the supervisor heals the trainer (and the game only when nothing else did).
+**The real cause of "slow after I'm away for hours" (06-14): external RAM starvation, not the trainer.** For weeks the trainer would crawl after long unattended runs — misdiagnosed three times as an internal "FPS decays ~1/n over the process lifetime." Direct measurement found the truth: Steam's `steamwebhelper.exe` leaks to **13–14 GB** over hours, the machine hits ~94% RAM, Windows pages Balatron (only ~4 GB) out, and the trainer crawls to ~12 steps/min. Reclaiming that one leaked process dropped system RAM **95% → 39%** and throughput recovered instantly. The supervisor now runs a **memory guardian**: when system RAM is critical it restarts the bloated external hog (`steamwebhelper.exe` > 4 GB — Steam respawns a fresh lightweight helper, no game interruption) and logs the diagnosis.
 
-Every cycle the supervisor also **reaps orphaned launchers**. The live process tree is `uvx.exe → python (balatrobot serve) → python (serve) → Balatro.exe`; on each restart the game (port owner) is killed but the middle `serve` launcher gets reparented and survives. Left alone it leaks ~1 process per restart — a single overnight run reached **140 orphan processes (~3 GB)** that thrashed the scheduler and paged the trainer out, collapsing throughput on a clean `1/n` curve (1291 → 14 FPS) *without* any memory leak or game-side cause. `reap_orphan_launchers()` walks the ancestor chain of every live `Balatro.exe` and kills only `serve` launchers outside it (a naive direct-parent test would `/T`-kill the game under the *outer* of the two nested launchers; a >180s age guard spares a still-booting one). See [DECISIONS.md](DECISIONS.md) for the full root-cause.
-
-The supervisor checks **four health layers, not just existence**: the trainer stamps `logs/heartbeat` (`<unix_time> <global_step>`) on every environment step. A trainer that hasn't stepped in 5 minutes is **frozen**. One stepping at a hard crawl (under 10 steps/min over a 40-minute window) is **dead-slow** — the floor is deliberately low because healthy deep runs (long ante-6 boss fights) legitimately drop to ~13–20 steps/min, and the first deployment's 25/min floor killed exactly such a run. Chronic wedge/restart **churn** holds a step rate above any safe floor while updates crawl, so it's caught by checkpoint cadence instead: a trainer up for 150+ minutes with no checkpoint that recent gets rebuilt (one night of churn ran ~190 min/checkpoint vs ~70–90 normal, undetected for 9 hours).
+The rebuilt supervisor (06-14) is engineered to stay fast over a 7–8 h unattended run:
+- **Fast, reliable crawl detection** from heartbeat steps/min over a 12-min window (floor 80) — *not* the log's cumulative FPS (a misleading lifetime average that hid the crawl). Freeze if no step in 4 min; churn if no checkpoint in 40 min; a **proactive 90-min age recycle** so the trainer never gets old enough to bloat.
+- **Cascading kills** — every recycle kills ALL trainers + ALL games + ALL orphan launchers (the old single-PID kill let duplicates and orphans accumulate until RAM was exhausted).
+- **Singleton** — kills any rival `supervise.py` on startup (two supervisors each spawned a trainer, doubling load).
+- **Orphan reaper** each cycle (the `uvx → serve → serve → Balatro.exe` tree leaks ~1 launcher per restart), **log pruning** that first preserves PPO update lines into `logs/metrics_history.log` so the dashboard keeps its history, and a **watchdog scheduled task** (`ensure_supervisor.py`, every 10 min) that resurrects the supervisor itself if anything ever kills it.
 
 The full recovery hierarchy:
 
@@ -375,11 +385,14 @@ The full recovery hierarchy:
 |---|---|---|
 | Game hangs/crashes | Trainer's internal watchdog | ~1 min |
 | Trainer process dies | Supervisor existence check | ~30 s |
-| Trainer freezes (alive, no progress) | Supervisor heartbeat staleness | ~6 min |
-| Trainer crawls (<10 steps/min) | Supervisor rate floor | ~40 min |
-| Trainer churns (no checkpoints) | Supervisor checkpoint cadence | ~2.5 h |
-| Orphan launchers pile up (slow creep) | Supervisor reaper (ancestor-walk) | ~30 s/cycle |
-| Machine sleeps (kills everything) | Nothing — prevent it | `powercfg /change standby-timeout-ac 0` |
+| Trainer freezes (alive, no progress) | Heartbeat staleness (4 min) | ~4 min |
+| Trainer crawls (<80 steps/min) | Heartbeat rate, 12-min window | ~12 min |
+| Trainer churns (no checkpoints) | Checkpoint cadence (40 min) | ~40 min |
+| Trainer bloats over its lifetime | Proactive age recycle | ~90 min |
+| External RAM leak (Steam) starves it | Memory guardian | ~30 s/cycle |
+| Orphan launchers / duplicates pile up | Cascading reaper | ~30 s/cycle |
+| Supervisor itself dies | `ensure_supervisor.py` watchdog task | ~10 min |
+| Machine sleeps (kills everything) | Prevent it | `powercfg /change standby-timeout-ac 0` |
 
 ### Monitoring (live dashboard)
 
@@ -422,9 +435,9 @@ python -u -m training.train --total-timesteps 1500000 --device cpu --checkpoint-
 
 Training progress is printed per PPO update:
 ```
-Update   218 | Step  452,130 | FPS 393 | Ep 92 | R 3.56 | Ante 4.2 | WR 0.0% | PL 0.0371 | VL 17.99 | Ent 2.595 | KL 0.040203 | CF 0.158 | BC 3.598@0.47(13%) | LR 2.10e-04
+Update   395 | Step  814,922 | FPS 975 | Ep 85 | R 2.71 | Ante 3.1 | WR 0.0% | PL -0.0047 | VL 26.92 | Ent 0.468 | KL 0.0022 | CF 0.019 | BC 0.547@0.03(2%) | Pr 0.127@0.49 | LR 1.43e-04
 ```
-`PL`/`VL`/`Ent` are the PPO policy loss, value loss, and entropy. `KL` is the true approximate KL divergence (healthy drift is ~0.01–0.05; the `target_kl=0.03` early-stop trims epochs when it overshoots). `CF` is the clip fraction (healthy ~0.1–0.2). `R` is the genuine per-episode mean reward. `BC loss@coef(frac)` is the behavior-cloning kickstart — the imitation loss, its current (annealing) coefficient, and the fraction of the rollout that was heuristic-overridden.
+`PL`/`VL`/`Ent` are the PPO policy loss, value loss, and entropy. `KL` is the true approximate KL divergence (healthy drift is ~0.01–0.05; the `target_kl=0.03` early-stop trims epochs when it overshoots). `CF` is the clip fraction (healthy ~0.1–0.2). `R` is the genuine per-episode mean reward. `BC loss@coef(frac)` is the behavior-cloning kickstart — the imitation loss, its current (annealing) coefficient, and the fraction of the rollout that was heuristic-overridden. `Pr loss@coef` is the heuristic **prior-KL** teacher — the KL pull toward the heuristic and its annealing coefficient (06-14). (Entropy now reads ~0.4–0.5 since the bias mask was lifted; before 06-14 it was pinned ~0.24, masked by an `≈ln(19)` artifact that read as ~2.6.)
 
 > A note on trusting these numbers: three display metrics were found lying in a single day — `KL` was never accumulated into the printout (read 0.0000 forever), `CF` was computed but never printed, and `R` was a cumulative session sum masquerading as a per-episode mean. All fixed; the training signal itself (PPO buffer rewards) was never affected. Lesson recorded in [DECISIONS.md](DECISIONS.md): verify a metric's computation path before reasoning from it.
 
@@ -490,7 +503,7 @@ The agent will learn:
 Pure RL would require millions of games to learn basic Balatro math from scratch. The hybrid approach:
 - **Heuristics** handle what's computable — exact scoring, hand classification, joker ordering
 - **NN** handles what requires judgment — shop strategy, risk assessment, build direction
-- **Action masks** bridge the gap — soft biases that guide exploration without hard-blocking learning
+- **Action masks** enforce hard legality only; heuristic guidance enters as a *separate annealing prior-KL teacher* (not baked into the policy softmax) so it can fade and let the policy surpass it
 
 ### Why Property Fingerprints over Joker IDs?
 

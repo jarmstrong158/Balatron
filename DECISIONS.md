@@ -49,7 +49,9 @@ first engagement and persisted in checkpoints (commit `52836ec`); (3) only
 *then* lift authority gradually — play/discard tempo first, then shop
 overrides one at a time. Legality masks stay forever; bias masks are the
 trainer wheels that come off. BC can never exceed the teacher — the anneal
-to zero is what lets PPO surpass it.
+to zero is what lets PPO surpass it. **(06-14: the bias masks have now come
+off — the in-softmax bias was removed and re-homed as an annealing prior-KL
+teacher; see "Binary mask + prior-KL" below.)**
 
 ### Path A: policy authority (the override lift, finally done) — 06-13
 A 4-agent deep audit found the lift in the BC-kickstart plan above was never
@@ -71,18 +73,47 @@ the card bits); `REWARD_HAND_HIGH_WATER` farms chips in Phase 1 so it's Phase-2
 only; the blind-clear score-ratio read post-SHOP chips (always 0); and a
 cross-env `_verdant_leaf_sold` state leak. See Context Keeper `dec-010`.
 
+### Binary mask + prior-KL: the bias-mask wheels finally come off — 06-13/14
+Path A lifted the heuristic *override* but left the heuristic *prior* baked into
+the softmax. `build_action_mask` returns `exp(HAND_BIAS_STRENGTH·k)` (H=5.0)
+**bias multipliers**, and `get_action_and_value` added `log(mask)` straight into
+the policy logits — a ±4–5 nat prior, ~57× the head's own signal. Three
+independent audits (two subagents + a trajectory audit) converged: this
+structurally **floored entropy at ~0.24** and meant the policy never had to learn
+the masked decisions. Proof: with a binary mask the head sits at ~ln 2 (uniform)
+on play-vs-discard — after 380 updates it had *no independent opinion* on the
+game's most common decision. (The earlier "entropy 2.6 → 0.24 collapse" at update
+333 was a red herring — it was the `ln(19)` gating fix changing the *measurement*,
+not a policy event; real entropy was always ~0.24. See `dec-014`.) Policy-head
+softening ×0.4 did nothing because scaling a 0.07 signal inside a sum dominated by
+±4 is invisible (`dec-013`).
+**Fix (`dec-015`, `con-011`):** `get_action_and_value` now uses the mask as a
+**hard legality gate only** (legal → raw head logit, illegal → −1e9). The
+heuristic guidance is re-homed as a **separate annealing prior-KL** term:
+`KL(heuristic_prior ‖ policy_type_dist)` weighted by `prior_coef` (0.5 → 0 over
+400 updates, anchored at first engage, persisted in checkpoints) — the policy
+keeps the crutch early and owns the decision once it anneals out. No new params
+(prior is computed from the stored mask), so old checkpoints load unchanged.
+Smoke-tested: type entropy 0.007 → 0.59 (285× headroom restored). **Expect ante
+to regress hard** while the policy relearns play/discard/buy from near-scratch —
+the prior-KL cushions but won't erase it. Secondary (deferred stage 2): value &
+policy share the trunk and VL=15–30's gradient swamps the policy gradient ~3000×.
+
 ### Multi-instance training: one brain, many bodies
 N parallel Balatro games (ports 12346+) feed ONE network. Per-env
 `RolloutBuffer`s keep amend-last credits and GAE temporal adjacency correct;
 `update()` computes GAE per env then concatenates for minibatching — the
 "convergence" happens every update, never at save time (checkpoints are the
 single network's weights, unchanged). All per-run state lives in `EnvSession`
-(24 attributes + game client/reward calc/recorder); anything left as a
-Trainer singleton would bleed across games (a stale win flag from env 0
-marking env 1's loss as a win). Game kills must be **port-owner-PID scoped**
-— `taskkill /IM Balatro.exe` murders every instance. Env 0 owns the win
-recorder; others get a NullRecorder. Deployed N=2 on 2026-06-11: combined
-~309 steps/min vs ~196 single (sublinear due to shared CPU; still +58%%).
+(`training/env_session.py`; ~24 attributes + game client/reward calc/recorder);
+anything left as a Trainer singleton would bleed across games (a stale win flag
+from env 0 marking env 1's loss as a win). Env 0 owns the win recorder; others
+get a `NullRecorder` (now in `recorder.py`). **Currently N=3** (ports
+12346-12348); the supervisor launches with `--num-envs 3`. Per-game kills are
+PID-scoped, but the rebuilt supervisor (gotcha #6) deliberately **cascades** on
+recycle — killing ALL trainers + ALL games + ALL orphan launchers — so nothing
+accumulates. First deployed N=2 on 2026-06-11 (combined ~309 steps/min vs ~196
+single, +58%); since raised to N=3.
 
 ---
 
@@ -210,29 +241,32 @@ Two recurring race classes, both triggered by fast programmatic transitions:
   trainer + monitoring shells) died *simultaneously* with no crash trace
   (external kill, likely Windows sleep), sitting idle until noticed.
 - **Fix: `supervise.py`** — a detached process that owns the stack: every
-  30s it ensures port 12346 is listening (else kills strays and relaunches
-  the server, after a 3-check ~90s debounce so it doesn't race the
-  trainer's own faster recovery) and the trainer is running (else
-  relaunches from the newest checkpoint with `PYTHONUTF8=1`, logging to
-  `logs/trainer_<ts>.log`). It checks four health layers, not just
-  existence: the trainer stamps `logs/heartbeat` (`<unix_time>
-  <global_step>`) on every environment step — (1) **existence**: process
-  gone → relaunch; (2) **liveness**: heartbeat >5 min stale = frozen →
-  kill trainer + game (counters can't catch a freeze that stops the loop
-  itself — a boot-splash zombie with a live socket froze the trainer
-  mid-MENU-loop); (3) **rate floor**: <10 steps/min over a 40-min window
-  = hard crawl. The floor must stay LOW — healthy deep runs (ante 5–6
-  boss fights, long scoring animations) legitimately run ~13–20
-  steps/min, and the first deployment's 25/min floor killed a healthy
-  deep run 24 minutes after going live; (4) **checkpoint cadence**:
-  trainer up 150+ min with no checkpoint that recent = churning —
-  wedge/restart cycles hold a step rate above any safe floor while
-  updates crawl (the 06-11 overnight churn ran ~190 min/checkpoint vs
-  70–90 normal for 9 hours with a perfectly fresh heartbeat).
-  Launch it instead of starting server/trainer by hand; stop it by creating
-  a `SUPERVISOR_STOP` file in the repo root. Actions log to
-  `logs/supervisor.log`. For overnight runs also disable standby:
-  `powercfg /change standby-timeout-ac 0`.
+  30s it ensures the game ports are listening and exactly one trainer is
+  running, relaunching from the newest checkpoint with `PYTHONUTF8=1`.
+- **THE REAL "always slow after 7-8h" CAUSE (06-14, dec-016) — it was never
+  internal FPS decay.** Three fixes chased a phantom "trainer FPS decays ~1/n
+  over its lifetime." The actual cause is **external RAM starvation**:
+  `steamwebhelper.exe` leaks to 13–14 GB over hours → system RAM hits ~94% →
+  Windows pages Balatron out → the trainer crawls to ~12 steps/min. Balatron's
+  own footprint is only ~4 GB; it's the victim. **Killing the one leaked
+  steamwebhelper dropped system RAM 95.4% → 38.6%.** The "1/n decay" was just
+  progressive paging as RAM filled.
+- **06-14 rebuild — bulletproof for long unattended runs.** Detection now uses
+  the RELIABLE signal (heartbeat steps/min over a 12-min window, floor 80 — NOT
+  the log's cumulative FPS, a misleading average) and acts in MINUTES, not
+  hours: FROZEN heartbeat >4 min; CRAWL <80 steps/min over 12 min; CHURN ckpt
+  >40 min stale; proactive **90-min** age recycle so the trainer never bloats.
+  Kills **cascade** — every recycle kills ALL trainers + ALL games + ALL orphan
+  launchers (the old single-PID `Select -First 1` kill let duplicates and
+  orphans pile up until RAM was exhausted). The supervisor is a **singleton**
+  (kills rival `supervise.py` on startup — two supervisors each spawned a
+  trainer). A **memory guardian** restarts the external hog when system RAM is
+  critical and the hog is clearly leaked (`steamwebhelper.exe` > 4 GB; normal
+  < 1 GB), with a burst guard that backs off and just logs the diagnosis if
+  recycling can't help. Logs are pruned (keep 6 newest / 24 h). All process
+  management is psutil-based (no per-cycle PowerShell spawns). Health is mirrored
+  to `logs/supervisor_status.txt`. Stop via a `SUPERVISOR_STOP` file. For
+  overnight runs also disable standby: `powercfg /change standby-timeout-ac 0`.
 
 ### 7. Don't raise game speed to train faster — it destabilizes the game
 Rollout collection (the live game) is the real wall-clock bottleneck, not the
