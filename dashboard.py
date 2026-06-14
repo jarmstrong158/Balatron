@@ -34,7 +34,9 @@ UPDATE_RE = re.compile(
     r"Update\s+(\d+) \| Step\s+([\d,]+) \| FPS\s+(\d+) \| Ep\s+(\d+) \| "
     r"R\s+([-\d.]+) \| Ante\s+([\d.]+) \| WR\s+([\d.]+)% \| PL\s+([-\d.]+) \| "
     r"VL\s+([\d.]+) \| Ent\s+([\d.]+) \| KL\s+([\d.]+) \| CF\s+([\d.]+) \| "
-    r"BC\s+([\d.]+)@([\d.]+)\((\d+)%\) \| LR\s+([\d.e+-]+)"
+    r"BC\s+([\d.]+)@([\d.]+)\((\d+)%\)"
+    # Prior-KL field (06-14) is optional so pre-change logs still parse.
+    r"(?: \| Pr\s+([\d.]+)@([\d.]+))? \| LR\s+([\d.e+-]+)"
 )
 SUPERVISOR_TS_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\] trainer started")
 
@@ -79,9 +81,18 @@ def read_updates():
     Restart-resumes can replay an update number; dedupe keeps the latest
     occurrence so the curve reflects what actually trained.
     """
+    # Read the persistent, never-pruned metrics history FIRST (so the curve
+    # survives supervisor log-pruning and the restart fragmentation that
+    # otherwise left only ~2 updates parseable), then overlay ALL current
+    # trainer logs (latest occurrence of each update number wins).
     logs = sorted(glob.glob(os.path.join(LOGS, "trainer_*.log")), key=os.path.getmtime)
+    sources = []
+    hist = os.path.join(LOGS, "metrics_history.log")
+    if os.path.exists(hist):
+        sources.append(hist)
+    sources.extend(logs)
     by_no = {}
-    for path in logs[-5:]:
+    for path in sources:
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 for line in f:
@@ -93,7 +104,11 @@ def read_updates():
                             "r": float(g[4]), "ante": float(g[5]),
                             "ent": float(g[9]), "kl": float(g[10]), "cf": float(g[11]),
                             "bc": float(g[12]), "bc_coef": float(g[13]),
-                            "bc_frac": int(g[14]), "lr": g[15],
+                            "bc_frac": int(g[14]),
+                            # Pr fields are None for pre-06-14 logs (optional group)
+                            "pr_kl": float(g[15]) if g[15] is not None else None,
+                            "pr_coef": float(g[16]) if g[16] is not None else None,
+                            "lr": g[17],
                         }
         except OSError:
             pass
@@ -313,11 +328,17 @@ def render():
         for j, wc, tc, lift in jokers
     ) or "<tr><td colspan='4' class='dim'>not enough wins in window yet</td></tr>"
 
+    def _pr_cell(u):
+        if u.get("pr_kl") is None:
+            return "<td class='dim'>—</td>"
+        return f"<td>{u['pr_kl']:.3f}@{u['pr_coef']:.2f}</td>"
+
     upd_rows = "".join(
         f"<tr><td>{u['no']}</td><td>{u['step']:,}</td><td>{u['r']:.2f}</td><td>{u['ante']:.1f}</td>"
-        f"<td>{u['kl']:.4f}</td><td>{u['cf']:.3f}</td><td>{u['bc']:.2f}@{u['bc_coef']:.2f} ({u['bc_frac']}%)</td><td>{u['lr']}</td></tr>"
+        f"<td>{u['ent']:.3f}</td><td>{u['kl']:.4f}</td><td>{u['cf']:.3f}</td>"
+        f"<td>{u['bc']:.2f}@{u['bc_coef']:.2f} ({u['bc_frac']}%)</td>{_pr_cell(u)}<td>{u['lr']}</td></tr>"
         for u in reversed(updates[-10:])
-    ) or "<tr><td colspan='8' class='dim'>no update lines parsed yet</td></tr>"
+    ) or "<tr><td colspan='10' class='dim'>no update lines parsed yet</td></tr>"
 
     day_rows = "".join(
         f"<tr><td>{d}</td><td>{s['games']}</td><td>{s['wins']}</td>"
@@ -367,7 +388,7 @@ def render():
 </div>
 
 <h2>Recent PPO updates</h2>
-<table><tr><th>Update</th><th>Step</th><th>R</th><th>Ante</th><th>KL</th><th>CF</th><th>BC</th><th>LR</th></tr>{upd_rows}</table>
+<table><tr><th>Update</th><th>Step</th><th>R</th><th>Ante</th><th>Ent</th><th>KL</th><th>CF</th><th>BC</th><th>Pr</th><th>LR</th></tr>{upd_rows}</table>
 
 <h2>By day (rolling 5,000-game window)</h2>
 <table><tr><th>Date</th><th>Games</th><th>Wins</th><th>Win %</th><th>Mean ante</th></tr>{day_rows}</table>
