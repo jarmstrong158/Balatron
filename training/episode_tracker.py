@@ -213,16 +213,12 @@ class EpisodeTracker:
         # Save after every episode
         self._save_lifetime_stats()
 
-        # Per-env per-episode accumulators (multi-instance: each game
-        # tracks its own in-flight episode; lifetime/session stats stay
-        # shared since this is all one process)
-        self._eps: dict = {}
-        # Discard the whole per-episode accumulator — the next step()
-        # creates a fresh one. The old code reset only highest_hand and
-        # never reward/length/ante, so the printed R was a cumulative
-        # sum within the session masquerading as a per-episode mean
-        # (N=3 exposed it: splitting across three streams "dropped" R
-        # 3-5x with run quality unchanged).
+        # Discard ONLY this env's accumulator so the next step() starts it
+        # fresh — the printed R is then a true per-episode value, not a
+        # running session sum (the old single-stream code reset only
+        # highest_hand, never reward/length/ante, so R was a cumulative mean).
+        # Do NOT clear the whole dict: with N>1 that wipes the OTHER envs'
+        # in-flight episodes (caught by test_episode_per_env_isolation).
         self._eps.pop(env_id, None)
 
     def get_recent_stats(self, window: int = 20) -> dict:
