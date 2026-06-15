@@ -93,7 +93,12 @@ CHECKPOINT_GLOB = os.path.join(REPO, "checkpoints", "balatron_phase1_update*.pt"
 # machine isn't saturated. steamwebhelper is the confirmed culprit (leaks to
 # 10-14 GB; normal < 1 GB) and is safe to restart — Steam respawns a fresh
 # lighter helper and a running game is unaffected.
-MEM_CRITICAL_PCT = 90.0        # system RAM at/above this = pressure
+MEM_CRITICAL_PCT = 72.0        # system RAM at/above this = pressure. 90->72
+                               # (06-15): the games crawl to ~30 steps/min at
+                               # ~75-83% RAM (Steam leak), but a 90% trigger
+                               # never fired — reclaiming the hog at 75% dropped
+                               # RAM to 53% and step rate jumped 30->406. Trigger
+                               # BEFORE the crawl zone, not after.
 MEM_GUARDIAN_ENABLED = True    # restart the external hog when it's clearly leaked
 # name -> (GB threshold above which it's "clearly leaked" and safe to restart)
 MEM_RECLAIM_TARGETS = {"steamwebhelper.exe": 4.0}
@@ -667,6 +672,20 @@ def main():
                     delta = step_samples[-1][1] - step_samples[0][1]
                     rate = delta / (span / 60.0)
                     if rate < RATE_FLOOR_PER_MIN:
+                        # A crawl is most often EXTERNAL RAM starvation, not the
+                        # trainer — recycling a fresh trainer into the same
+                        # pressure just loops (06-15: hours stuck at ckpt 528).
+                        # Try reclaiming the external hog FIRST; if that frees
+                        # memory, skip the (futile) recycle and let it recover.
+                        reclaimed = reclaim_external_hog()
+                        if reclaimed:
+                            log(f"CRAWL {rate:.0f} steps/min — reclaimed external "
+                                f"hog ({reclaimed}) instead of recycling; "
+                                f"RAM was {system_ram_pct():.0f}%")
+                            write_status("CRAWL_RECLAIMED",
+                                         f"{rate:.0f} steps/min, freed {reclaimed}")
+                            step_samples.clear()
+                            continue
                         recycle_stack(f"CRAWL: {rate:.0f} steps/min over "
                                       f"{span/60:.0f}min (floor "
                                       f"{RATE_FLOOR_PER_MIN:.0f})")
