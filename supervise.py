@@ -39,6 +39,7 @@ Stop:
   or kill the python process running supervise.py.
 """
 
+import ctypes
 import datetime
 import glob
 import os
@@ -107,6 +108,12 @@ MEM_GUARDIAN_ENABLED = True    # close Steam entirely when it's clearly leaked
 STEAM_PROC_NAMES = {"steam.exe", "steamwebhelper.exe", "steamservice.exe"}
 STEAM_RECLAIM_GB = 4.0         # close Steam when its total RSS exceeds this
 STEAM_SHUTDOWN_WAIT_S = 12     # grace for `steam -shutdown` before hard-kill
+# SAFETY: only ever close Steam when the user is AWAY (no keyboard/mouse for
+# this long). The leak builds over hours, so waiting until they're idle costs
+# nothing — and it guarantees we never close someone's running game while they
+# are actively playing. Two conditions BOTH required to close Steam: it's
+# clearly leaked (> STEAM_RECLAIM_GB) AND the user has been idle this long.
+USER_IDLE_GUARD_S = 600        # 10 min of no input = away
 # Don't churn Balatron under sustained external pressure recycling can't fix:
 # after this many recycles inside the window, stop recycling for RAM and just
 # keep the stack alive (still logs the diagnosis).
@@ -378,6 +385,23 @@ def top_memory_hog():
     return best
 
 
+def user_idle_seconds() -> float:
+    """Seconds since the last keyboard/mouse input in this session. Returns 0.0
+    (i.e. 'active') if it can't be determined — fail SAFE so we never close
+    Steam blind. Uses Win32 GetLastInputInfo; no extra deps."""
+    try:
+        class _LII(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+        lii = _LII()
+        lii.cbSize = ctypes.sizeof(_LII)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii)):
+            return 0.0
+        tick = ctypes.windll.kernel32.GetTickCount()  # ms since boot, wraps ~49d
+        return max(0.0, (tick - lii.dwTime) / 1000.0)
+    except Exception:
+        return 0.0
+
+
 def steam_footprint():
     """(total_GB, steam.exe path or None, [pids]) across all Steam processes."""
     total = 0.0
@@ -402,15 +426,22 @@ def reclaim_external_hog() -> str:
     Restarting only steamwebhelper lets Steam respawn it and re-leak, so this
     shuts down the entire client. Graceful first — `steam.exe -shutdown` exits
     cleanly (no crash-recovery dialog on next launch); if it hasn't exited
-    within the grace window, hard-kill the remaining Steam process trees. Only
-    fires when Steam's total footprint exceeds STEAM_RECLAIM_GB (clearly leaked).
-    Safe for unattended training (the user isn't gaming) and explicitly
-    requested. Returns a human description, or '' if nothing was done."""
+    within the grace window, hard-kill the remaining Steam process trees.
+
+    Closes ONLY when BOTH hold: Steam has clearly leaked (footprint >
+    STEAM_RECLAIM_GB) AND the user is away (idle > USER_IDLE_GUARD_S). The idle
+    gate guarantees we never close someone's running game while they are
+    actively playing. Returns a human description, or '' if nothing was done."""
     if psutil is None or not MEM_GUARDIAN_ENABLED:
         return ""
     gb, exe, pids = steam_footprint()
     if not pids or gb < STEAM_RECLAIM_GB:
-        return ""
+        return ""   # not leaked — leave Steam alone
+    # SAFETY GATE: never close Steam (and any game running through it) while the
+    # user is at the machine. Only act when they've been idle/away.
+    idle = user_idle_seconds()
+    if idle < USER_IDLE_GUARD_S:
+        return ""   # leaked, but the user is active — hands off; silent no-op
     if exe:
         try:
             subprocess.Popen([exe, "-shutdown"],
