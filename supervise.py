@@ -90,18 +90,23 @@ CHECKPOINT_GLOB = os.path.join(REPO, "checkpoints", "balatron_phase1_update*.pt"
 # When system RAM is critically high, Balatron is starved no matter how fresh
 # it is. The guardian (a) recycles Balatron to reclaim its own paged/bloated
 # working set, and (b) optionally restarts the worst EXTERNAL leaker so the
-# machine isn't saturated. steamwebhelper is the confirmed culprit (leaks to
-# 10-14 GB; normal < 1 GB) and is safe to restart — Steam respawns a fresh
-# lighter helper and a running game is unaffected.
+# machine isn't saturated. Steam is the confirmed culprit (steamwebhelper leaks
+# to 7-14 GB; normal < 1 GB), so the guardian CLOSES THE WHOLE CLIENT — killing
+# only the helper lets Steam respawn it and re-leak (see close logic below).
 MEM_CRITICAL_PCT = 72.0        # system RAM at/above this = pressure. 90->72
                                # (06-15): the games crawl to ~30 steps/min at
                                # ~75-83% RAM (Steam leak), but a 90% trigger
                                # never fired — reclaiming the hog at 75% dropped
                                # RAM to 53% and step rate jumped 30->406. Trigger
                                # BEFORE the crawl zone, not after.
-MEM_GUARDIAN_ENABLED = True    # restart the external hog when it's clearly leaked
-# name -> (GB threshold above which it's "clearly leaked" and safe to restart)
-MEM_RECLAIM_TARGETS = {"steamwebhelper.exe": 4.0}
+MEM_GUARDIAN_ENABLED = True    # close Steam entirely when it's clearly leaked
+# Steam is the confirmed repeat offender (steamwebhelper balloons to 7-14 GB;
+# normal < 1 GB). Restarting only the helper lets Steam respawn and re-leak, so
+# the guardian closes the WHOLE client when its total footprint exceeds the
+# threshold — gracefully via `steam.exe -shutdown`, hard-kill as fallback.
+STEAM_PROC_NAMES = {"steam.exe", "steamwebhelper.exe", "steamservice.exe"}
+STEAM_RECLAIM_GB = 4.0         # close Steam when its total RSS exceeds this
+STEAM_SHUTDOWN_WAIT_S = 12     # grace for `steam -shutdown` before hard-kill
 # Don't churn Balatron under sustained external pressure recycling can't fix:
 # after this many recycles inside the window, stop recycling for RAM and just
 # keep the stack alive (still logs the diagnosis).
@@ -373,25 +378,55 @@ def top_memory_hog():
     return best
 
 
+def steam_footprint():
+    """(total_GB, steam.exe path or None, [pids]) across all Steam processes."""
+    total = 0.0
+    exe = None
+    pids = []
+    for p in _iter_procs(["pid", "name", "exe", "memory_info"]):
+        name = (p.info.get("name") or "").lower()
+        if name in STEAM_PROC_NAMES:
+            pids.append(p.info["pid"])
+            try:
+                total += p.info["memory_info"].rss
+            except Exception:
+                pass
+            if name == "steam.exe" and exe is None:
+                exe = p.info.get("exe")
+    return total / 1e9, exe, pids
+
+
 def reclaim_external_hog() -> str:
-    """Restart any configured external leaker that is clearly bloated. Returns
-    a human description of what (if anything) was reclaimed."""
+    """Close the WHOLE Steam client when it has clearly leaked.
+
+    Restarting only steamwebhelper lets Steam respawn it and re-leak, so this
+    shuts down the entire client. Graceful first — `steam.exe -shutdown` exits
+    cleanly (no crash-recovery dialog on next launch); if it hasn't exited
+    within the grace window, hard-kill the remaining Steam process trees. Only
+    fires when Steam's total footprint exceeds STEAM_RECLAIM_GB (clearly leaked).
+    Safe for unattended training (the user isn't gaming) and explicitly
+    requested. Returns a human description, or '' if nothing was done."""
     if psutil is None or not MEM_GUARDIAN_ENABLED:
         return ""
-    reclaimed = []
-    for p in _iter_procs(["pid", "name", "memory_info"]):
-        name = (p.info.get("name") or "")
-        thresh = MEM_RECLAIM_TARGETS.get(name)
-        if thresh is None:
-            continue
+    gb, exe, pids = steam_footprint()
+    if not pids or gb < STEAM_RECLAIM_GB:
+        return ""
+    if exe:
         try:
-            rss = p.info["memory_info"].rss / 1e9
+            subprocess.Popen([exe, "-shutdown"],
+                             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
         except Exception:
-            continue
-        if rss >= thresh:
-            kill_pids([p.info["pid"]], tree=False)
-            reclaimed.append(f"{name}({rss:.1f}GB)")
-    return ", ".join(reclaimed)
+            pass
+    deadline = time.time() + STEAM_SHUTDOWN_WAIT_S
+    while time.time() < deadline:
+        if not steam_footprint()[2]:
+            return f"closed Steam gracefully ({gb:.1f}GB freed)"
+        time.sleep(1)
+    leftover = steam_footprint()[2]
+    if leftover:
+        kill_pids(leftover, tree=True)
+        return f"force-closed Steam ({gb:.1f}GB freed; graceful shutdown timed out)"
+    return f"closed Steam ({gb:.1f}GB freed)"
 
 
 METRICS_HISTORY = os.path.join(LOG_DIR, "metrics_history.log")
