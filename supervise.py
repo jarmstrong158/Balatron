@@ -543,7 +543,7 @@ def start_trainer() -> bool:
     trainer_log = open(trainer_log_path, "a", encoding="utf-8")
     subprocess.Popen(
         [sys.executable, "-u", "-m", "training.train",
-         "--total-timesteps", "1500000",
+         "--total-timesteps", "5000000",
          "--device", "cpu",
          "--checkpoint-interval", "2",
          "--num-envs", str(NUM_ENVS),

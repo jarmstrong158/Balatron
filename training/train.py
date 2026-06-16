@@ -340,10 +340,13 @@ class Trainer:
                 metrics = self.ppo.update(last_values, last_dones)
                 self.num_updates += 1
 
-                # LR annealing
+                # LR annealing — FLOORED. At ~75% of total_timesteps the
+                # un-floored LR had decayed to 7.5e-5 and the policy stopped
+                # moving (KL ~0.002, plateaued). Keep a usable minimum so
+                # learning never dies just because of the schedule.
                 if cfg.anneal_lr:
                     frac = 1.0 - self.global_step / cfg.total_timesteps
-                    new_lr = cfg.learning_rate * frac
+                    new_lr = max(cfg.learning_rate * frac, 1.0e-4)
                     self.ppo.set_learning_rate(new_lr)
 
                 # Logging
@@ -1820,7 +1823,8 @@ class Trainer:
             f"({metrics.get('bc_fraction', 0.0):.0%}) | "
             f"Pr {metrics.get('prior_kl', 0.0):>6.3f}"
             f"@{metrics.get('prior_coef', 0.0):.2f} | "
-            f"LR {self.ppo.get_learning_rate():.2e}"
+            f"LR {self.ppo.get_learning_rate():.2e} | "
+            f"EV {metrics.get('explained_variance', 0.0):>6.3f}"
         )
 
     def _save_checkpoint(self, tag: Optional[str] = None):
