@@ -22,13 +22,21 @@ from environment.hand_eval import (
 _build_api_key_cache()
 
 
+_card_counter = [0]
+
+
 def _card(rank: str, suit: str, enhancement: str = "", edition: str = "") -> dict:
     """Create a card dict matching the BalatroBot API format."""
     suit_short = {"Hearts": "H", "Diamonds": "D", "Clubs": "C", "Spades": "S"}
+    # STABLE unique id via a counter. `id(object())` was a bug: the temporary
+    # object is GC'd immediately, so its address gets reused and two cards can
+    # collide — which breaks any held-in-hand test (Baron/Shoot the Moon),
+    # because held-vs-played is computed by id.
+    _card_counter[0] += 1
     c = {
         "value": {"rank": rank, "suit": suit_short.get(suit, suit)},
         "modifier": {},
-        "id": id(object()),  # unique id
+        "id": _card_counter[0],
     }
     if enhancement:
         c["modifier"]["enhancement"] = enhancement
@@ -330,6 +338,54 @@ def main():
         _card("A", "Spades"), _card("3", "Diamonds"), _card("7", "Clubs"),
     ]
     results.append(run_test("Pair of 5s, FOIL on scoring card", cards, [], gs, 140))
+
+    # ================================================================
+    # Test 17: Shoot the Moon — +13 Mult per Queen HELD IN HAND (not played)
+    # Play a pair of 5s while HOLDING two Queens. The Queens are NOT played;
+    # they must score via held-in-hand, and the played 5s must not.
+    # Pair: 10 chips, 2 mult. Scoring 5,5 = 10 card chips.
+    # Shoot the Moon: +13 mult x 2 held Queens = +26 mult.
+    # Score = (10 + 10) * (2 + 26) = 20 * 28 = 560
+    # ================================================================
+    played = [
+        _card("5", "Hearts"), _card("5", "Spades"),
+        _card("3", "Diamonds"), _card("7", "Clubs"), _card("9", "Spades"),
+    ]
+    held = [_card("Q", "Hearts"), _card("Q", "Diamonds")]
+    gs_held = _gamestate(held_cards=played + held)        # full hand = played + held
+    jokers = [_joker("Shoot the Moon", "j_shoot_the_moon")]
+    results.append(run_test("Shoot the Moon, 2 Queens HELD (+13 each)", played, jokers, gs_held, 560))
+
+    # ================================================================
+    # Test 18: Shoot the Moon — Queens PLAYED, none HELD → must NOT trigger.
+    # The whole point of the joker: it counts Queens held in hand, NOT played.
+    # Play a pair of Queens (so the Queens are played, zero held).
+    # Pair Qs: 10 chips, 2 mult. Scoring Q,Q = 20 card chips. 0 held Queens.
+    # Score = (10 + 20) * 2 = 60   (Shoot the Moon adds nothing)
+    # A buggy "counts played Queens" engine would give (30)*(2+26)=840.
+    # ================================================================
+    played = [
+        _card("Q", "Hearts"), _card("Q", "Spades"),
+        _card("3", "Diamonds"), _card("7", "Clubs"), _card("9", "Hearts"),
+    ]
+    gs_held = _gamestate(held_cards=list(played))         # only the played cards in hand
+    jokers = [_joker("Shoot the Moon", "j_shoot_the_moon")]
+    results.append(run_test("Shoot the Moon, Queens PLAYED not held (no trigger)", played, jokers, gs_held, 60))
+
+    # ================================================================
+    # Test 19: Baron — x1.5 Mult per KING held in hand (same code path).
+    # Play a pair of 5s, hold two Kings.
+    # Pair: 10 chips, 2 mult. Card chips 10. Baron: x1.5 x1.5 = x2.25.
+    # Score = (10 + 10) * 2 * 2.25 = 20 * 2 * 2.25 = 90
+    # ================================================================
+    played = [
+        _card("5", "Hearts"), _card("5", "Spades"),
+        _card("3", "Diamonds"), _card("7", "Clubs"), _card("9", "Spades"),
+    ]
+    held = [_card("K", "Hearts"), _card("K", "Diamonds")]
+    gs_held = _gamestate(held_cards=played + held)
+    jokers = [_joker("Baron", "j_baron")]
+    results.append(run_test("Baron, 2 Kings HELD (x1.5 each)", played, jokers, gs_held, 90))
 
     # ================================================================
     # Summary
