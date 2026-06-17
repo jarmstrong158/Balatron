@@ -56,8 +56,9 @@ UPDATE_RE = re.compile(
     r"R\s+([-\d.]+) \| Ante\s+([\d.]+) \| WR\s+([\d.]+)% \| PL\s+([-\d.]+) \| "
     r"VL\s+([\d.]+) \| Ent\s+([\d.]+) \| KL\s+([\d.]+) \| CF\s+([\d.]+) \| "
     r"BC\s+([\d.]+)@([\d.]+)\((\d+)%\)"
-    # Prior-KL field (06-14) is optional so pre-change logs still parse.
+    # Prior-KL field (06-14) and EV (06-16) are optional so older logs parse.
     r"(?: \| Pr\s+([\d.]+)@([\d.]+))? \| LR\s+([\d.e+-]+)"
+    r"(?: \| EV\s+([-\d.]+))?"
 )
 SUPERVISOR_TS_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\] trainer started")
 
@@ -130,10 +131,50 @@ def read_updates():
                             "pr_kl": float(g[15]) if g[15] is not None else None,
                             "pr_coef": float(g[16]) if g[16] is not None else None,
                             "lr": g[17],
+                            "ev": float(g[18]) if g[18] is not None else None,
+                            "vl": float(g[8]),
                         }
         except OSError:
             pass
     return [by_no[k] for k in sorted(by_no)]
+
+
+def trend(values, window=30):
+    """Significance-aware trend over the last `window` points.
+
+    Returns (mean, std, drift, n, verdict). 'flat' when the total drift across
+    the window is smaller than the run-to-run noise (std) — so a single high or
+    low point can NEVER read as a real trend. This is the core anti-"tiny
+    snippet" guard: it answers "is this actually moving?" instead of leaving
+    you to eyeball a noisy line."""
+    v = [x for x in values[-window:] if x is not None]
+    if len(v) < 6:
+        return None
+    n = len(v)
+    mean = sum(v) / n
+    std = (sum((x - mean) ** 2 for x in v) / n) ** 0.5
+    xm = (n - 1) / 2.0
+    den = sum((i - xm) ** 2 for i in range(n)) or 1.0
+    slope = sum((i - xm) * (v[i] - mean) for i in range(n)) / den
+    drift = slope * (n - 1)                       # total change across window
+    if std < 1e-9 or abs(drift) < 0.6 * std:      # drift buried in the noise
+        verdict = "flat"
+    else:
+        verdict = "rising" if drift > 0 else "falling"
+    return mean, std, drift, n, verdict
+
+
+def read_status():
+    """(state, detail) from logs/supervisor_status.txt, or (None, '')."""
+    try:
+        with open(os.path.join(LOGS, "supervisor_status.txt"),
+                  encoding="utf-8") as f:
+            parts = [p.strip() for p in f.read().strip().split("|")]
+        if len(parts) >= 2:
+            return parts[1], (parts[2] if len(parts) > 2 else "")
+    except Exception:
+        pass
+    return None, ""
 
 
 def read_restarts_24h():
@@ -328,16 +369,34 @@ def render():
     hb_age = (now - hb_t) if hb_t else None
 
     win_rate = 100.0 * life["wins"] / max(1, life["episodes"])
+
+    # --- live training context (latest update + supervisor + velocity) ---
+    state, state_detail = read_status()
+    last = updates[-1] if updates else {}
+    pr_coef = last.get("pr_coef")
+    ev_now = last.get("ev")
+    lr_now = last.get("lr")
+    STEPS_PER_UPDATE = 2048 * 3                  # rollout_steps * num_envs
+    upd_per_hr = (rate * 60.0 / STEPS_PER_UPDATE) if rate else None
+    teacher_pct = f"{100*(1-pr_coef/0.5):.0f}%" if pr_coef is not None else "—"
+
+    # significance-aware trends (the anti-"tiny snippet" verdicts)
+    ante_tr = trend([u["ante"] for u in updates], 30)
+    kl_tr = trend([u["kl"] for u in updates], 10)
+
     cards = [
-        ("Wins", f"{life['wins']}"),
+        ("Wins (lifetime)", f"{life['wins']}"),
         ("Episodes", f"{life['episodes']:,}"),
-        ("Win rate", f"{win_rate:.2f}%"),
         ("Best ante", f"{life['highest_ante']}"),
-        ("Last win", f"{lw[0]:.0f}h / {lw[1]} games" if lw else "none in window"),
-        ("Global step", f"{hb_step:,}" if hb_step else "?"),
+        ("Update", f"{last.get('no','?')}"),
+        ("Teacher released", teacher_pct),
+        ("Value fit EV", f"{ev_now:.2f}" if ev_now is not None else "—"),
+        ("LR", lr_now or "—"),
+        ("Updates/hr", f"{upd_per_hr:.1f}" if upd_per_hr else "(refresh)"),
         ("Steps/min", f"{rate:.0f}" if rate else "(refresh)"),
+        ("Status", state or "—"),
         ("Restarts 24h", f"{restarts}" if restarts is not None else "?"),
-        ("Heartbeat", f"{hb_age:.0f}s ago" if hb_age is not None else "MISSING"),
+        ("Heartbeat", f"{hb_age:.0f}s" if hb_age is not None else "MISSING"),
     ]
     card_html = "".join(
         f"<div class='card'><div class='num'>{v}</div><div class='lbl'>{k}</div></div>"
@@ -346,6 +405,40 @@ def render():
     hb_warn = ""
     if hb_age is not None and hb_age > 300:
         hb_warn = "<p class='warn'>heartbeat stale &gt;5min — trainer may be down</p>"
+
+    # --- Current read: honest, noise-aware one-glance summary ---
+    def _verdict(label, tr, unit=""):
+        if tr is None:
+            return f"<li><b>{label}:</b> <span class='dim'>not enough data yet</span></li>"
+        mean, std, drift, n, verd = tr
+        col = {"rising": "#7dd87d", "falling": "#e05a5a", "flat": "#c9a227"}[verd]
+        return (f"<li><b>{label}:</b> {mean:.2f}{unit} "
+                f"<span class='dim'>(±{std:.2f} run-to-run, n={n})</span> — "
+                f"<b style='color:{col}'>{verd.upper()}</b> "
+                f"<span class='dim'>over last {n} updates (drift {drift:+.2f}{unit})</span></li>")
+    read_lines = [_verdict("Ante (ground truth)", ante_tr)]
+    if kl_tr is not None:
+        klm = kl_tr[0]
+        mv = "moving" if klm > 0.004 else "near-frozen (not learning)"
+        read_lines.append(
+            f"<li><b>Policy movement:</b> KL {klm:.4f} (last 10) — {mv} "
+            f"<span class='dim'>(healthy 0.01–0.05; &lt;0.003 = stuck)</span></li>")
+    if pr_coef is not None:
+        read_lines.append(
+            f"<li><b>Teacher (prior-KL):</b> coef {pr_coef:.2f}, {teacher_pct} released "
+            f"<span class='dim'>(→0 ≈ U629 = full policy autonomy; can't truly "
+            f"surpass the heuristic until then)</span></li>")
+    if ev_now is not None:
+        evq = "healthy" if ev_now > 0.5 else ("weak" if ev_now > 0.2 else "POOR")
+        read_lines.append(
+            f"<li><b>Value fit (EV):</b> {ev_now:.2f} — {evq} "
+            f"<span class='dim'>(near 1 = good advantages; &lt;0.2 = noisy gradient)</span></li>")
+    vel = f"{upd_per_hr:.1f} updates/hr" if upd_per_hr else "computing"
+    st = (state or "?") + (f" — {state_detail}" if state_detail else "")
+    read_lines.append(
+        f"<li><b>Throughput / health:</b> {vel}; supervisor says "
+        f"<b>{html.escape(st)}</b></li>")
+    current_read = "".join(read_lines)
 
     # --- Outcomes ---
     ante_chart = svg_line([("mean ante / 200 games", "#e0a93e", [c["mean_ante"] for c in chunks])])
@@ -370,6 +463,17 @@ def render():
     bc_chart = svg_line(
         [("BC loss", "#e05a5a", [u["bc"] for u in updates])],
         hlines=[(BC_FLAT_LINE, f"flat-line watch {BC_FLAT_LINE}")], vlines=vl, **small)
+    # Per-update ante: raw (faint) vs rolling-10 (bold) so the eye follows the
+    # SIGNAL not the per-update noise. Ante is gameplay -> comparable across regimes.
+    ante_u = [u["ante"] for u in updates]
+    ante_u_chart = svg_line([
+        ("ante / update (noisy)", "#5a6a7a", ante_u),
+        ("rolling-10 (the signal)", "#e0a93e", rolling(ante_u, window=10)),
+    ], vlines=vl, **small)
+    ev_series = [u.get("ev") for u in updates if u.get("ev") is not None]
+    ev_chart = (svg_line([("explained var", "#7dd8c0", ev_series)],
+                         hlines=[(0.5, "weak below")], **small)
+                if len(ev_series) >= 2 else "<p class='dim'>EV logged from U547 on</p>")
 
     # Metric-trust panel — the "verify the path, don't read across a regime" lesson.
     regime_caveats = "".join(
@@ -391,12 +495,15 @@ def render():
             return "<td class='dim'>—</td>"
         return f"<td>{u['pr_kl']:.3f}@{u['pr_coef']:.2f}</td>"
 
+    def _ev_cell(u):
+        return f"<td>{u['ev']:.2f}</td>" if u.get("ev") is not None else "<td class='dim'>—</td>"
+
     upd_rows = "".join(
         f"<tr><td>{u['no']}</td><td>{u['step']:,}</td><td>{u['r']:.2f}</td><td>{u['ante']:.1f}</td>"
         f"<td>{u['ent']:.3f}</td><td>{u['kl']:.4f}</td><td>{u['cf']:.3f}</td>"
-        f"<td>{u['bc']:.2f}@{u['bc_coef']:.2f} ({u['bc_frac']}%)</td>{_pr_cell(u)}<td>{u['lr']}</td></tr>"
+        f"<td>{u['bc']:.2f}@{u['bc_coef']:.2f} ({u['bc_frac']}%)</td>{_pr_cell(u)}<td>{u['lr']}</td>{_ev_cell(u)}</tr>"
         for u in reversed(updates[-10:])
-    ) or "<tr><td colspan='10' class='dim'>no update lines parsed yet</td></tr>"
+    ) or "<tr><td colspan='11' class='dim'>no update lines parsed yet</td></tr>"
 
     day_rows = "".join(
         f"<tr><td>{d}</td><td>{s['games']}</td><td>{s['wins']}</td>"
@@ -419,11 +526,17 @@ def render():
  th {{ color:#999; font-weight:500; }} td:first-child, th:first-child {{ text-align:left; }}
  .dim {{ color:#777; }} .warn {{ color:#e05a5a; font-weight:600; }}
  .note {{ color:#888; font-size:12px; }}
+ .read {{ background:#1b1f1b; border-left:3px solid #5a7a5a; border-radius:6px; padding:10px 14px 10px 26px; margin:6px 0; list-style:disc; }}
+ .read li {{ margin:3px 0; }}
 </style></head><body>
 <h1>Balatron — live training dashboard</h1>
 <p class='note'>auto-refreshes every 30s · reads logs/ directly · trend buckets = {CHUNK} games since {ERA_START}</p>
 {hb_warn}
 <div class='cards'>{card_html}</div>
+
+<h2>Current read <span class='note'>— honest one-glance summary, computed &amp; noise-aware</span></h2>
+<ul class='read'>{current_read}</ul>
+<p class='note'>A single update is noisy — ante swings ±0.5 and R ±5 update-to-update. Each verdict compares the trend's <em>drift</em> to its <em>run-to-run noise</em>: <b>FLAT</b> means the move is inside the noise, so don't read a real change into one or two data points. Sample sizes (n=) are shown so you know how much data backs each number.</p>
 
 <h2>Outcomes — is he getting deeper? <span class='note'>(ground truth — no accounting change moves these)</span></h2>
 {ante_chart}
@@ -432,9 +545,11 @@ def render():
 <h2>Learning health — per PPO update ({len(updates)} parsed)</h2>
 <p class='note'>Dashed amber lines mark <b>regime boundaries</b> — points where a metric's level shifted for a measurement reason, not gameplay. Do not read a trend across one.</p>
 <div class='grid'>
+ <div><h3>Ante per update — raw (noisy) vs rolling-10 (the signal)</h3>{ante_u_chart}</div>
  <div><h3>Episode reward — shaped &amp; accounting-sensitive (not ground truth)</h3>{r_chart}</div>
- <div><h3>Entropy — gradual decline ok, cliff = exploration collapse</h3>{ent_chart}</div>
  <div><h3>Policy movement — healthy: KL 0.01–0.05, CF 0.1–0.2</h3>{kl_chart}</div>
+ <div><h3>Entropy — gradual decline ok, cliff = exploration collapse</h3>{ent_chart}</div>
+ <div><h3>Value fit (explained var) — near 1 good, &lt;0.2 = noisy gradient</h3>{ev_chart}</div>
  <div><h3>BC imitation loss — flat at watch line after 50 updates → raise bc_coef</h3>{bc_chart}</div>
 </div>
 
@@ -451,7 +566,8 @@ def render():
 </div>
 
 <h2>Recent PPO updates</h2>
-<table><tr><th>Update</th><th>Step</th><th>R</th><th>Ante</th><th>Ent</th><th>KL</th><th>CF</th><th>BC</th><th>Pr</th><th>LR</th></tr>{upd_rows}</table>
+<table><tr><th>Update</th><th>Step</th><th>R</th><th>Ante</th><th>Ent</th><th>KL</th><th>CF</th><th>BC</th><th>Pr</th><th>LR</th><th>EV</th></tr>{upd_rows}</table>
+<p class='note'>One row = one update. Each is noisy — use the Current read above for the trend, not any single row.</p>
 
 <h2>By day (rolling 5,000-game window)</h2>
 <table><tr><th>Date</th><th>Games</th><th>Wins</th><th>Win %</th><th>Mean ante</th></tr>{day_rows}</table>
