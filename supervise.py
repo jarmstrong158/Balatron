@@ -752,6 +752,29 @@ def main():
                                          f"{rate:.0f} steps/min, freed {reclaimed}")
                             step_samples.clear()
                             continue
+                        # No leak to reclaim. If we've already recycled
+                        # repeatedly and the crawl persists, the cause is
+                        # EXTERNAL CONTENTION (the user actively using the PC —
+                        # the games get starved of CPU/GPU). Recycling is then
+                        # futile AND harmful: it thrashes 3 games + trainer every
+                        # ~18min and a rollout never completes, so progress is
+                        # ZERO (06-17: 18 recycles in 5h, stuck at ckpt 558 for
+                        # 45h). Back off — leave the trainer alive so it makes
+                        # SLOW progress until contention clears.
+                        recent = [t for t in recycle_times
+                                  if now - t < RECYCLE_BURST_WINDOW_S]
+                        recycle_times[:] = recent
+                        if len(recent) >= RECYCLE_BURST_LIMIT:
+                            log(f"CRAWL {rate:.0f} steps/min, but {len(recent)} "
+                                f"recycles/h didn't help (no leak, RAM "
+                                f"{system_ram_pct():.0f}%) — backing off. External "
+                                f"contention; letting it crawl-but-progress.")
+                            write_status("CRAWL_BACKOFF",
+                                         f"{rate:.0f} steps/min, external "
+                                         f"contention — not recycling")
+                            step_samples.clear()
+                            time.sleep(CHECK_INTERVAL_S)
+                            continue
                         recycle_stack(f"CRAWL: {rate:.0f} steps/min over "
                                       f"{span/60:.0f}min (floor "
                                       f"{RATE_FLOOR_PER_MIN:.0f})")
