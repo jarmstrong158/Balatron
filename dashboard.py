@@ -384,10 +384,12 @@ def render():
     ante_tr = trend([u["ante"] for u in updates], 30)
     kl_tr = trend([u["kl"] for u in updates], 10)
 
+    recent_best = max((r["ante"] for r in rows[-500:]), default=0) if rows else 0
     cards = [
         ("Wins (lifetime)", f"{life['wins']}"),
         ("Episodes", f"{life['episodes']:,}"),
-        ("Best ante", f"{life['highest_ante']}"),
+        ("Best ante (all-time)", f"{life['highest_ante']}"),
+        ("Best ante (last 500)", f"{recent_best}" if recent_best else "—"),
         ("Update", f"{last.get('no','?')}"),
         ("Teacher released", teacher_pct),
         ("Value fit EV", f"{ev_now:.2f}" if ev_now is not None else "—"),
