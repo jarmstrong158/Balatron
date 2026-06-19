@@ -323,7 +323,7 @@ class PPOTrainer:
         """Store a transition from environment interaction.
 
         Args:
-            state: state vector (833,)
+            state: state vector (838,)
             action: action array (14,) — [type, cards×12, target]
             log_prob: log probability of the action under current policy
             reward: shaped reward

@@ -55,7 +55,7 @@ balatron/
 
 ---
 
-## State Vector Layout (833 floats)
+## State Vector Layout (838 floats)
 
 Section sizes are the constants in `environment/game_state.py`;
 `STATE_VECTOR_SIZE` is their sum. That file is authoritative for the
@@ -77,8 +77,10 @@ exact per-field encoding — keep the totals below in sync with it.
 11   Hand-Eval Features    40    scoring/risk features (indices 777–816)
 12   Shop Context          16    marginal joker value / build coverage /
                                  economy — SHOP only (indices 817–832)
+13   Joker Velocity         5    per-owned-joker Δ scaled value over last 8
+                                 hands, signed-log (indices 833–837)
      ----------------------------------------------------------------
-     TOTAL                833
+     TOTAL                838
 ```
 
 ### State Vector Design Notes
@@ -181,10 +183,10 @@ Values from `environment/reward.py` (constants `REWARD_*`). Win is gated on `ant
 ## Network Architecture (2.11M parameters)
 
 ```
-Input (833)
+Input (838)
   |
   Shared Trunk (3 layers, LayerNorm + ReLU each):
-    833 -> 768 (641K params)
+    838 -> 768 (644K params)
     768 -> 768 (591K params)
     768 -> 512 (394K params)
   |
@@ -380,7 +382,7 @@ cards, hand, shop, vouchers, packs, pack
 
 - **Phase:** Live training — Phase 1, Path A (policy authority), N=3 parallel instances
 - **data/jokers.py:** COMPLETE — 150 jokers, validation
-- **environment/game_state.py:** COMPLETE — API client, EventDetector, ScalingTracker, 833-float state vector (incl. 16-feature shop context)
+- **environment/game_state.py:** COMPLETE — API client, EventDetector, ScalingTracker, 838-float state vector (incl. 16-feature shop context + 5-dim per-joker growth velocity)
 - **environment/action_space.py:** COMPLETE — 14 action types, 45-dim head, legality masking, ActionDecoder
 - **environment/reward.py:** COMPLETE — shaped rewards (see table), log-scaled, three-phase weighting
 - **agent/network.py:** COMPLETE — ~2.11M params, shared trunk, 3 policy heads + value head; legality-only mask + prior-KL

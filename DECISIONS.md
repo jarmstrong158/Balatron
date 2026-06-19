@@ -9,7 +9,7 @@ core logic. The machine-queryable mirror lives in `.context/` (Context Keeper).
 ## Architecture & Design Decisions
 
 ### Hybrid: PPO policy on top of a heuristic layer
-The agent is **not** pure RL. A PPO actor-critic (833-dim state → shared trunk
+The agent is **not** pure RL. A PPO actor-critic (838-dim state → shared trunk
 → 3 state-specific policy heads + value head, ReLU) makes the *judgment* calls
 (shop strategy, when to leave, risk, build direction), while a heavy heuristic
 layer (`hand_eval.py`, `action_space.py`, shop logic in `train.py`) computes the
@@ -98,6 +98,24 @@ Smoke-tested: type entropy 0.007 → 0.59 (285× headroom restored). **Expect an
 to regress hard** while the policy relearns play/discard/buy from near-scratch —
 the prior-KL cushions but won't erase it. Secondary (deferred stage 2): value &
 policy share the trunk and VL=15–30's gradient swamps the policy gradient ~3000×.
+
+### Per-joker growth velocity in the observation — 06-18 (`dec-020`)
+The joker fingerprint already encodes scaling *flags*, *increment size*,
+*start value*, and *current scaled value* — so "is this a scaler / how big /
+how high now" is covered. The genuine gap: a feedforward policy sees ONE state
+snapshot and can't infer recent growth *rate*, so it can't tell a compounding
+engine firing **now** from a high-increment joker that isn't actually firing
+(dead weight). Added a **JOKER_VELOCITY** block (5 dims, one per owned slot;
+**STATE_VECTOR_SIZE 833 → 838**). `ScalingTracker` snapshots each scaled value
+once **per hand played** into a rolling window (`VELOCITY_WINDOW=8`);
+`get_velocity` = current − oldest-in-window, signed-log-normalized (+ compounding,
+− decaying e.g. Ice Cream/Popcorn, 0 new/flat). Appended **last**, re-using the
+`dec-011` zero-pad migration pattern (verified end-to-end against the live U612
+checkpoint: 833 cols byte-preserved, 5 new cols exactly zero). Observation-only,
+no reward shaping. **Committed (`eccb883`) but NOT deployed** — deliberately
+sequenced behind the exploration lever (`dec-019`): the diagnosed plateau is
+exploration/convergence, not observation poverty, so deploying now would muddy
+attribution. The next trainer restart will pick it up and cleanly migrate.
 
 ### Multi-instance training: one brain, many bodies
 N parallel Balatro games (ports 12346+) feed ONE network. Per-env
