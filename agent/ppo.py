@@ -707,13 +707,13 @@ class PPOTrainer:
                     padded = torch.zeros(target_shape, dtype=v.dtype, device=v.device)
                     padded[:, :v.shape[1]] = v
                     compatible[k] = padded
-                    padded_keys.append(f"{k}: {v.shape} → {target_shape}")
+                    padded_keys.append(f"{k}: {v.shape} -> {target_shape}")
                 elif len(v.shape) == 1 and len(target_shape) == 1 and v.shape[0] < target_shape[0]:
                     # Bias grew — zero-pad
                     padded = torch.zeros(target_shape, dtype=v.dtype, device=v.device)
                     padded[:v.shape[0]] = v
                     compatible[k] = padded
-                    padded_keys.append(f"{k}: {v.shape} → {target_shape}")
+                    padded_keys.append(f"{k}: {v.shape} -> {target_shape}")
                 else:
                     skipped_keys.append(k)
             if padded_keys:

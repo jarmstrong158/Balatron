@@ -54,6 +54,15 @@ SHOP_PACK_SLOTS = 2
 # instead of choosing from raw joker fingerprints with no "how much does this
 # help MY build / am I keeping pace" context. Populated during SHOP only.
 SHOP_CONTEXT_SIZE = 16
+# Per-owned-joker recent growth velocity (06-18): Δ scaled value over the last
+# ScalingTracker.VELOCITY_WINDOW hands, one signed-log-normalized dim per joker
+# slot. A feedforward policy sees only a single state snapshot and cannot infer
+# temporal growth RATE from it — the fingerprint already exposes scaling flags,
+# increment size, and current value, but not "is this engine compounding NOW."
+# This distinguishes a firing xmult engine from a high-increment joker that
+# isn't actually scaling (dead weight). Appended LAST so checkpoint migration's
+# end-zero-padding keeps all previously-trained input weights aligned.
+JOKER_VELOCITY_SIZE = JOKER_SLOTS  # 5: one velocity dim per owned joker slot
 
 STATE_VECTOR_SIZE = (
     GAME_META_SIZE
@@ -68,6 +77,7 @@ STATE_VECTOR_SIZE = (
     + SHOP_PACK_SLOTS * SHOP_PACK_SIZE
     + HAND_EVAL_FEATURES  # 40 hand evaluation features
     + SHOP_CONTEXT_SIZE   # 16 shop-decision context features
+    + JOKER_VELOCITY_SIZE  # 5 per-joker recent growth velocity (appended last)
 )
 
 # Rank/suit mappings for dense encoding
@@ -288,6 +298,12 @@ class ScalingTracker:
     events between gamestate snapshots.
     """
 
+    # Number of recent HANDS over which velocity (recent compounding rate) is
+    # measured. velocity = current_value - value_(window hands ago). 8 ≈ one
+    # blind's worth of hands, long enough to smooth single-hand noise but short
+    # enough to reflect "is this engine firing NOW" rather than lifetime total.
+    VELOCITY_WINDOW = 8
+
     def __init__(self):
         self.reset()
 
@@ -297,6 +313,12 @@ class ScalingTracker:
         self._event_counters: dict[int, int] = {}   # slot_id → event count
         self._expiry_counters: dict[int, int] = {}   # slot_id → remaining
         self._joker_keys: dict[int, str] = {}        # slot_id → joker key
+        # Rolling history of scaled values, snapshotted ONCE PER HAND PLAYED
+        # (not per step — so the window tracks growth across recent HANDS and
+        # persists through shop/menu steps). Powers get_velocity(): the recent
+        # compounding rate, which a feedforward policy cannot infer from a
+        # single snapshot. slot_id → list[float] (oldest first, len<=window).
+        self._value_history: dict[int, list[float]] = {}
         self._consecutive_no_face: int = 0           # Ride the Bus
         self._consecutive_no_most_played: int = 0    # Obelisk
 
@@ -316,6 +338,7 @@ class ScalingTracker:
                 self._joker_values[slot_id] = start if start is not None else 0.0
                 self._event_counters[slot_id] = 0
                 self._joker_keys[slot_id] = key
+                self._value_history[slot_id] = []   # fresh joker → no velocity yet
 
                 # Initialize expiry
                 if schema.get("expiry"):
@@ -331,6 +354,7 @@ class ScalingTracker:
             self._joker_values.pop(slot_id, None)
             self._event_counters.pop(slot_id, None)
             self._expiry_counters.pop(slot_id, None)
+            self._value_history.pop(slot_id, None)
 
     def update(self, events: list[str], event_counts: dict[str, int],
                action_context: Optional[dict] = None):
@@ -369,6 +393,16 @@ class ScalingTracker:
             self._update_decay(slot_id, schema, events, event_counts)
             self._update_reset(slot_id, schema, events, ctx)
             self._update_expiry(slot_id, schema, events)
+
+        # Snapshot post-update values once per HAND PLAYED. The window then
+        # spans the last VELOCITY_WINDOW hands regardless of how many shop/menu
+        # steps fall between them, so get_velocity() reflects per-hand growth.
+        if "any_hand_played" in events:
+            for slot_id in self._joker_keys:
+                hist = self._value_history.setdefault(slot_id, [])
+                hist.append(self._joker_values.get(slot_id, 0.0))
+                if len(hist) > self.VELOCITY_WINDOW:
+                    del hist[0]
 
     def _update_growth(self, slot_id: int, schema: dict,
                        events: list[str], event_counts: dict[str, int],
@@ -480,6 +514,21 @@ class ScalingTracker:
     def get_value(self, slot_id: int) -> float:
         """Get current scaled value for a joker slot."""
         return self._joker_values.get(slot_id, 0.0)
+
+    def get_velocity(self, slot_id: int) -> float:
+        """Recent growth velocity: Δ scaled value over the last window of hands.
+
+        Returns current_value minus the oldest value still inside the
+        VELOCITY_WINDOW (i.e. growth across the last <=window hands played).
+        0.0 until at least two snapshots exist, so a freshly-acquired joker —
+        or one in a hand-less menu stretch — reports no velocity. Signed:
+        positive for compounding engines, negative for decaying jokers (e.g.
+        Ice Cream / Popcorn) that are bleeding out.
+        """
+        hist = self._value_history.get(slot_id)
+        if not hist or len(hist) < 2:
+            return 0.0
+        return self._joker_values.get(slot_id, 0.0) - hist[0]
 
     def get_expiry_remaining(self, slot_id: int) -> int:
         """Get remaining expiry count. -1 if no expiry."""
@@ -1021,6 +1070,9 @@ class GameStateManager:
         # Section 10: Shop-Decision Context (16)
         offset = self._encode_shop_context(vec, offset, raw)
 
+        # Section 11: Per-Joker Growth Velocity (5) — appended last
+        offset = self._encode_joker_velocity(vec, offset, raw)
+
         assert offset == STATE_VECTOR_SIZE, f"Vector size mismatch: {offset} != {STATE_VECTOR_SIZE}"
         return vec
 
@@ -1466,6 +1518,30 @@ class GameStateManager:
             # else: stays zero-padded
 
         return offset + JOKER_SLOTS * JOKER_SLOT_SIZE
+
+    def _encode_joker_velocity(self, vec: np.ndarray, offset: int, raw: dict) -> int:
+        """Encode per-owned-joker recent growth velocity (one dim per slot).
+
+        Mirrors _encode_jokers' slot ordering exactly (same joker_cards list,
+        same card["id"] → ScalingTracker mapping) so velocity dim i lines up
+        with the joker whose fingerprint occupies slot i. Empty slots stay 0.
+
+        Velocity is signed-log-normalized to keep large compounding values in a
+        bounded range while preserving sign: +ve = engine firing/compounding,
+        -ve = a decaying joker bleeding out, 0 = flat / new / no hands yet.
+        """
+        joker_cards = raw.get("jokers", {}).get("cards", [])
+        n_jokers = min(len(joker_cards), JOKER_SLOTS)
+
+        for slot_idx in range(n_jokers):
+            card = joker_cards[slot_idx]
+            v = self._scaling_tracker.get_velocity(card["id"])
+            if v != 0.0:
+                sign = 1.0 if v > 0.0 else -1.0
+                vec[offset + slot_idx] = sign * _log_norm(abs(v), 2.0)
+            # else: stays zero-padded
+
+        return offset + JOKER_VELOCITY_SIZE
 
     @staticmethod
     def _compute_deck_suit_fractions(deck_cards: list[dict]) -> dict[str, float]:
