@@ -547,6 +547,10 @@ def start_trainer() -> bool:
          "--device", "cpu",
          "--checkpoint-interval", "2",
          "--num-envs", str(NUM_ENVS),
+         "--no-record",  # win-replay ffmpeg recorder OFF: ~0 wins/run while we're
+                         # in the flat-ante regime, so it captured-and-discarded
+                         # 100% of footage — pure CPU/gdigrab contention that was
+                         # starving the games (06-20). Re-enable once winning.
          "--checkpoint", cp],
         env=env, cwd=REPO,
         stdout=trainer_log, stderr=subprocess.STDOUT,
