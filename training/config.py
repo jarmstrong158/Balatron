@@ -27,13 +27,20 @@ class TrainConfig:
     gamma: float = 0.995
     gae_lambda: float = 0.95
     clip_epsilon: float = 0.2
-    entropy_coef: float = 0.04   # 0.01 -> 0.025 -> 0.04 (06-13): the policy is
-                                 # over-confident post-BC (real entropy ~0.2,
-                                 # PL~0 — barely moving). 0.025 did NOT raise it,
-                                 # so escalated to 0.04 to force exploration so
-                                 # PPO can surpass the heuristic under Path A.
-                                 # Watch entropy toward ~0.5-0.8; if play turns
-                                 # erratic (ante craters & stays), dial back.
+    entropy_coef: float = 0.10   # 0.01->0.025->0.04->0.06->0.10 (06-20). The
+                                 # policy is over-confident post-BC and ante is a
+                                 # converged local optimum (~3.7, value fn healthy
+                                 # EV 0.7+). AUDIT (06-20): small bumps don't work
+                                 # because the entropy bonus is swamped in the loss
+                                 # by the value gradient on the SHARED trunk — at
+                                 # VL~20, value term (0.5*20=10) is ~370x the entropy
+                                 # term (0.06*0.45=0.027), so 0.025/0.04/0.06 all
+                                 # park entropy at ~0.44. target_kl(0.03) is NOT the
+                                 # limiter (live KL 0.002-0.008). 0.10 is a real step
+                                 # to test responsiveness. If entropy STILL sticks at
+                                 # ~0.45, it's confirmed structural -> next lever is
+                                 # lowering value_coef (0.5->0.25) or decoupling the
+                                 # value/policy trunk. If play craters & stays, revert.
     value_coef: float = 0.5
     # 8 epochs: rollouts cost ~25 min of live game, the update costs
     # seconds — extract more learning per rollout, target_kl bounds drift.
@@ -58,6 +65,17 @@ class TrainConfig:
 
     # Recording
     record_wins: bool = True            # Record runs and save wins to recordings/wins/
+
+    # Self-imitation demo capture (Phase 1: capture-only, behavior-neutral).
+    # Logs the (state, action, mask, head) trajectory of any run that WINS or
+    # reaches ante >= demo_min_ante to a persistent buffer, so Phase 2 can
+    # replay the agent's own successes through the BC loss. Capture does NOT
+    # touch the policy — safe to run alongside other experiments.
+    collect_demos: bool = True
+    demo_capacity: int = 30000          # transitions (~100-200 full runs)
+    demo_min_ante: int = 6              # capture runs reaching >= this ante
+    demo_path: str = "demos/win_demos.npz"
+    demo_save_every: int = 3            # flush to disk every N captured runs
 
     # Parallel game instances (ports 12346..12346+N-1); env 0 records
     num_envs: int = 1

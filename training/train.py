@@ -61,6 +61,7 @@ from environment.hand_eval import (
     evaluate_pack_tarot, evaluate_pack_spectral, pick_best_planet,
 )
 from recorder import RunRecorder
+from demo_buffer import DemoBuffer
 from training.config import TrainConfig
 from training.episode_tracker import EpisodeTracker
 from training.env_session import EnvSession
@@ -103,6 +104,19 @@ class Trainer:
         # env 0 owns the real recorder; rec_port=12346 lets it target env 0's
         # specific game window (not an arbitrary same-titled parallel game).
         self.recorder = RunRecorder(enabled=config.record_wins, rec_port=12346)
+
+        # Self-imitation demo buffer (Phase 1: capture-only). Persisted across
+        # restarts so wins aren't lost on the frequent supervisor recycles.
+        # ALL envs feed it (not just env 0 — unlike the video recorder, demo
+        # capture is just data, so every parallel game's wins are worth saving).
+        self.demo_buffer = DemoBuffer(
+            capacity=config.demo_capacity,
+            state_dim=STATE_VECTOR_SIZE,
+            action_dim=14,
+            mask_dim=ACTION_HEAD_SIZE,
+            path=config.demo_path,
+        ) if config.collect_demos else None
+        self._demo_captures = 0  # count of trajectories captured this session
 
         # POLICY AUTHORITY (real-RL mode). When True, the network's chosen
         # action actually executes: it owns play-vs-discard and which joker to
@@ -158,6 +172,36 @@ class Trainer:
         except OSError:
             pass  # never let liveness reporting break training
 
+    def _maybe_capture_demo(self, env):
+        """Flush this episode's trajectory to the demo buffer iff it WON or
+        reached a high ante; otherwise drop it. Called on every run-finished
+        path via _reset_run_state, BEFORE the win/ante flags are cleared.
+
+        Phase-1 self-imitation capture: pure logging, never reads back into
+        the policy. Every env feeds it (demo capture is just data, so unlike
+        the single-window video recorder, all parallel games' wins count)."""
+        if self.demo_buffer is None:
+            return
+        traj = env.episode_traj
+        keep = bool(traj) and (
+            env.win_recorded or env.max_ante_seen >= self.config.demo_min_ante)
+        if keep:
+            n = self.demo_buffer.add_trajectory(
+                [t[0] for t in traj], [t[1] for t in traj],
+                [t[2] for t in traj], [t[3] for t in traj],
+            )
+            self._demo_captures += 1
+            print(f"[DEMO] captured: env{env.env_id} ante={env.max_ante_seen} "
+                  f"won={env.win_recorded} steps={n} | "
+                  f"buffer={len(self.demo_buffer)} "
+                  f"(lifetime {self.demo_buffer.trajectories_added} traj)",
+                  flush=True)
+            if self._demo_captures % self.config.demo_save_every == 0:
+                self.demo_buffer.save()
+        # Always clear the accumulator for the next run.
+        env.episode_traj = []
+        env.max_ante_seen = 1
+
     def _reset_run_state(self, env):
         """Clear all per-run flags and pending state.
 
@@ -168,6 +212,10 @@ class Trainer:
         counted, and video-recorded as a win. Stale _pending_* could fire
         actions aimed at the previous run's shop.
         """
+        # Capture the just-finished run's trajectory BEFORE clearing the win/
+        # ante flags this decision depends on.
+        self._maybe_capture_demo(env)
+
         env.win_recorded = False
         env.win_reward_stored = False
         env.pending_upgrade_buy = None
@@ -1003,6 +1051,16 @@ class Trainer:
                 False, action_mask, game_state_name,
                 bc_flag=was_override, env_id=env.env_id,
             )
+            # Self-imitation capture (Phase 1): accumulate this REAL step into
+            # the episode trajectory; _reset_run_state flushes it to the demo
+            # buffer iff the run wins / reaches a high ante. Pure logging.
+            if self.demo_buffer is not None:
+                env.episode_traj.append((
+                    state_vec.copy(), action_np.copy(), action_mask.copy(),
+                    get_head_index(game_state_name),
+                ))
+                if ante > env.max_ante_seen:
+                    env.max_ante_seen = ante
             # Liveness heartbeat: touch on every REAL step so the
             # supervisor can distinguish a frozen trainer from a working
             # one. Wedges keep finding new shapes (post-win start hang,

@@ -59,3 +59,10 @@ class EnvSession:
         self.auto_action_this_step = False
         self.last_transition_fire = (None, 0.0, None)
         self.last_transition = None
+
+        # Self-imitation capture (Phase 1): accumulate this episode's REAL
+        # (state, action, mask, head_idx) steps; flushed to the demo buffer on
+        # a win / high-ante finish, discarded otherwise. Behavior-neutral —
+        # pure logging, never reads back into the policy in Phase 1.
+        self.episode_traj: list = []
+        self.max_ante_seen: int = 1
