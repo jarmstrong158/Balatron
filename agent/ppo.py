@@ -45,6 +45,13 @@ class PPOConfig:
     value_coef: float = 0.5          # Value loss weight
     max_grad_norm: float = 0.5       # Gradient clipping
 
+    # Self-imitation learning (SIL Phase 2): replay saved winning/high-ante
+    # trajectories through an imitation loss so the policy reinforces its own
+    # rare successes instead of forgetting them. Off-policy demos get their own
+    # forward pass — never enter policy_loss/value_loss. 0.0 = off.
+    sil_coef: float = 0.0            # Self-imitation loss weight
+    sil_batch_size: int = 256        # Demo transitions sampled per minibatch
+
     # Training schedule
     # Rollouts cost ~12 min of live-game wall-clock; the network update
     # costs seconds. More epochs per rollout extracts more learning per
@@ -287,6 +294,11 @@ class PPOTrainer:
             weight_decay=self.config.weight_decay,
         )
 
+        # Self-imitation demo source (SIL Phase 2). Set by the Trainer after
+        # construction (train.py). When set and sil_coef > 0, each minibatch
+        # also imitates a sample of saved winning-run transitions.
+        self.demo_buffer = None
+
         # Rollout buffers — one per parallel environment. Per-env buffers
         # keep amend_last (terminal/settle credits) and GAE temporal
         # adjacency trivially correct: each env's transitions stay
@@ -455,6 +467,7 @@ class PPOTrainer:
             "bc_fraction": float(c_bc_flags.mean()) if n > 0 else 0.0,
             "prior_kl": 0.0,
             "prior_coef": self._prior_coef_now,
+            "sil_loss": 0.0,
             "total_loss": 0.0,
             "approx_kl": 0.0,
             "clip_fraction": 0.0,
@@ -495,8 +508,8 @@ class PPOTrainer:
                 # dict kept its initial 0.0 — the printed KL read 0.0000
                 # forever even when clip_fraction showed healthy drift.
                 for k in ["policy_loss", "value_loss", "entropy",
-                          "bc_loss", "prior_kl", "total_loss", "clip_fraction",
-                          "approx_kl"]:
+                          "bc_loss", "prior_kl", "sil_loss", "total_loss",
+                          "clip_fraction", "approx_kl"]:
                     metrics[k] += batch_metrics[k]
 
                 epoch_kl += batch_metrics["approx_kl"]
@@ -514,8 +527,8 @@ class PPOTrainer:
         # Average metrics
         if num_batches > 0:
             for k in ["policy_loss", "value_loss", "entropy",
-                      "bc_loss", "prior_kl", "total_loss", "approx_kl",
-                      "clip_fraction"]:
+                      "bc_loss", "prior_kl", "sil_loss", "total_loss",
+                      "approx_kl", "clip_fraction"]:
                 metrics[k] /= num_batches
 
         # Explained variance (over the combined set)
@@ -533,6 +546,44 @@ class PPOTrainer:
             buf.reset()
 
         return metrics
+
+    def _sil_loss(self) -> Optional[torch.Tensor]:
+        """Self-imitation loss: -mean(log pi(a|s)) over a sample of saved
+        winning/high-ante demo transitions. A SEPARATE forward pass from the
+        on-policy minibatch — demos are off-policy (no valid advantage/ratio),
+        so they must never enter policy_loss/value_loss; only this plain
+        imitation term touches them. Same mechanism as the BC loss, sourced
+        from the persistent demo buffer instead of in-rollout overrides.
+
+        Returns the loss tensor, or None if SIL is off / the buffer is empty.
+        """
+        cfg = self.config
+        if self.demo_buffer is None or cfg.sil_coef <= 0.0:
+            return None
+        demo = self.demo_buffer.sample(cfg.sil_batch_size)
+        if demo is None:
+            return None
+
+        states = torch.as_tensor(demo["states"], dtype=torch.float32,
+                                 device=self.device)
+        actions = torch.as_tensor(demo["actions"], dtype=torch.float32,
+                                  device=self.device)
+        masks = torch.as_tensor(demo["masks"], dtype=torch.float32,
+                                device=self.device)
+        heads = torch.as_tensor(demo["head_indices"], dtype=torch.long,
+                                device=self.device)
+
+        log_probs = torch.zeros(states.shape[0], device=self.device)
+        for h_idx in range(3):
+            hm = heads == h_idx
+            if not hm.any():
+                continue
+            _, h_lp, _, _, _ = self.network.get_action_and_value(
+                states[hm], h_idx, masks[hm], action=actions[hm])
+            log_probs[hm] = h_lp
+        # Clamp like the BC term: a target-inconsistent demo action could carry
+        # a ~-1e9 conditioned-target logit and one bad sample would dwarf it.
+        return -torch.clamp(log_probs, min=-30.0).mean()
 
     def _update_batch(self, batch: dict) -> dict:
         """Run single minibatch PPO update.
@@ -630,6 +681,12 @@ class PPOTrainer:
         # as a SEPARATE term that anneals out so the policy owns the decision.
         prior_kl_loss = prior_kl.mean()
 
+        # Self-imitation term — imitate saved winning-run actions (off-policy,
+        # own forward pass; never enters policy/value loss above).
+        sil_loss = self._sil_loss()
+        sil_term = sil_loss if sil_loss is not None \
+            else torch.zeros((), device=self.device)
+
         # Total loss
         total_loss = (
             policy_loss
@@ -637,6 +694,7 @@ class PPOTrainer:
             - cfg.entropy_coef * entropy_loss
             + self._bc_coef_now * bc_loss
             + self._prior_coef_now * prior_kl_loss
+            + cfg.sil_coef * sil_term
         )
 
         # Gradient step
@@ -655,6 +713,7 @@ class PPOTrainer:
             "entropy": entropy_loss.item(),
             "bc_loss": bc_loss.item(),
             "prior_kl": prior_kl_loss.item(),
+            "sil_loss": sil_term.item(),
             "total_loss": total_loss.item(),
             "approx_kl": approx_kl,
             "clip_fraction": clip_fraction,

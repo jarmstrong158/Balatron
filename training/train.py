@@ -117,6 +117,9 @@ class Trainer:
             path=config.demo_path,
         ) if config.collect_demos else None
         self._demo_captures = 0  # count of trajectories captured this session
+        # SIL Phase 2: let the PPO update sample this buffer for self-imitation
+        # (active only when config.sil_coef > 0; capture alone is Phase 1).
+        self.ppo.demo_buffer = self.demo_buffer
 
         # POLICY AUTHORITY (real-RL mode). When True, the network's chosen
         # action actually executes: it owns play-vs-discard and which joker to
@@ -1881,6 +1884,8 @@ class Trainer:
             f"({metrics.get('bc_fraction', 0.0):.0%}) | "
             f"Pr {metrics.get('prior_kl', 0.0):>6.3f}"
             f"@{metrics.get('prior_coef', 0.0):.2f} | "
+            f"SIL {metrics.get('sil_loss', 0.0):>5.2f}"
+            f"@{self.config.sil_coef:.2f} | "
             f"LR {self.ppo.get_learning_rate():.2e} | "
             f"EV {metrics.get('explained_variance', 0.0):>6.3f}"
         )

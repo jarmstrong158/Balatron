@@ -51,3 +51,6 @@ htmlcov/
 
 # Win recordings (generated; large)
 recordings/
+
+# Self-imitation demo buffer (data, not code)
+demos/

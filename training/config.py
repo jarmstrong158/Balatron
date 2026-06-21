@@ -41,12 +41,30 @@ class TrainConfig:
                                  # ~0.45, it's confirmed structural -> next lever is
                                  # lowering value_coef (0.5->0.25) or decoupling the
                                  # value/policy trunk. If play craters & stays, revert.
-    value_coef: float = 0.5
+    value_coef: float = 0.25         # 0.5 -> 0.25 (06-21). AUDIT root-cause fix:
+                                     # value & policy share the trunk, and at
+                                     # VL~20 the value term (0.5*20=10) swamped
+                                     # the policy+entropy gradient (~370x the
+                                     # entropy term, ~2000x policy_loss) — which
+                                     # is why entropy_coef 0.04->0.10 only moved
+                                     # entropy ~0.45->0.48 and ante stayed flat.
+                                     # Halving value_coef un-swamps the shared
+                                     # trunk so entropy can reach the band AND the
+                                     # policy gradient gets real influence. WATCH
+                                     # EV: value fn is healthy (~0.7); if EV craters
+                                     # (<0.5) we starved it — back off toward 0.4.
     # 8 epochs: rollouts cost ~25 min of live game, the update costs
     # seconds — extract more learning per rollout, target_kl bounds drift.
     num_epochs: int = 8
     num_minibatches: int = 4
     target_kl: float = 0.03
+
+    # Self-imitation (SIL Phase 2): replay the demo buffer's saved winning/
+    # high-ante runs through an imitation loss so the policy reinforces its own
+    # rare successes instead of forgetting them. Off by default (0.0); flip on
+    # once the demo buffer has a corpus. Small coef to avoid mode-collapse.
+    sil_coef: float = 0.0
+    sil_batch_size: int = 256
 
     # Logging
     log_interval: int = 1               # Log every N updates
@@ -95,4 +113,6 @@ class TrainConfig:
             anneal_lr=self.anneal_lr,
             device=self.device,
             num_envs=self.num_envs,
+            sil_coef=self.sil_coef,
+            sil_batch_size=self.sil_batch_size,
         )
