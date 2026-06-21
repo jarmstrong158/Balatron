@@ -285,6 +285,16 @@ Two recurring race classes, both triggered by fast programmatic transitions:
   management is psutil-based (no per-cycle PowerShell spawns). Health is mirrored
   to `logs/supervisor_status.txt`. Stop via a `SUPERVISOR_STOP` file. For
   overnight runs also disable standby: `powercfg /change standby-timeout-ac 0`.
+- **A SECOND crawl source — the win-replay recorder (06-20, `dec-021`).** Not
+  every crawl is the steamwebhelper RAM leak. The env-0 `RunRecorder`
+  (`recorder.py`, `ffmpeg gdigrab` @30fps libx264) screen-captures env-0's game
+  continuously and discards all footage unless the run wins — so at ~0 wins it's
+  pure CPU waste, and gdigrab contends with the games' own rendering. On a
+  CPU-saturated machine (RAM fine) this helped starve the games into a
+  34 steps/min crawl + recycle loop. Fix: supervisor launches the trainer with
+  `--no-record` while in the flat-ante/~0-win regime; re-enable once winning.
+  When diagnosing a crawl with healthy RAM, check `ffmpeg.exe` / overall CPU,
+  not just the leak.
 
 ### 7. Don't raise game speed to train faster — it destabilizes the game
 Rollout collection (the live game) is the real wall-clock bottleneck, not the
