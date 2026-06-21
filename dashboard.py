@@ -419,6 +419,22 @@ def render():
                 f"<b style='color:{col}'>{verd.upper()}</b> "
                 f"<span class='dim'>over last {n} updates (drift {drift:+.2f}{unit})</span></li>")
     read_lines = [_verdict("Ante (ground truth)", ante_tr)]
+    # Per-RUN distribution (what you SEE watching live). The ante mean above is
+    # bust-skewed: a run dying at ante 1 (often a disconnect/recycle artifact)
+    # cancels a run reaching ante 5, so the mean reads ~1 ante below the typical
+    # run. Median + reach-rates track what you actually watch far better.
+    rant = sorted(r["ante"] for r in rows[-100:] if r.get("ante") is not None)
+    if rant:
+        nr = len(rant)
+        med = rant[nr // 2] if nr % 2 else (rant[nr // 2 - 1] + rant[nr // 2]) / 2
+        pct5 = 100.0 * sum(1 for a in rant if a >= 5) / nr
+        pct4 = 100.0 * sum(1 for a in rant if a >= 4) / nr
+        bust = 100.0 * sum(1 for a in rant if a <= 2) / nr
+        read_lines.append(
+            f"<li><b>Typical run (last {nr}):</b> median ante <b>{med:g}</b>, "
+            f"<b>{pct5:.0f}%</b> reach 5+, {pct4:.0f}% reach 4+, {bust:.0f}% bust ≤2 "
+            f"<span class='dim'>(median tracks what you watch; the mean above is "
+            f"bust-skewed downward)</span></li>")
     if kl_tr is not None:
         klm = kl_tr[0]
         mv = "moving" if klm > 0.004 else "near-frozen (not learning)"
