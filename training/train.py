@@ -420,6 +420,10 @@ class Trainer:
         finally:
             # Final checkpoint
             self._save_checkpoint(tag="final")
+            # Persist the demo buffer so captures below the save-every
+            # threshold aren't lost on this (frequent) recycle. Atomic save.
+            if self.demo_buffer is not None:
+                self.demo_buffer.save()
             self.recorder.cleanup()
             for env in self.sessions:
                 await env.game.disconnect()

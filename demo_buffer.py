@@ -87,21 +87,32 @@ class DemoBuffer:
         }
 
     def save(self):
-        """Persist the filled portion to disk (compressed)."""
+        """Persist the filled portion to disk ATOMICALLY (compressed).
+
+        The supervisor hard-kills the trainer into this write path; a torn
+        savez leaves a corrupt npz and _load() would then silently start
+        empty, losing the WHOLE irreplaceable win corpus. Write to a temp
+        file then os.replace (atomic on the same volume).
+        """
         try:
             d = os.path.dirname(self.path)
             if d:
                 os.makedirs(d, exist_ok=True)
             n = len(self)
-            np.savez_compressed(
-                self.path,
-                states=self.states[:n],
-                actions=self.actions[:n],
-                masks=self.masks[:n],
-                head_indices=self.head_indices[:n],
-                meta=np.array([self.trajectories_added,
-                               self.transitions_added], dtype=np.int64),
-            )
+            tmp = self.path + ".tmp"
+            with open(tmp, "wb") as f:
+                np.savez_compressed(
+                    f,
+                    states=self.states[:n],
+                    actions=self.actions[:n],
+                    masks=self.masks[:n],
+                    head_indices=self.head_indices[:n],
+                    meta=np.array([self.trajectories_added,
+                                   self.transitions_added], dtype=np.int64),
+                )
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.path)
         except Exception as e:  # never let demo persistence break training
             print(f"[DEMO] save failed: {e}", flush=True)
 
@@ -110,8 +121,23 @@ class DemoBuffer:
             return
         try:
             d = np.load(self.path)
-            n = min(len(d["states"]), self.capacity)
-            self.states[:n] = d["states"][:n]
+            ds = d["states"]
+            n = min(len(ds), self.capacity)
+            old_dim = ds.shape[1] if ds.ndim == 2 else self.state_dim
+            # State-vector growth migration (mirrors ppo.load_checkpoint's
+            # zero-pad). The corpus is IRREPLACEABLE; a dim change must NOT
+            # silently throw and start empty (which is what plain assignment
+            # would do the next time STATE_VECTOR_SIZE grows).
+            if old_dim == self.state_dim:
+                self.states[:n] = ds[:n]
+            elif old_dim < self.state_dim:
+                self.states[:n, :old_dim] = ds[:n]   # zero-pad appended cols
+                print(f"[DEMO] migrated demos {old_dim}->{self.state_dim} "
+                      f"dims (zero-padded)", flush=True)
+            else:
+                self.states[:n] = ds[:n, :self.state_dim]  # state shrank: trim
+                print(f"[DEMO] migrated demos {old_dim}->{self.state_dim} "
+                      f"dims (truncated)", flush=True)
             self.actions[:n] = d["actions"][:n]
             self.masks[:n] = d["masks"][:n]
             self.head_indices[:n] = d["head_indices"][:n]
@@ -124,4 +150,8 @@ class DemoBuffer:
                   f"({self.trajectories_added} trajectories lifetime)",
                   flush=True)
         except Exception as e:
-            print(f"[DEMO] load failed ({e}) — starting empty", flush=True)
+            # Do NOT overwrite a possibly-good file with an empty buffer on a
+            # transient read error — leave self empty in memory but keep the
+            # on-disk corpus intact (save() only runs on a future capture).
+            print(f"[DEMO] load failed ({e}) — starting empty IN MEMORY "
+                  f"(on-disk file left untouched)", flush=True)

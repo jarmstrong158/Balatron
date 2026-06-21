@@ -93,7 +93,10 @@ class TrainConfig:
     demo_capacity: int = 30000          # transitions (~100-200 full runs)
     demo_min_ante: int = 6              # capture runs reaching >= this ante
     demo_path: str = "demos/win_demos.npz"
-    demo_save_every: int = 3            # flush to disk every N captured runs
+    demo_save_every: int = 1            # flush to disk every captured run —
+                                        # captures are rare (wins/ante>=6) and
+                                        # save() is atomic+cheap, so don't risk
+                                        # losing them to the ~20-30min recycle.
 
     # Parallel game instances (ports 12346..12346+N-1); env 0 records
     num_envs: int = 1

@@ -94,3 +94,42 @@ def test_load_truncates_to_smaller_capacity(tmp_path):
     small = DemoBuffer(40, SD, AD, MD, path=str(tmp_path / "demos.npz"))
     assert len(small) == 40
     assert small.full is True
+
+
+def test_load_migrates_grown_state_dim_zero_pads(tmp_path):
+    """The corpus is irreplaceable — a state-vector GROWTH must zero-pad the
+    appended columns on load, never throw-and-silently-start-empty."""
+    b = DemoBuffer(50, SD, AD, MD, path=str(tmp_path / "demos.npz"))
+    b.add_trajectory(*_traj(5, 1))   # states full of 1.0 at SD dims
+    b.save()
+    # reopen with a GROWN state dim (SD+2)
+    grown = DemoBuffer(50, SD + 2, AD, MD, path=str(tmp_path / "demos.npz"))
+    assert len(grown) == 5                                  # NOT wiped
+    assert (grown.states[0][:SD] == 1.0).all()             # old cols preserved
+    assert (grown.states[0][SD:] == 0.0).all()             # new cols zero-padded
+    # sampling still works at the new dim
+    s = grown.sample(3)
+    assert s["states"].shape == (3, SD + 2)
+
+
+def test_load_migrates_shrunk_state_dim_truncates(tmp_path):
+    b = DemoBuffer(50, SD, AD, MD, path=str(tmp_path / "demos.npz"))
+    b.add_trajectory(*_traj(5, 1))
+    b.save()
+    shrunk = DemoBuffer(50, SD - 3, AD, MD, path=str(tmp_path / "demos.npz"))
+    assert len(shrunk) == 5
+    assert shrunk.states.shape[1] == SD - 3
+    assert (shrunk.states[0] == 1.0).all()
+
+
+def test_save_leaves_no_tmp_and_is_reloadable(tmp_path):
+    """Atomic save: no leftover .tmp, and the file round-trips."""
+    import os
+    p = str(tmp_path / "demos.npz")
+    b = DemoBuffer(50, SD, AD, MD, path=p)
+    b.add_trajectory(*_traj(7, 4))
+    b.save()
+    assert os.path.exists(p)
+    assert not os.path.exists(p + ".tmp")
+    b2 = DemoBuffer(50, SD, AD, MD, path=p)
+    assert len(b2) == 7

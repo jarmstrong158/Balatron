@@ -75,9 +75,20 @@ class EpisodeTracker:
             "episodes": self._lifetime_episodes,
             "highest_ante": self._lifetime_highest_ante,
         }
+        self._atomic_json(self.STATS_FILE, data)
+
+    @staticmethod
+    def _atomic_json(path: str, data):
+        """Write JSON atomically (temp + os.replace) so a kill mid-write can't
+        corrupt the file — a torn lifetime_stats/win_log resets the displayed
+        lifetime totals / truncates win history to a single entry."""
         try:
-            with open(self.STATS_FILE, "w") as f:
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
         except OSError:
             pass
 
@@ -85,16 +96,12 @@ class EpisodeTracker:
         """Append a win record to the persistent win log."""
         os.makedirs(os.path.dirname(self.WIN_LOG_FILE) or ".", exist_ok=True)
         try:
-            try:
-                with open(self.WIN_LOG_FILE, "r") as f:
-                    wins_list: list = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                wins_list = []
-            wins_list.append(record)
-            with open(self.WIN_LOG_FILE, "w") as f:
-                json.dump(wins_list, f, indent=2)
-        except OSError:
-            pass
+            with open(self.WIN_LOG_FILE, "r") as f:
+                wins_list: list = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            wins_list = []
+        wins_list.append(record)
+        self._atomic_json(self.WIN_LOG_FILE, wins_list)
 
     def step(self, reward: float, ante: int, raw_state: dict = None, env_id: int = 0):
         """Record a single step."""

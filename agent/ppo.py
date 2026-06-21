@@ -14,6 +14,7 @@ Standard PPO with the following Balatron-specific additions:
 See NOTES.md for hyperparameter choices.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -729,16 +730,29 @@ class PPOTrainer:
         return self.optimizer.param_groups[0]["lr"]
 
     def save_checkpoint(self, path: str):
-        """Save network and optimizer state."""
-        torch.save({
-            "network_state_dict": self.network.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "total_updates": self.total_updates,
-            "total_steps": self.total_steps,
-            "bc_start_update": self.bc_start_update,
-            "prior_start_update": self.prior_start_update,
-            "config": self.config,
-        }, path)
+        """Save network and optimizer state ATOMICALLY.
+
+        The supervisor kills the trainer aggressively (age/crawl/freeze
+        recycles all hard-kill), and a torn torch.save onto the final path
+        leaves a truncated .pt that wedges the stack on next load. Write to a
+        temp file, fsync, then os.replace (atomic on the same NTFS volume) so
+        the final checkpoint is always either the old-complete or new-complete
+        file, never a half-written one.
+        """
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
+            torch.save({
+                "network_state_dict": self.network.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "total_updates": self.total_updates,
+                "total_steps": self.total_steps,
+                "bc_start_update": self.bc_start_update,
+                "prior_start_update": self.prior_start_update,
+                "config": self.config,
+            }, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
 
     def load_checkpoint(self, path: str):
         """Load network and optimizer state."""

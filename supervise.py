@@ -48,6 +48,7 @@ import socket
 import subprocess
 import sys
 import time
+import zipfile
 
 try:
     import psutil
@@ -317,9 +318,28 @@ def kill_port_owner(port: int):
 # State / health readers
 # ---------------------------------------------------------------------------
 
+def _checkpoint_ok(path: str) -> bool:
+    """Cheap integrity check WITHOUT importing torch: a complete torch.save .pt
+    is a zip archive (verified — these checkpoints are zip-format), so a torn/
+    truncated write fails is_zipfile() (missing end-of-central-directory). Lets
+    us skip a corrupt newest checkpoint instead of wedging the stack on it."""
+    try:
+        return os.path.getsize(path) > 1024 and zipfile.is_zipfile(path)
+    except OSError:
+        return False
+
+
 def newest_checkpoint() -> str:
+    """Newest checkpoint that is actually loadable. Skips corrupt/torn files
+    and falls back to the next-newest so one bad .pt can't boot-loop the
+    trainer (which refuses to start with no checkpoint)."""
     cps = glob.glob(CHECKPOINT_GLOB)
-    return max(cps, key=os.path.getmtime) if cps else ""
+    for p in sorted(cps, key=os.path.getmtime, reverse=True):
+        if _checkpoint_ok(p):
+            return p
+        log(f"WARN: checkpoint {os.path.basename(p)} is corrupt/torn — "
+            f"falling back to next-newest")
+    return ""
 
 
 def newest_checkpoint_age() -> float:
