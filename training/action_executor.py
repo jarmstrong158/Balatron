@@ -643,45 +643,12 @@ class ActionExecutor:
             if money < reroll_cost:
                 return "gamestate", None
 
-            # HARD GUARD: When there's a good buyable joker in shop, BUY IT
-            # instead of rerolling. Don't just block — force the buy action.
-            from environment.action_space import (
-                _estimate_joker_value as _ejv, _joker_is_scoring as _jis,
-                HIGH_VALUE_JOKERS, _api_key_to_name as _aktn,
-                _is_non_joker_card as _reroll_nonj,
-            )
-            shop_cards = raw_state.get("shop", {}).get("cards", [])
-            best_buy_idx = -1
-            best_buy_delta = -999
-            best_buy_name = ""
-            for sci, sc in enumerate(shop_cards):
-                if _reroll_nonj(sc):
-                    continue
-                sc_cost = sc.get("cost", {}).get("buy", 999)
-                if sc_cost > money:
-                    continue
-                sc_key = sc.get("joker_key", "") or sc.get("key", "")
-                sc_name = _aktn(sc_key)
-                sc_mod = sc.get("modifier", {})
-                sc_edition = sc_mod.get("edition", "") if isinstance(sc_mod, dict) else ""
-                is_high = (sc_name in HIGH_VALUE_JOKERS or
-                           sc_edition in ("POLYCHROME", "HOLO", "NEGATIVE"))
-                is_scoring = _jis(sc)
-                if is_high or is_scoring:
-                    delta = _ejv(sc, jokers_raw, raw_state)
-                    # Buy if positive delta, or high-value, or scoring with open slot
-                    should_buy = (delta > 0 or is_high or
-                                  (is_scoring and joker_count < joker_limit))
-                    if should_buy and delta > best_buy_delta:
-                        best_buy_delta = delta
-                        best_buy_idx = sci
-                        best_buy_name = sc_name or sc_key
-
-            if best_buy_idx >= 0 and joker_count < joker_limit:
-                # FORCE BUY instead of rerolling — don't waste the joker
-                print(f"[SHOP] OVERRIDE reroll → buying {best_buy_name} "
-                      f"(delta={best_buy_delta:.0f})", flush=True)
-                return "buy", {"card": best_buy_idx}
+            # SHOP AUTHORITY (06-21, Phase A): the reroll->force-buy override is
+            # REMOVED — the policy now owns reroll-vs-buy. It used to be forced to
+            # buy the heuristic's pick whenever a buyable scoring/high joker was
+            # present, which stripped build-direction control (dec-023 audit: the
+            # heuristic ceiling, not the gradient, is the wall). Hard-legality
+            # (affordability, above) and the anti-softlock reroll cap (below) stay.
 
             # SIMPLE RULE: after rerolling, can you still buy a joker?
             # Cheapest jokers cost ~$2. If money after reroll < $4, don't bother.
@@ -764,60 +731,12 @@ class ActionExecutor:
 
         # End shop -> next_round
         if action_type == 13:
-            # Guard: don't leave shop with empty joker slots if there's a
-            # buyable scoring joker. Only check actual jokers (not tarots/planets).
-            # Use a counter to prevent infinite loops.
-            # Re-read joker count fresh to avoid stale data after buys
-            _fresh_jokers = raw_state.get("jokers", {}).get("cards", [])
-            _fresh_jcount = len(_fresh_jokers)
-            _fresh_jlimit = raw_state.get("jokers", {}).get("limit", 5)
-            shop_block_count = getattr(self, '_shop_block_count', 0)
-            if _fresh_jcount < _fresh_jlimit and money >= 2 and shop_block_count < 3:
-                shop_cards = raw_state.get("shop", {}).get("cards", [])
-                from environment.action_space import (
-                    _estimate_joker_value, _joker_is_scoring, _api_key_to_name,
-                    MUST_BUY_JOKERS, BAD_JOKERS, HIGH_VALUE_JOKERS,
-                    _is_non_joker_card as _end_nonj,
-                )
-                # Also check for must-buy consumables (Hermit, etc.)
-                from environment.action_space import MUST_BUY_CONSUMABLES
-                _end_cons = raw_state.get("consumables", {}).get("cards", [])
-                _end_climit = raw_state.get("consumables", {}).get("limit", 2)
-                for i, sc in enumerate(shop_cards):
-                    sc_cost = sc.get("cost", {}).get("buy", 999)
-                    if sc_cost > money:
-                        continue
-                    sc_key = sc.get("joker_key", "") or sc.get("key", "")
-                    # Check consumables first (Hermit etc.)
-                    if _end_nonj(sc):
-                        card_key = sc.get("key", "")
-                        if card_key in MUST_BUY_CONSUMABLES and len(_end_cons) < _end_climit:
-                            self._shop_block_count = shop_block_count + 1
-                            label = sc.get("label") or card_key
-                            print(f"[SHOP] BLOCKED leaving → buying consumable {label} "
-                                  f"(cost=${sc_cost})", flush=True)
-                            return "buy", {"card": i}
-                        continue
-                    sc_name = _api_key_to_name(sc_key)
-                    if sc_name and sc_name in BAD_JOKERS:
-                        continue
-                    sc_mod = sc.get("modifier", {})
-                    sc_ed = sc_mod.get("edition", "") if isinstance(sc_mod, dict) else ""
-                    is_high = (sc_name in HIGH_VALUE_JOKERS if sc_name else False) or \
-                              sc_ed in ("POLYCHROME", "HOLO", "NEGATIVE")
-                    is_scoring = _joker_is_scoring(sc)
-                    delta = _estimate_joker_value(sc, _fresh_jokers, raw_state)
-                    # Force-buy if: positive delta, must-buy, high-value,
-                    # or ANY scoring joker when we have open slots
-                    if delta > 0 or (sc_name and sc_name in MUST_BUY_JOKERS) or \
-                       is_high or is_scoring:
-                        self._shop_block_count = shop_block_count + 1
-                        label = sc_name or sc_key or f"slot{i}"
-                        print(f"[SHOP] BLOCKED leaving → buying {label} "
-                              f"(delta={delta:.0f}, cost=${sc_cost}, "
-                              f"scoring={is_scoring}, high={is_high})", flush=True)
-                        return "buy", {"card": i}
-            self._shop_block_count = 0
+            # SHOP AUTHORITY (06-21, Phase A): the leave->force-buy override is
+            # REMOVED — the policy now owns leave-vs-buy (banking money is a real
+            # strategic choice). It used to be force-bought a scoring joker /
+            # must-buy consumable whenever it tried to leave with an open slot,
+            # stripping build + economy control (dec-023 audit). Hard-legality is
+            # preserved downstream; never-sell-copy guards remain in the sell path.
 
             # ── Riff-Raff optimization ──
             # If we have Riff-Raff, it creates 2 Common Jokers when the next
