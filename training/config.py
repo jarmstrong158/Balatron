@@ -63,7 +63,7 @@ class TrainConfig:
     # high-ante runs through an imitation loss so the policy reinforces its own
     # rare successes instead of forgetting them. Off by default (0.0); flip on
     # once the demo buffer has a corpus. Small coef to avoid mode-collapse.
-    sil_coef: float = 0.0
+    sil_coef: float = 0.1            # SIL ACTIVE (06-21): replay banked wins.
     sil_batch_size: int = 256
 
     # Logging
