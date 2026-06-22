@@ -55,7 +55,7 @@ balatron/
 
 ---
 
-## State Vector Layout (838 floats)
+## State Vector Layout (842 floats)
 
 Section sizes are the constants in `environment/game_state.py`;
 `STATE_VECTOR_SIZE` is their sum. That file is authoritative for the
@@ -79,8 +79,10 @@ exact per-field encoding — keep the totals below in sync with it.
                                  economy — SHOP only (indices 817–832)
 13   Joker Velocity         5    per-owned-joker Δ scaled value over last 8
                                  hands, signed-log (indices 833–837)
+14   xmult Stacking         4    owned-xmult count, shop-xmult-available,
+                                 compounding-delta, stack-ready (indices 838–841)
      ----------------------------------------------------------------
-     TOTAL                838
+     TOTAL                842
 ```
 
 ### State Vector Design Notes
@@ -183,10 +185,10 @@ Values from `environment/reward.py` (constants `REWARD_*`). Win is gated on `ant
 ## Network Architecture (2.11M parameters)
 
 ```
-Input (838)
+Input (842)
   |
   Shared Trunk (3 layers, LayerNorm + ReLU each):
-    838 -> 768 (644K params)
+    842 -> 768 (647K params)
     768 -> 768 (591K params)
     768 -> 512 (394K params)
   |
@@ -382,7 +384,7 @@ cards, hand, shop, vouchers, packs, pack
 
 - **Phase:** Live training — Phase 1, Path A (policy authority), N=3 parallel instances
 - **data/jokers.py:** COMPLETE — 150 jokers, validation
-- **environment/game_state.py:** COMPLETE — API client, EventDetector, ScalingTracker, 838-float state vector (incl. 16-feature shop context + 5-dim per-joker growth velocity)
+- **environment/game_state.py:** COMPLETE — API client, EventDetector, ScalingTracker, 842-float state vector (shop context + velocity + xmult-stacking)
 - **environment/action_space.py:** COMPLETE — 14 action types, 45-dim head, legality masking, ActionDecoder
 - **environment/reward.py:** COMPLETE — shaped rewards (see table), log-scaled, three-phase weighting
 - **agent/network.py:** COMPLETE — ~2.11M params, shared trunk, 3 policy heads + value head; legality-only mask + prior-KL

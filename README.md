@@ -39,14 +39,14 @@ A reinforcement learning agent that plays [Balatro](https://www.playbalatro.com/
 
 Balatron connects to a live instance of Balatro through the [BalatroBot](https://github.com/coder/balatrobot) mod, which exposes the full game state and accepts action commands via a JSON-RPC 2.0 HTTP API on `127.0.0.1:12346`. No screen capture or computer vision is needed — the agent reads structured game data directly.
 
-The agent observes the game state (hand cards, jokers, economy, blind targets, deck composition, shop contents), encodes it into an 838-dimensional vector, and uses a PPO neural network to select actions. A sophisticated heuristic layer validates and enhances the network's decisions with Balatro-specific domain knowledge — optimal hand selection, joker ordering, consumable usage, pack evaluation, and economy management.
+The agent observes the game state (hand cards, jokers, economy, blind targets, deck composition, shop contents), encodes it into an 842-dimensional vector, and uses a PPO neural network to select actions. A sophisticated heuristic layer validates and enhances the network's decisions with Balatro-specific domain knowledge — optimal hand selection, joker ordering, consumable usage, pack evaluation, and economy management.
 
 ```
 Balatro Game
     |
     | JSON-RPC 2.0 (BalatroBot mod)
     v
-Game State Encoder (838-dim vector)
+Game State Encoder (842-dim vector)
     |
     v
 PPO Neural Network (shared trunk + 3 policy heads)
@@ -80,7 +80,7 @@ Balatron uses a **hybrid architecture** — but the split is **judgment vs. comp
 ### Neural Network
 
 ```
-Input (838) --> Shared Trunk (838 -> 768 -> 768 -> 512)
+Input (842) --> Shared Trunk (842 -> 768 -> 768 -> 512)
                     |
                     |--> Play Head   (512 -> 256 -> 45)  -- SELECTING_HAND state
                     |--> Shop Head   (512 -> 256 -> 45)  -- SHOP state
@@ -95,7 +95,7 @@ Input (838) --> Shared Trunk (838 -> 768 -> 768 -> 512)
 
 ### State Vector
 
-The game state is encoded into an **838-dimensional float vector** with careful normalization:
+The game state is encoded into an **842-dimensional float vector** with careful normalization:
 
 | Section | Dimensions | Contents |
 |---------|-----------|----------|
@@ -112,6 +112,7 @@ The game state is encoded into an **838-dimensional float vector** with careful 
 | Scoring Context | 40 | Projected scores, risk assessment, hand type features |
 | Shop Context | 16 | Per-shop-joker marginal value, build coverage, economy/slot pressure (SHOP only) |
 | Joker Velocity | 5 | Per-owned-joker Δ scaled value over the last 8 hands, signed-log (compounding vs. decaying engine) |
+| xmult Stacking | 4 | Owned-xmult count, shop-xmult-available, compounding-delta, stack-ready — makes engine-stacking visible (dec-026) |
 
 **Design principle:** Jokers are encoded as **property fingerprints** (what the joker *does*) rather than joker IDs. This means the network generalizes across jokers with similar effects — it doesn't need to memorize 150 individual joker behaviors, it learns that "x2 mult on face cards" is valuable regardless of which joker provides it.
 
@@ -266,7 +267,7 @@ balatron/
 |   |-- ppo.py              # PPO trainer, rollout buffer, GAE
 |
 |-- environment/
-|   |-- game_state.py       # 838-dim state vector encoder
+|   |-- game_state.py       # 842-dim state vector encoder
 |   |-- action_space.py     # Action masks, target mapping, joker evaluation
 |   |-- hand_eval.py        # Full scoring engine, hand classifier, strategic advisor
 |   |-- reward.py           # Reward shaping (log-scaled, multi-tier)

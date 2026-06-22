@@ -73,6 +73,12 @@ REWARD_INVALID_ACTION = -0.1     # Attempted an action that failed/was invalid
 # Phase-aware reward constants
 REWARD_XMULT_ACQUIRE_FIXED = 0.3      # Acquiring a fixed xMult joker
 REWARD_XMULT_ACQUIRE_SCALING = 0.5    # Acquiring a scaling xMult joker (rarer, more impactful)
+# Stacking premium (dec-026): the data shows depth is gated by STACKING xmult
+# (ante-7+ runs avg 1.36 xmult vs 0.71 at ante 3-4), but the flat per-acquisition
+# reward priced the 2nd/3rd xmult identically to the 1st. Multiply the
+# acquisition reward by (1 + this * #xmult_already_held), so 2nd xmult ~2x, 3rd
+# ~3x — pulling hardest at the 1->2 transition that distinguishes deep runs.
+REWARD_XMULT_STACK_BONUS = 1.0
 REWARD_GOLD_HOARD_PENALTY = -0.02     # Per-dollar penalty above reroll buffer (Scale phase)
 REWARD_GOLD_HOARD_BUFFER = 10         # Dollar threshold for hoarding penalty
 
@@ -553,6 +559,15 @@ class RewardCalculator:
         from data.jokers import JOKERS
         from environment.hand_eval import _api_key_to_name
 
+        # Count xmult jokers ALREADY held (before this acquisition) for the
+        # stacking premium — the 2nd/3rd xmult is what builds the compounding
+        # engine that reaches ante 7+ (dec-026).
+        def _is_xmult(jc):
+            n = _api_key_to_name(jc.get("key", ""))
+            s = JOKERS.get(n) if n else None
+            return bool(s and (s.get("xmult") or s.get("xmult_scaling")))
+        prev_xmult = sum(1 for j in prev_jokers if _is_xmult(j))
+
         reward = 0.0
         for jc in new_jokers:
             if jc.get("id") not in acquired_ids:
@@ -570,6 +585,9 @@ class RewardCalculator:
 
         if reward == 0.0:
             return 0.0
+
+        # Stacking premium: 1st xmult pays base, 2nd ~2x, 3rd ~3x.
+        reward *= 1.0 + REWARD_XMULT_STACK_BONUS * prev_xmult
 
         # Scale by phase — xmult is most valuable in Scale phase
         # but always worth at least 30% even outside it

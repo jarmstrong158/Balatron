@@ -151,9 +151,38 @@ def test_velocity_section_populated_in_vector():
     for _ in range(4):
         _play_hand(mgr._scaling_tracker)
     vec = mgr._build_state_vector(raw)
-    velo = vec[STATE_VECTOR_SIZE - JOKER_VELOCITY_SIZE:]
+    # velocity is no longer the LAST block — the xmult-stack block (4 dims) was
+    # appended after it, so slice velocity by its actual position.
+    from environment.game_state import XMULT_STACK_SIZE
+    v_end = STATE_VECTOR_SIZE - XMULT_STACK_SIZE
+    velo = vec[v_end - JOKER_VELOCITY_SIZE:v_end]
     assert velo[0] > 0.0                      # owned, growing joker
     assert np.all(velo[1:] == 0.0)            # empty slots zero-padded
+
+
+# ─────────────────────────── xmult-stack perception block ───────────────────
+
+def test_xmult_stack_block(tmp_path=None):
+    """The appended xmult-stack block exposes owned-xmult COUNT (always) and
+    shop-xmult/stack-ready (SHOP only) — the dec-026 perception fix."""
+    from environment.game_state import XMULT_STACK_SIZE
+    mgr = GameStateManager()
+    # own 1 xmult (Cavendish); shop has an affordable xmult (The Duo)
+    raw = {"state": "SHOP", "money": 10, "ante_num": 3,
+           "jokers": {"cards": [{"id": 1, "key": "j_cavendish"}], "limit": 5},
+           "shop": {"cards": [{"id": 9, "key": "j_duo", "cost": {"buy": 5}}]},
+           "round": {"reroll_cost": 5}, "cards": {"cards": []}}
+    blk = mgr._build_state_vector(raw)[-XMULT_STACK_SIZE:]
+    assert blk[0] == pytest.approx(1 / 3)   # owned count 1/3
+    assert blk[1] == 1.0                     # shop xmult available
+    assert blk[2] > 0.0                      # compounding delta
+    assert blk[3] == 1.0                     # stack-ready (own>=1 + affordable)
+
+    # Outside SHOP: owned-count still on, shop features zero
+    raw["state"] = "SELECTING_HAND"
+    blk2 = mgr._build_state_vector(raw)[-XMULT_STACK_SIZE:]
+    assert blk2[0] == pytest.approx(1 / 3)   # count always on
+    assert blk2[1] == 0.0 and blk2[3] == 0.0  # shop features gated off
 
 
 # ─────────────────────────── Checkpoint migration ───────────────────────────

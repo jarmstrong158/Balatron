@@ -63,6 +63,14 @@ SHOP_CONTEXT_SIZE = 16
 # isn't actually scaling (dead weight). Appended LAST so checkpoint migration's
 # end-zero-padding keeps all previously-trained input weights aligned.
 JOKER_VELOCITY_SIZE = JOKER_SLOTS  # 5: one velocity dim per owned joker slot
+# xmult-engine STACKING signal (06-22, dec-026). The data proved depth is gated
+# by stacking multiplicative (xmult) jokers (ante-7+ runs avg 1.36 xmult vs 0.71
+# at ante 3-4), but the policy could only see a BINARY "owns any xmult" flag —
+# holding 1 vs 3 xmult looked identical, and "this shop joker is an xmult that
+# would compound" was invisible. 4 dims: owned-xmult COUNT, shop-xmult-available,
+# best-compounding-delta, stack-ready. Appended LAST (after velocity) so the
+# checkpoint zero-pad migration keeps all trained weights aligned.
+XMULT_STACK_SIZE = 4
 
 STATE_VECTOR_SIZE = (
     GAME_META_SIZE
@@ -77,7 +85,8 @@ STATE_VECTOR_SIZE = (
     + SHOP_PACK_SLOTS * SHOP_PACK_SIZE
     + HAND_EVAL_FEATURES  # 40 hand evaluation features
     + SHOP_CONTEXT_SIZE   # 16 shop-decision context features
-    + JOKER_VELOCITY_SIZE  # 5 per-joker recent growth velocity (appended last)
+    + JOKER_VELOCITY_SIZE  # 5 per-joker recent growth velocity
+    + XMULT_STACK_SIZE     # 4 xmult-engine stacking signal (appended last)
 )
 
 # Rank/suit mappings for dense encoding
@@ -1070,8 +1079,11 @@ class GameStateManager:
         # Section 10: Shop-Decision Context (16)
         offset = self._encode_shop_context(vec, offset, raw)
 
-        # Section 11: Per-Joker Growth Velocity (5) — appended last
+        # Section 11: Per-Joker Growth Velocity (5)
         offset = self._encode_joker_velocity(vec, offset, raw)
+
+        # Section 12: xmult-engine stacking signal (4) — appended last
+        offset = self._encode_xmult_stack(vec, offset, raw)
 
         assert offset == STATE_VECTOR_SIZE, f"Vector size mismatch: {offset} != {STATE_VECTOR_SIZE}"
         return vec
@@ -1542,6 +1554,68 @@ class GameStateManager:
             # else: stays zero-padded
 
         return offset + JOKER_VELOCITY_SIZE
+
+    def _encode_xmult_stack(self, vec: np.ndarray, offset: int, raw: dict) -> int:
+        """xmult-engine stacking signal (dec-026). Makes the depth-gating
+        decision — stack multiplicative jokers — VISIBLE to the policy, which
+        previously saw only a binary "owns any xmult" flag.
+
+        [0] owned-xmult COUNT (normalized /3) — ALWAYS on, so the policy knows
+            its engine depth for every decision (1 vs 3 xmult no longer identical).
+        [1] shop-xmult-available (SHOP only) — is there an xmult joker to buy.
+        [2] best shop-xmult compounding delta (SHOP only) — the synergy-aware
+            value of the best buyable xmult given what's owned (the estimator is
+            multiplicative, so this is large exactly when it would COMPOUND).
+        [3] stack-ready (SHOP only) — owns >=1 xmult AND an affordable xmult is
+            in the shop: the single bit saying "you can stack RIGHT NOW."
+        """
+        end = offset + XMULT_STACK_SIZE
+        try:
+            from data.jokers import JOKERS
+
+            def _is_xmult(name):
+                s = JOKERS.get(name)
+                return bool(s and (s.get("xmult") or s.get("xmult_scaling")
+                                   or s.get("scaling_type") == "xmult"))
+
+            jokers_raw = raw.get("jokers", {}).get("cards", [])
+            owned_xmult = 0
+            for jc in jokers_raw:
+                if _is_xmult(_api_key_to_name(jc.get("key", ""))):
+                    owned_xmult += 1
+            vec[offset] = min(owned_xmult / 3.0, 1.0)   # [0] always on
+
+            if raw.get("state", "") == "SHOP":
+                from environment.action_space import (
+                    _estimate_joker_value, _is_non_joker_card, _api_key_to_name as _aktn,
+                )
+                money = raw.get("money", 0)
+                shop_cards = raw.get("shop", {}).get("cards", [])
+                shop_has = False
+                affordable = False
+                best_delta = 0.0
+                for sc in shop_cards:
+                    if _is_non_joker_card(sc):
+                        continue
+                    name = _aktn(sc.get("joker_key", "") or sc.get("key", ""))
+                    if not _is_xmult(name):
+                        continue
+                    shop_has = True
+                    cost = _as_dict(sc.get("cost", {})).get("buy", 999)
+                    if cost <= money:
+                        affordable = True
+                    try:
+                        d = float(_estimate_joker_value(sc, jokers_raw, raw))
+                        if d > best_delta:
+                            best_delta = d
+                    except Exception:
+                        pass
+                vec[offset + 1] = 1.0 if shop_has else 0.0
+                vec[offset + 2] = _log_norm(best_delta, 3.0)   # compounding value
+                vec[offset + 3] = 1.0 if (owned_xmult >= 1 and affordable) else 0.0
+        except Exception:
+            pass  # never crash the encoder
+        return end
 
     @staticmethod
     def _compute_deck_suit_fractions(deck_cards: list[dict]) -> dict[str, float]:
