@@ -62,6 +62,7 @@ from environment.hand_eval import (
 )
 from recorder import RunRecorder
 from demo_buffer import DemoBuffer
+from data.jokers import JOKERS
 from training.config import TrainConfig
 from training.episode_tracker import EpisodeTracker
 from training.env_session import EnvSession
@@ -79,6 +80,25 @@ def _get_blind_target_from_state(raw_state: dict) -> float:
                 return b.get("score", 300)
     return 300.0
 from environment.reward import RewardCalculator
+
+
+def _build_composition(joker_cards: list) -> tuple:
+    """Count (xmult, scaling, total) jokers in a build. xmult = the
+    multiplicative engine that gates depth (data: ante-7+ runs avg 1.36 xmult
+    vs 0.71 at ante 3-4). Classified via the JOKERS schema, matching the
+    death-build analysis. Used by the build-progression leading indicator."""
+    nx = ns = 0
+    for c in joker_cards:
+        name = c.get("label") or ""
+        s = JOKERS.get(name)
+        if not s:
+            continue
+        if s.get("xmult") or s.get("xmult_scaling") or s.get("scaling_type") == "xmult":
+            nx += 1
+        if (s.get("scaling_type") or s.get("mult_scaling")
+                or s.get("xmult_scaling") or s.get("chip_scaling")):
+            ns += 1
+    return nx, ns, len(joker_cards)
 
 
 # ============================================================
@@ -221,6 +241,7 @@ class Trainer:
 
         env.win_recorded = False
         env.win_reward_stored = False
+        env.last_logged_ante = 0   # build-progression: re-log antes next run
         env.pending_upgrade_buy = None
         env.pending_rearrange = None
         env.pending_hand_rearrange = None
@@ -1049,6 +1070,26 @@ class Trainer:
             env.current_ante = ante
             env.current_score = int(raw_state.get("round", {}).get("chips", 0))
             self.episode_tracker.step(settled_reward, ante, raw_state, env_id=env.env_id)
+
+            # Build-progression leading indicator: once per ante boundary, log
+            # the xmult-engine composition of THIS run. Each record where
+            # ante==N is one run reaching ante N, so offline we compute
+            # "fraction with >=2 xmult by ante 3" — the upstream metric that
+            # moves in a few updates vs ~150 for mean ante. Logging only.
+            if ante > env.last_logged_ante:
+                env.last_logged_ante = ante
+                try:
+                    nx, ns, nj = _build_composition(
+                        raw_state.get("jokers", {}).get("cards", []))
+                    with open(os.path.join("logs", "build_progression.jsonl"),
+                              "a") as _bf:
+                        _bf.write(json.dumps({
+                            "ante": ante, "n_xmult": nx, "n_scaling": ns,
+                            "n_jokers": nj, "env": env.env_id,
+                            "step": self.global_step,
+                        }) + "\n")
+                except Exception:
+                    pass  # never let instrumentation break training
 
             # Store transition with reward 0 — its own outcome is settled
             # (amended in) on the next iteration, or by the boundary settle

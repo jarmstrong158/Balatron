@@ -66,3 +66,9 @@ class EnvSession:
         # pure logging, never reads back into the policy in Phase 1.
         self.episode_traj: list = []
         self.max_ante_seen: int = 1
+
+        # Build-progression instrumentation: highest ante already logged for
+        # this run, so we record the xmult-engine composition ONCE per ante
+        # boundary (the leading indicator: stacked-xmult-by-ante-3). Logging
+        # only — does not touch the policy.
+        self.last_logged_ante: int = 0
