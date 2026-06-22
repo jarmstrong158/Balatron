@@ -42,6 +42,12 @@ def _find_weakest_sellable_joker(
 
     weakest_idx = -1
     weakest_val = float("inf")
+    # Engine protection (dec-027): prefer to sell a NON-xmult joker. The
+    # current-snapshot value estimator undervalues an under-leveled xmult
+    # scaler (its worth is future compounding), so without this it would pick
+    # the freshly-bought 2nd xmult as "weakest" and churn the engine away.
+    weakest_nonx_idx = -1
+    weakest_nonx_val = float("inf")
     exclude = exclude_indices or set()
 
     for i, j in enumerate(jokers_raw):
@@ -60,17 +66,27 @@ def _find_weakest_sellable_joker(
         if name in MUST_BUY_JOKERS:
             continue
 
+        is_xmult = False
         # Never sell retrigger or copy jokers
         if name and name in JOKERS:
             schema = JOKERS[name]
             if schema.get("retrigger_effect") or schema.get("copy"):
                 continue
+            is_xmult = bool(schema.get("xmult") or schema.get("xmult_scaling")
+                            or schema.get("scaling_type") == "xmult")
 
         val = _estimate_joker_value(j, jokers_raw, raw_state)
         if val < weakest_val:
             weakest_val = val
             weakest_idx = i
+        if not is_xmult and val < weakest_nonx_val:
+            weakest_nonx_val = val
+            weakest_nonx_idx = i
 
+    # Sell a non-xmult joker if any is sellable; only fall back to selling an
+    # xmult joker when the whole roster is xmult.
+    if weakest_nonx_idx >= 0:
+        return weakest_nonx_idx, weakest_nonx_val
     return weakest_idx, weakest_val
 
 
@@ -438,34 +454,49 @@ class ActionExecutor:
                           f"(no viable joker in shop)", flush=True)
                     return "gamestate", None
             else:
-                # Slots full — only buy if it's a meaningful upgrade over weakest
+                # Slots full. SHOP-AUTHORITY Phase B (dec-027): under
+                # policy_authority, HONOR the policy's targeted buy via
+                # sell-weakest-then-buy, applying only HARD guards (a sellable
+                # joker exists; affordable after the sell). The old soft gate
+                # (swap_score > current*1.1) silently no-op'd any buy whose value
+                # is FUTURE compounding — i.e. exactly the 2nd/3rd xmult scaler
+                # that builds the engine — which is why the dec-026 perception+
+                # incentive levers were null: the buy could not fire.
                 weakest_idx, _ = _find_weakest_sellable_joker(
                     jokers_raw, raw_state)
-
                 if weakest_idx < 0:
-                    return "gamestate", None  # all protected
-
-                # Score with swap
-                swapped = [j for i, j in enumerate(jokers_raw) if i != weakest_idx]
-                swapped.append(card)
-                swap_score = estimate_score_for_hand_type(swapped, raw_state)
+                    return "gamestate", None  # all protected, no room
 
                 sell_price = _joker_sell_value(jokers_raw[weakest_idx])
                 if cost > money + sell_price:
                     return "gamestate", None  # can't afford even after sell
 
-                # High-value jokers use a lower swap threshold (5% vs 10%)
+                swapped = [j for i, j in enumerate(jokers_raw) if i != weakest_idx]
+                swapped.append(card)
+                swap_score = estimate_score_for_hand_type(swapped, raw_state)
+                weak_name = jokers_raw[weakest_idx].get("label", "?")
+                shop_name = name or joker_key
+
+                if self.policy_authority:
+                    # Confirmation: count when the OLD gate would have VETOED
+                    # this policy buy (swap doesn't improve current-hand score) —
+                    # i.e. how often the gate was blocking the stack.
+                    if swap_score <= current_score * 1.1:
+                        self._fullslot_gate_lifts = getattr(
+                            self, "_fullslot_gate_lifts", 0) + 1
+                        print(f"[SHOP] Phase-B buy (old gate would VETO): sell "
+                              f"{weak_name} → buy {shop_name} (cur "
+                              f"{current_score:.0f}, swap {swap_score:.0f}) "
+                              f"[lift #{self._fullslot_gate_lifts}]", flush=True)
+                    env.pending_upgrade_buy = target_idx
+                    return "sell", {"joker": weakest_idx}
+
+                # Legacy heuristic gate (non-authority mode only)
                 swap_threshold = 1.05 if is_high_value else 1.1
                 if swap_score > current_score * swap_threshold:
-                    # Sell weakest joker first to make room, then buy on next step
-                    weak_name = jokers_raw[weakest_idx].get("label", "?")
-                    shop_name = name or joker_key
-                    print(f"[SHOP] Selling {weak_name} (idx {weakest_idx}) "
-                          f"to upgrade to {shop_name} "
-                          f"(score {current_score:.0f} → {swap_score:.0f}, "
-                          f"+{(swap_score/current_score - 1)*100:.0f}%)",
+                    print(f"[SHOP] Selling {weak_name} to upgrade to {shop_name} "
+                          f"(score {current_score:.0f} → {swap_score:.0f})",
                           flush=True)
-                    # Queue the buy for the very next step
                     env.pending_upgrade_buy = target_idx
                     return "sell", {"joker": weakest_idx}
                 else:

@@ -230,3 +230,21 @@ def test_find_weakest_sellable_joker_guards():
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_weakest_sellable_prefers_nonxmult_engine_protection():
+    """dec-027 engine protection: _find_weakest_sellable_joker must prefer a
+    non-xmult joker so a freshly-stacked xmult scaler isn't churned away as
+    'weakest' (its value is future compounding, undervalued now)."""
+    from training.action_executor import _find_weakest_sellable_joker
+    jokers = [{"id": 1, "key": "j_cavendish", "label": "Cavendish"},  # xmult
+              {"id": 2, "key": "j_bull", "label": "Bull"}]            # additive
+    raw = {"jokers": {"cards": jokers}, "round": {}}
+    idx, _ = _find_weakest_sellable_joker(jokers, raw)
+    assert idx == 1, "should sell the non-xmult (Bull), not the xmult engine"
+
+    # If the WHOLE roster is xmult, it may fall back to selling one.
+    all_x = [{"id": 1, "key": "j_cavendish", "label": "Cavendish"},
+             {"id": 2, "key": "j_hologram", "label": "Hologram"}]
+    idx2, _ = _find_weakest_sellable_joker(all_x, {"jokers": {"cards": all_x}, "round": {}})
+    assert idx2 in (0, 1)   # no non-xmult available -> picks weakest xmult
