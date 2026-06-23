@@ -227,11 +227,18 @@ class Trainer:
         env.max_ante_seen = 1
 
     def _curriculum_prob(self) -> float:
-        """Annealed probability of starting a run from a banked seed."""
+        """Annealed probability of starting a run from a banked seed. Anchored
+        at the FIRST call (curriculum start), not absolute num_updates — the
+        trainer resumes from a checkpoint already past the anneal window, so an
+        absolute anneal would be 0 from the start (the bug that made loads never
+        fire)."""
         cfg = self.config
         if not cfg.curriculum_enabled:
             return 0.0
-        frac = max(0.0, 1.0 - self.num_updates / max(cfg.curriculum_anneal_updates, 1))
+        if getattr(self, "_curriculum_start_update", None) is None:
+            self._curriculum_start_update = self.num_updates
+        elapsed = self.num_updates - self._curriculum_start_update
+        frac = max(0.0, 1.0 - elapsed / max(cfg.curriculum_anneal_updates, 1))
         return cfg.curriculum_prob * frac
 
     def _pick_curriculum_seed(self):
