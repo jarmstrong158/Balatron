@@ -27,20 +27,17 @@ class TrainConfig:
     gamma: float = 0.995
     gae_lambda: float = 0.95
     clip_epsilon: float = 0.2
-    entropy_coef: float = 0.10   # 0.01->0.025->0.04->0.06->0.10 (06-20). The
-                                 # policy is over-confident post-BC and ante is a
-                                 # converged local optimum (~3.7, value fn healthy
-                                 # EV 0.7+). AUDIT (06-20): small bumps don't work
-                                 # because the entropy bonus is swamped in the loss
-                                 # by the value gradient on the SHARED trunk — at
-                                 # VL~20, value term (0.5*20=10) is ~370x the entropy
-                                 # term (0.06*0.45=0.027), so 0.025/0.04/0.06 all
-                                 # park entropy at ~0.44. target_kl(0.03) is NOT the
-                                 # limiter (live KL 0.002-0.008). 0.10 is a real step
-                                 # to test responsiveness. If entropy STILL sticks at
-                                 # ~0.45, it's confirmed structural -> next lever is
-                                 # lowering value_coef (0.5->0.25) or decoupling the
-                                 # value/policy trunk. If play craters & stays, revert.
+    entropy_coef: float = 0.03   # 0.10 -> 0.03 (06-22, dec-029). With the VALUE
+                                 # TRUNK now DECOUPLED (network.py value_trunk), the
+                                 # policy gradient is no longer drowned by the value
+                                 # gradient on a shared trunk, so the policy can
+                                 # finally take a real step — and the 0.10 entropy
+                                 # term was actively fighting it toward uniform.
+                                 # History: 0.01->0.025->0.04->0.06->0.10 escalation
+                                 # was a wrong-diagnosis lever (the limiter was the
+                                 # frozen policy gradient, not entropy-starvation).
+                                 # Watch: KL should rise from ~0.0045 toward target
+                                 # 0.03 now. If play craters & stays, revert.
     value_coef: float = 0.25         # 0.5 -> 0.25 (06-21). AUDIT root-cause fix:
                                      # value & policy share the trunk, and at
                                      # VL~20 the value term (0.5*20=10) swamped

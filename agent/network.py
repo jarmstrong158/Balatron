@@ -153,7 +153,22 @@ class BalatronNetwork(nn.Module):
 
         self._policy_heads = nn.ModuleList([self.play_head, self.shop_head, self.blind_head])
 
-        # Value head
+        # DECOUPLED value trunk (dec-029 un-freeze). The value head reads from
+        # its OWN trunk, NOT the shared policy trunk. With a shared trunk the
+        # value-loss gradient (large — un-normalized returns reach tens of
+        # units) dominated the trunk representation, and the tiny (normalized,
+        # entropy-counter-pressured) policy gradient rode on top — pinning the
+        # policy near-frozen (KL ~0.0045, sustained, every lever null). Separate
+        # trunks make value and policy gradients touch DISJOINT parameters, so
+        # the policy trunk is shaped ONLY by the policy objective.
+        value_trunk_modules = []
+        prev_size = input_size
+        for layer_size in TRUNK_LAYERS:
+            value_trunk_modules.append(TrunkBlock(prev_size, layer_size))
+            prev_size = layer_size
+        self.value_trunk = nn.Sequential(*value_trunk_modules)
+
+        # Value head (reads the value trunk)
         self.value_head = ValueHead(self.trunk_output_size, VALUE_HEAD_HIDDEN)
 
         # Initialize weights
@@ -180,7 +195,7 @@ class BalatronNetwork(nn.Module):
         """
         trunk_out = self.trunk(state)
         action_logits = self._policy_heads[head_idx](trunk_out)
-        state_value = self.value_head(trunk_out)
+        state_value = self.value_head(self.value_trunk(state))  # decoupled trunk
         return action_logits, state_value
 
     def forward_mixed(self, states: torch.Tensor,
@@ -201,8 +216,8 @@ class BalatronNetwork(nn.Module):
         batch_size = states.shape[0]
         trunk_out = self.trunk(states)
 
-        # Value head runs on everything
-        state_values = self.value_head(trunk_out)
+        # Value head runs on everything — from its OWN decoupled trunk (dec-029)
+        state_values = self.value_head(self.value_trunk(states))
 
         # Policy heads — group by head index
         action_logits = torch.zeros(batch_size, self.action_size,
