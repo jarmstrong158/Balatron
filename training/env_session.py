@@ -72,3 +72,7 @@ class EnvSession:
         # boundary (the leading indicator: stacked-xmult-by-ante-3). Logging
         # only — does not touch the policy.
         self.last_logged_ante: int = 0
+
+        # Curriculum (dec-030): True when this run was LOADED from a banked
+        # ante-4/5 seed (don't re-harvest it, and tag its experience).
+        self.from_curriculum: bool = False

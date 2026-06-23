@@ -54,3 +54,6 @@ recordings/
 
 # Self-imitation demo buffer (data, not code)
 demos/
+
+# Curriculum seed states (data, not code)
+seeds/

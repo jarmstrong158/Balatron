@@ -86,6 +86,20 @@ class TrainConfig:
     # reaches ante >= demo_min_ante to a persistent buffer, so Phase 2 can
     # replay the agent's own successes through the BC loss. Capture does NOT
     # touch the policy — safe to run alongside other experiments.
+    # State-injection CURRICULUM (dec-030, plan A step 2). The policy is
+    # near-converged for the current reward because wins are 0.5%-rare and
+    # advantages are tiny. Harvest ante-4/5 partial-build states (BalatroBot
+    # save endpoint) and start a fraction of rollouts from them (load) so wins
+    # become frequent and advantages become real where engines matter. Anneals
+    # to 0 so training finishes on full self-play. Self-bootstraps (library
+    # starts empty -> fresh runs harvest -> loads kick in).
+    curriculum_enabled: bool = True
+    curriculum_prob: float = 0.4         # P(load a seed) at update 0
+    curriculum_anneal_updates: int = 800  # anneal prob -> 0 over this many updates
+    curriculum_min_ante: int = 4         # harvest runs at ante 4..5 with >=1 xmult
+    seed_dir: str = "seeds"
+    seed_capacity: int = 200             # cap the seed library (FIFO)
+
     collect_demos: bool = True
     demo_capacity: int = 30000          # transitions (~100-200 full runs)
     demo_min_ante: int = 6              # capture runs reaching >= this ante

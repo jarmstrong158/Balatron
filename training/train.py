@@ -34,6 +34,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import glob
 import os
 import random
 import string
@@ -225,6 +226,43 @@ class Trainer:
         env.episode_traj = []
         env.max_ante_seen = 1
 
+    def _curriculum_prob(self) -> float:
+        """Annealed probability of starting a run from a banked seed."""
+        cfg = self.config
+        if not cfg.curriculum_enabled:
+            return 0.0
+        frac = max(0.0, 1.0 - self.num_updates / max(cfg.curriculum_anneal_updates, 1))
+        return cfg.curriculum_prob * frac
+
+    def _pick_curriculum_seed(self):
+        """Return an absolute path to a random banked seed to load, or None
+        (fresh start) — with annealed probability. None if disabled / no seeds."""
+        p = self._curriculum_prob()
+        if p <= 0.0 or random.random() > p:
+            return None
+        seeds = glob.glob(os.path.join(self.config.seed_dir, "*.jkr"))
+        return os.path.abspath(random.choice(seeds)) if seeds else None
+
+    async def _harvest_seed(self, env, ante: int, nx: int):
+        """Bank the current run as a curriculum seed (capped, FIFO). Called when
+        a FRESH run reaches ante 4/5 with an xmult engine started. The save is
+        a non-disruptive snapshot."""
+        try:
+            sd = self.config.seed_dir
+            os.makedirs(sd, exist_ok=True)
+            seeds = sorted(glob.glob(os.path.join(sd, "*.jkr")),
+                           key=os.path.getmtime)
+            while len(seeds) >= self.config.seed_capacity:
+                try:
+                    os.remove(seeds.pop(0))
+                except OSError:
+                    break
+            path = os.path.abspath(os.path.join(
+                sd, f"ante{ante}_x{nx}_e{env.env_id}_{self.global_step}.jkr"))
+            await env.game.execute_action("save", {"path": path})
+        except Exception as e:
+            print(f"[CURRICULUM] harvest failed: {e}", flush=True)
+
     def _reset_run_state(self, env):
         """Clear all per-run flags and pending state.
 
@@ -242,6 +280,7 @@ class Trainer:
         env.win_recorded = False
         env.win_reward_stored = False
         env.last_logged_ante = 0   # build-progression: re-log antes next run
+        env.from_curriculum = False  # curriculum: re-decided at next run-start
         env.pending_upgrade_buy = None
         env.pending_rearrange = None
         env.pending_hand_rearrange = None
@@ -1088,6 +1127,11 @@ class Trainer:
                             "n_jokers": nj, "env": env.env_id,
                             "step": self.global_step,
                         }) + "\n")
+                    # Curriculum harvest: bank ante-4/5 partial-build states
+                    # (with an xmult engine started) from FRESH runs as seeds.
+                    if (self.config.curriculum_enabled and ante in (4, 5)
+                            and nx >= 1 and not env.from_curriculum):
+                        await self._harvest_seed(env, ante, nx)
                 except Exception:
                     pass  # never let instrumentation break training
 
@@ -1823,6 +1867,23 @@ class Trainer:
 
                 # Start recording the new run
                 env.recorder.start_run()
+                # CURRICULUM (dec-030): with annealed probability, LOAD a banked
+                # ante-4/5 partial-build state instead of a fresh run so the
+                # policy gets dense experience where engines matter (wins and
+                # advantages no longer 0.5%-rare). Falls back to a fresh start
+                # on any failure.
+                _seed_path = self._pick_curriculum_seed()
+                if _seed_path is not None:
+                    try:
+                        await env.game.execute_action("load", {"path": _seed_path})
+                        env.from_curriculum = True
+                        env.menu_loop_count = 0
+                        await asyncio.sleep(0.5)
+                        continue
+                    except Exception as e:
+                        print(f"[CURRICULUM] load failed ({e}) -> fresh start",
+                              flush=True)
+                env.from_curriculum = False
                 seed = ''.join(random.choices(string.ascii_uppercase, k=8))
                 try:
                     await env.game.execute_action(
