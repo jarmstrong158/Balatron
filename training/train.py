@@ -267,6 +267,8 @@ class Trainer:
             path = os.path.abspath(os.path.join(
                 sd, f"ante{ante}_x{nx}_e{env.env_id}_{self.global_step}.jkr"))
             await env.game.execute_action("save", {"path": path})
+            print(f"[CURRICULUM] harvest OK ante{ante} x{nx} (env {env.env_id})",
+                  flush=True)
         except Exception as e:
             print(f"[CURRICULUM] harvest failed: {e}", flush=True)
 
@@ -1885,6 +1887,9 @@ class Trainer:
                         await env.game.execute_action("load", {"path": _seed_path})
                         env.from_curriculum = True
                         env.menu_loop_count = 0
+                        print(f"[CURRICULUM] load OK p={self._curriculum_prob():.3f} "
+                              f"{os.path.basename(_seed_path)} (env {env.env_id})",
+                              flush=True)
                         await asyncio.sleep(0.5)
                         continue
                     except Exception as e:
