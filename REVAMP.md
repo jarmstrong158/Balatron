@@ -23,13 +23,10 @@ Audit agent IDs (resume via SendMessage for detail):
 Build valuation is wrong, so even greedy choices are wrong. ~55-60/150 jokers scored
 accurately today.
 
-- [ ] **1a. Scaling jokers in the shop** — `_scaled_value` is owned-only, so shop scaling
-      jokers (Hologram/Vampire/Constellation/Green Joker/…) are valued at start (~×1.0 =
-      worthless) at the moment of purchase. Project a fair forward value for shop
-      candidates. *(highest single impact)*
-      Files: `environment/action_space.py:171` `_estimate_joker_value`,
-      `environment/hand_eval.py:3290` `estimate_score_for_hand_type`, scaling injection
-      in `environment/game_state.py`.
+- [x] **1a. Scaling jokers in the shop** — DONE (commit 66c1ffb). `_project_shop_scaling_value`
+      in `hand_eval.py` projects start + inc*(antes_left*2), capped (xmult≤6, flat≤50),
+      applied in the valuation scorer's shop fallback. Shop Hologram/Vampire/Green Joker
+      now valued by a fair mid-run value instead of ~×1.0. 5 tests.
 - [ ] **1b. `magnitude_source` jokers** — ~10 jokers carry magnitude metadata never read,
       so they score their flat base or ×1.0. Steel Joker & Joker Stencil score ×1.0 (no
       effect) everywhere; Stone, Erosion, Swashbuckler, Banner, Driver's License,
