@@ -88,6 +88,15 @@ REWARD_XMULT_STACK_BONUS = 1.0
 # hand) the value function can credit — unlike the ~0.5%-rare terminal depth
 # payoff that was the only other xmult-differentiating reward.
 REWARD_XMULT_GROWTH_PREMIUM = 3.0
+# First-engine bootstrap bonus (dec-033). dec-032's growth premium is chicken-
+# and-egg: it only fires once an xmult engine is OWNED, so it reinforces xmult
+# AFTER the fact but can't push the very FIRST buy — and the audit showed the
+# initial buy competes against a survival gradient ~100x larger. This is a
+# substantial ONE-SHOT bonus paid on the run's 0->1 xmult transition,
+# UN-phase-scaled so it lands in the early antes where the foundation engine
+# must be bought. One-shot (fires once per run) so it can't accrue; survival
+# reward still dwarfs the run total, so a junk-xmult rush that dies still loses.
+REWARD_XMULT_FIRST_ENGINE = 1.5
 REWARD_GOLD_HOARD_PENALTY = -0.02     # Per-dollar penalty above reroll buffer (Scale phase)
 REWARD_GOLD_HOARD_BUFFER = 10         # Dollar threshold for hoarding penalty
 
@@ -620,7 +629,16 @@ class RewardCalculator:
         ante = new_state.get("ante_num", 1)
         _, w_scale, _ = compute_phase_weights(ante)
         phase_multiplier = 0.7 + 0.3 * w_scale
-        return reward * phase_multiplier
+        result = reward * phase_multiplier
+
+        # FIRST-ENGINE bootstrap bonus (dec-033): the 0->1 xmult transition is
+        # the chicken-and-egg crux — the growth premium can't reward an engine
+        # the agent doesn't own yet. Pay a flat, un-phase-scaled one-shot bonus
+        # so the very first xmult buy is directly attractive even early. (We're
+        # past the reward==0 guard, so an xmult was genuinely acquired here.)
+        if prev_xmult == 0:
+            result += REWARD_XMULT_FIRST_ENGINE
+        return result
 
     def _check_gold_hoarding(self, new_state: dict) -> float:
         """Penalize holding excess gold during Scale phase (antes 3-5).

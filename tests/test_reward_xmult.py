@@ -69,12 +69,43 @@ def test_acquisition_phase_floor_lifted_for_early_antes():
     new = {"ante_num": 1, "jokers": {"cards": [{"id": 7, "key": "j_cavendish"}]}}
     r = rc._check_xmult_acquisition(prev, new)
 
-    from environment.reward import REWARD_XMULT_ACQUIRE_FIXED
+    from environment.reward import REWARD_XMULT_ACQUIRE_FIXED, REWARD_XMULT_FIRST_ENGINE
     _, w_scale, _ = compute_phase_weights(1)
-    expect_new = REWARD_XMULT_ACQUIRE_FIXED * (0.7 + 0.3 * w_scale)
+    # prev owns 0 xmult here, so the dec-033 first-engine bonus also applies.
+    expect_new = REWARD_XMULT_ACQUIRE_FIXED * (0.7 + 0.3 * w_scale) + REWARD_XMULT_FIRST_ENGINE
     expect_old = REWARD_XMULT_ACQUIRE_FIXED * (0.3 + 0.7 * w_scale)
     assert r == pytest.approx(expect_new)
     assert r > expect_old  # strictly more rewarded early than before
+
+
+def test_first_engine_bonus_on_zero_to_one():
+    """dec-033: acquiring the FIRST xmult (prev_xmult==0) pays the flat one-shot
+    first-engine bonus on top of the (phase-scaled) acquisition reward."""
+    from environment.reward import REWARD_XMULT_ACQUIRE_FIXED, REWARD_XMULT_FIRST_ENGINE
+    rc = RewardCalculator(phase=1)
+    prev = {"jokers": {"cards": []}}                                  # owns 0 xmult
+    new = {"ante_num": 1, "jokers": {"cards": [{"id": 7, "key": "j_cavendish"}]}}
+    r = rc._check_xmult_acquisition(prev, new)
+    _, w_scale, _ = compute_phase_weights(1)
+    base = REWARD_XMULT_ACQUIRE_FIXED * (0.7 + 0.3 * w_scale)
+    assert r == pytest.approx(base + REWARD_XMULT_FIRST_ENGINE)
+
+
+def test_no_first_engine_bonus_when_already_own_xmult():
+    """Acquiring a SECOND xmult (prev_xmult>=1) gets the stacking premium but
+    NOT the first-engine bonus — the bootstrap is already done."""
+    from environment.reward import (
+        REWARD_XMULT_ACQUIRE_FIXED, REWARD_XMULT_STACK_BONUS, REWARD_XMULT_FIRST_ENGINE,
+    )
+    rc = RewardCalculator(phase=1)
+    prev = {"jokers": {"cards": [{"id": 1, "key": "j_hologram"}]}}    # already owns 1 xmult
+    new = {"ante_num": 3, "jokers": {"cards": [
+        {"id": 1, "key": "j_hologram"}, {"id": 2, "key": "j_cavendish"}]}}  # +1 more
+    r = rc._check_xmult_acquisition(prev, new)
+    _, w_scale, _ = compute_phase_weights(3)
+    expect = REWARD_XMULT_ACQUIRE_FIXED * (1.0 + REWARD_XMULT_STACK_BONUS * 1) * (0.7 + 0.3 * w_scale)
+    assert r == pytest.approx(expect)              # stacking premium, no first-engine bonus
+    assert r < expect + REWARD_XMULT_FIRST_ENGINE  # bonus definitively absent
 
 
 if __name__ == "__main__":
