@@ -3525,6 +3525,39 @@ def pick_best_planet(pack_cards: list[dict], jokers: list[dict],
     return best_idx
 
 
+# Pillar 1a (dec-034 KNOWLEDGE): project a fair value for a SCALING joker being
+# valued in the SHOP. Owned scalers get a real _scaled_value injected from the
+# ScalingTracker, but shop candidates don't — so the build valuation used to see
+# Hologram/Vampire/Constellation/Green Joker/etc. at their ~x1.0 start value
+# (worthless) at the exact moment of the buy decision (the single biggest
+# valuation blind spot the knowledge audit found). Project the engine forward by
+# a horizon of effective increments scaled by antes remaining. Conservative on
+# purpose (under- rather than over-value) so the agent doesn't over-buy scalers;
+# Pillar 2's planner will later estimate this properly via simulation.
+SCALE_PROJECT_INCREMENTS_PER_ANTE = 2.0
+SCALE_PROJECT_XMULT_CAP = 6.0
+SCALE_PROJECT_FLAT_CAP = 50.0
+
+
+def _project_shop_scaling_value(schema: dict, gamestate: dict):
+    """Projected mid-run value for an un-owned scaling joker, or None if the
+    schema carries no usable scaling increment."""
+    inc = schema.get("scaling_increment") or 0.0
+    if inc <= 0:
+        return None
+    start = schema.get("scaling_start_value") or 0.0
+    try:
+        ante = int(gamestate.get("ante_num", gamestate.get("ante", 1)) or 1)
+    except (TypeError, ValueError):
+        ante = 1
+    antes_left = max(min(8 - ante, 7), 2)              # 2..7 antes of growth
+    horizon = antes_left * SCALE_PROJECT_INCREMENTS_PER_ANTE
+    projected = start + inc * horizon
+    if schema.get("scaling_type") == "xmult":
+        return max(1.0, min(projected, SCALE_PROJECT_XMULT_CAP))
+    return min(projected, SCALE_PROJECT_FLAT_CAP)
+
+
 def _estimate_joker_scoring_for_type(hand_type: str, jokers: list[dict],
                                       gamestate: dict,
                                       dominant_suit: Optional[str] = None,
@@ -3765,7 +3798,10 @@ def _estimate_joker_scoring_for_type(hand_type: str, jokers: list[dict],
         if not triggered:
             _sv = joker.get("_scaled_value")
             _st = schema.get("scaling_type")
-            if _sv is not None and _st:
+            # Scaling engines always count in valuation: owned ones via their
+            # injected value, shop candidates via projection (dec-034 1a) — so a
+            # scaling joker is never skipped just because it isn't owned yet.
+            if _st:
                 triggered = True
                 trigger_count = 1
             else:
@@ -3807,9 +3843,13 @@ def _estimate_joker_scoring_for_type(hand_type: str, jokers: list[dict],
 
         effective_count = trigger_count + (retrigger_extra if schema.get("per_card_instance") else 0)
 
-        # For scaling jokers, use runtime value when available
+        # For scaling jokers, use runtime value when available; for SHOP
+        # candidates (no injected _scaled_value) project a fair mid-run value so
+        # the engine isn't valued at its ~x1.0 start (dec-034 Pillar 1a).
         scaled_value = joker.get("_scaled_value")
         scaling_type = schema.get("scaling_type")
+        if scaled_value is None and scaling_type:
+            scaled_value = _project_shop_scaling_value(schema, gamestate)
 
         for effect in score_effect:
             if effect == "chips":
