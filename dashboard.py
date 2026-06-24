@@ -206,6 +206,34 @@ def chunk_trend(rows):
     return chunks
 
 
+def _group_stats(g):
+    """Summary stats for a list of game records."""
+    n = len(g)
+    if n == 0:
+        return None
+    return {
+        "n": n,
+        "mean_ante": sum(x["ante"] for x in g) / n,
+        "a5": 100.0 * sum(1 for x in g if x["ante"] >= 5) / n,
+        "a6": 100.0 * sum(1 for x in g if x["ante"] >= 6) / n,
+        "a8": 100.0 * sum(1 for x in g if x["ante"] >= 8) / n,
+        "wins": sum(1 for x in g if x.get("won")),
+        "win_pct": 100.0 * sum(1 for x in g if x.get("won")) / n,
+    }
+
+
+def fresh_loaded_split(rows):
+    """Split games into FRESH (started at ante 1) vs curriculum-LOADED (started
+    from a banked ante-4/5 seed, dec-030). Loaded runs start deep and inflate
+    the ante/reach averages — this isolates real skill from the head start.
+
+    Records written before the from_curriculum tag (06-23) lack the field and
+    are counted as fresh; the 5000-game buffer flushes them within ~a day."""
+    fresh = [r for r in rows if not r.get("from_curriculum")]
+    loaded = [r for r in rows if r.get("from_curriculum")]
+    return _group_stats(fresh), _group_stats(loaded), len(loaded)
+
+
 def wins_by_day(rows):
     days = {}
     for r in rows:
@@ -458,6 +486,46 @@ def render():
         f"<b>{html.escape(st)}</b></li>")
     current_read = "".join(read_lines)
 
+    # --- Fresh vs curriculum-loaded split (isolate skill from the head start) ---
+    fresh_s, loaded_s, n_loaded = fresh_loaded_split(rows[-2000:])
+    fresh_rows = [r for r in rows if not r.get("from_curriculum")]
+    fresh_chunks = chunk_trend(fresh_rows)
+    if loaded_s and loaded_s["n"] >= 20:
+        def _row(label, fn, fmt="{:.2f}"):
+            fv = fmt.format(fn(fresh_s)) if fresh_s else "—"
+            lv = fmt.format(fn(loaded_s)) if loaded_s else "—"
+            return (f"<tr><td>{label}</td><td>{fv}</td><td class='dim'>{lv}</td></tr>")
+        split_tbl = (
+            "<table><tr><th>metric (last 2,000 games)</th>"
+            "<th>FRESH (start ante 1)</th><th>loaded (start 4/5)</th></tr>"
+            + _row("games", lambda s: s["n"], "{:.0f}")
+            + _row("mean ante", lambda s: s["mean_ante"])
+            + _row("reach ante 5+", lambda s: s["a5"], "{:.0f}%")
+            + _row("reach ante 6+", lambda s: s["a6"], "{:.0f}%")
+            + _row("reach ante 8+ (win)", lambda s: s["a8"], "{:.0f}%")
+            + _row("wins", lambda s: s["wins"], "{:.0f}")
+            + "</table>")
+        fresh_share = 100.0 * fresh_s["n"] / (fresh_s["n"] + loaded_s["n"]) if fresh_s else 0
+        split_note = (
+            f"<p class='note'><b>Fresh runs are the real skill signal.</b> "
+            f"Loaded runs start at ante 4/5, so their ante/reach numbers are a "
+            f"head start, not learning — the blended dashboard average sits "
+            f"between the two columns. {fresh_share:.0f}% of recent games were fresh. "
+            f"Watch the FRESH column (and the chart below) to see the encoder "
+            f"actually move skill.</p>")
+        fresh_ante_chart = svg_line(
+            [("FRESH mean ante / 200 games", "#7dd87d", [c["mean_ante"] for c in fresh_chunks])])
+        split_section = (
+            "<h2>Fresh vs curriculum-loaded — skill, with the head start removed</h2>"
+            + split_tbl + split_note
+            + "<h3>Fresh-run mean ante over time (this is the plateau to crack)</h3>"
+            + fresh_ante_chart)
+    else:
+        split_section = (
+            "<h2>Fresh vs curriculum-loaded</h2><p class='note'>Waiting for "
+            "curriculum-tagged games (from_curriculum) to accumulate — the split "
+            "appears once ≥20 loaded runs are in the buffer.</p>")
+
     # --- Outcomes ---
     ante_chart = svg_line([("mean ante / 200 games", "#e0a93e", [c["mean_ante"] for c in chunks])])
     deep_chart = svg_line([
@@ -559,6 +627,8 @@ def render():
 <h2>Outcomes — is he getting deeper? <span class='note'>(ground truth — no accounting change moves these)</span></h2>
 {ante_chart}
 {deep_chart}
+
+{split_section}
 
 <h2>Learning health — per PPO update ({len(updates)} parsed)</h2>
 <p class='note'>Dashed amber lines mark <b>regime boundaries</b> — points where a metric's level shifted for a measurement reason, not gameplay. Do not read a trend across one.</p>

@@ -621,6 +621,11 @@ class Trainer:
                         "ante": ante, "won": won,
                         "ts": _dt.now().isoformat(timespec="seconds"),
                         "episode": getattr(self, 'episode_count', 0),
+                        # Tag curriculum-loaded runs (started from a banked
+                        # ante-4/5 seed) so the dashboard can show FRESH-only
+                        # outcomes — loaded runs start deep and inflate the
+                        # ante/reach-rate averages (dec-030/031 head-start).
+                        "from_curriculum": bool(getattr(env, "from_curriculum", False)),
                         "jokers": [j.get("label", "?") for j in
                                    raw_state.get("jokers", {}).get("cards", [])],
                     })
