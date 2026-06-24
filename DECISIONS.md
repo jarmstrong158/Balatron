@@ -133,6 +133,32 @@ recycle — killing ALL trainers + ALL games + ALL orphan launchers — so nothi
 accumulates. First deployed N=2 on 2026-06-11 (combined ~309 steps/min vs ~196
 single, +58%); since raised to N=3.
 
+### The ante ~3.7 plateau and the relational encoder — 06-22/23 (`dec-029/030/031`)
+A long attractor at ante ~3.7 survived every *training-signal* lever
+(exploration, value_coef, shop-authority, SIL, perception, incentive,
+gate-lift). The arc that finally localized it:
+- **Un-freeze** (`dec-029`): decoupled the value trunk from the policy trunk
+  (`network.py` `value_trunk`) + cut `entropy_coef` 0.10→0.03. NULL — KL settled
+  back to ~0.0043, proving the policy was *converged for the reward*, not frozen
+  by a mechanism.
+- **Curriculum** (`dec-030`): harvest ante-4/5 partial-build states via the
+  BalatroBot `save` endpoint and `load` an annealed fraction of rollouts from
+  them, so deep-build experience becomes dense. NULL — loads fired flawlessly
+  but the fresh-run leading indicator (≥2 xmult by ante 3) stayed flat ~3.4% and
+  win density didn't accelerate. Handed deep builds, the agent still couldn't
+  convert them.
+- **Relational encoder** (`dec-031`): the curriculum null localized the ceiling
+  to the build-decision *representation*. Audits confirmed the policy already
+  owns the joker-buy decision (`policy_authority`) and the remaining heuristics
+  (`find_best_hands`, `compute_optimal_joker_order`) are near-optimal — so the
+  problem is that the policy makes that buy from a *flat* 842-vector and can't
+  relate joker-to-joker. `agent/set_encoder.py` runs self-attention over the
+  joint joker set (5 owned + 3 shop, learned CLS summary) so it can reason about
+  pairwise synergy / xmult stacking. Wired **additively** through zero-init
+  projections onto both trunks → no-op at load (regression-free), learns from
+  update 1. **Pre-committed:** if this too leaves the leading indicator flat over
+  hundreds of updates, accept ante-4 competence as the deliverable.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
