@@ -79,6 +79,15 @@ REWARD_XMULT_ACQUIRE_SCALING = 0.5    # Acquiring a scaling xMult joker (rarer, 
 # acquisition reward by (1 + this * #xmult_already_held), so 2nd xmult ~2x, 3rd
 # ~3x — pulling hardest at the 1->2 transition that distinguishes deep runs.
 REWARD_XMULT_STACK_BONUS = 1.0
+# xMult-engine GROWTH premium (dec-032). The audits found the plateau is bound
+# by the reward not differentiating xmult from additive builds: _check_scaling_
+# growth paid an xmult engine compounding X1.5->X3.0 the SAME per-log-unit as an
+# additive joker gaining +mult — yet multiplicative compounding is the mechanism
+# that breaks Balatro's exponential ante wall. This pays xmult-scaler growth
+# this-many-times the additive rate. It's the DENSE causal signal (every firing
+# hand) the value function can credit — unlike the ~0.5%-rare terminal depth
+# payoff that was the only other xmult-differentiating reward.
+REWARD_XMULT_GROWTH_PREMIUM = 3.0
 REWARD_GOLD_HOARD_PENALTY = -0.02     # Per-dollar penalty above reroll buffer (Scale phase)
 REWARD_GOLD_HOARD_BUFFER = 10         # Dollar threshold for hoarding penalty
 
@@ -92,6 +101,19 @@ def _sigmoid_ramp(ante: float, center: float, width: float = 0.8) -> float:
     x = (ante - center) / width
     x = max(min(x, 10.0), -10.0)  # clamp to avoid overflow
     return 1.0 / (1.0 + math.exp(-x))
+
+
+def _joker_is_xmult(jc: dict) -> bool:
+    """True if a joker card is an xMult engine (fixed or scaling).
+
+    Multiplicative jokers are the depth mechanism in Balatro; dec-032 rewards
+    their growth at a premium over additive scalers. Lazy imports mirror the
+    other reward helpers (avoid a module-load cycle with hand_eval/data)."""
+    from data.jokers import JOKERS
+    from environment.hand_eval import _api_key_to_name
+    n = _api_key_to_name(jc.get("key", ""))
+    s = JOKERS.get(n) if n else None
+    return bool(s and (s.get("xmult") or s.get("xmult_scaling")))
 
 
 def compute_phase_weights(ante: int) -> tuple[float, float, float]:
@@ -210,9 +232,9 @@ class RewardCalculator:
         if not skip_economy:
             reward += self._check_economy(prev_state, new_state)
 
-        # Scaling joker growth
+        # Scaling joker growth (xmult engines paid at a premium — dec-032)
         if scaling_values is not None:
-            reward += self._check_scaling_growth(scaling_values)
+            reward += self._check_scaling_growth(scaling_values, new_state)
 
         # Joker build diversity
         reward += self._check_joker_diversity(new_state)
@@ -589,11 +611,15 @@ class RewardCalculator:
         # Stacking premium: 1st xmult pays base, 2nd ~2x, 3rd ~3x.
         reward *= 1.0 + REWARD_XMULT_STACK_BONUS * prev_xmult
 
-        # Scale by phase — xmult is most valuable in Scale phase
-        # but always worth at least 30% even outside it
+        # Scale by phase — xmult is most valuable in Scale phase, but the FIRST
+        # xmult engine is laid in the Stabilize phase (antes 1-2), and the old
+        # 0.3 floor half-paid exactly those foundational buys (audit dec-032:
+        # "phase-suppressed exactly when foundations are laid"). Lift the floor
+        # to 0.7 so buying the first/second xmult early isn't penalized for
+        # timing; the Scale-phase peak (~1.0) is unchanged.
         ante = new_state.get("ante_num", 1)
         _, w_scale, _ = compute_phase_weights(ante)
-        phase_multiplier = 0.3 + 0.7 * w_scale
+        phase_multiplier = 0.7 + 0.3 * w_scale
         return reward * phase_multiplier
 
     def _check_gold_hoarding(self, new_state: dict) -> float:
@@ -619,17 +645,35 @@ class RewardCalculator:
         penalty = excess * REWARD_GOLD_HOARD_PENALTY * w_scale
         return max(penalty, -0.15)  # hard floor
 
-    def _check_scaling_growth(self, scaling_values: dict[int, float]) -> float:
-        """Reward growth in scaling joker values."""
-        reward = 0.0
+    def _check_scaling_growth(self, scaling_values: dict[int, float],
+                              new_state: Optional[dict] = None) -> float:
+        """Reward growth in scaling joker values.
 
+        xMult-engine growth pays REWARD_XMULT_GROWTH_PREMIUM x the additive rate
+        (dec-032): multiplicative compounding is the mechanism that breaks the
+        exponential ante wall, and this is a DENSE per-firing-hand signal the
+        value function can credit — the differentiating xmult reward the rare
+        terminal depth payoff could never deliver. The premium targets only the
+        slots whose joker is an xmult engine; additive scalers keep the base rate.
+        """
+        xmult_ids = set()
+        if new_state is not None:
+            for jc in new_state.get("jokers", {}).get("cards", []):
+                jid = jc.get("id")
+                if jid is not None and _joker_is_xmult(jc):
+                    xmult_ids.add(jid)
+
+        reward = 0.0
         for slot_id, new_val in scaling_values.items():
             old_val = self._prev_scaling_values.get(slot_id, 0.0)
             if new_val > old_val and new_val > 0:
                 # Log-scale growth reward
                 growth = math.log10(new_val + 1) - math.log10(old_val + 1)
                 if growth > 0:
-                    reward += growth * REWARD_SCALING_GROWTH
+                    rate = REWARD_SCALING_GROWTH
+                    if slot_id in xmult_ids:
+                        rate *= REWARD_XMULT_GROWTH_PREMIUM
+                    reward += growth * rate
 
         return reward
 
