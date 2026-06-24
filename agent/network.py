@@ -1,14 +1,21 @@
 """
 Balatron — Neural Network
 
-Shared trunk + 3 policy heads + 1 value head for PPO.
+Shared trunk + 3 policy heads + 1 value head for PPO, with a relational
+attention encoder grafted on (dec-031).
 
 Architecture:
-    Input (838) → Shared Trunk (768 → 768 → 512)
-    → Play Head   (512 → 256 → 45)  — SELECTING_HAND
-    → Shop Head   (512 → 256 → 45)  — SHOP, SMODS_BOOSTER_OPENED
-    → Blind Head  (512 → 128 → 45)  — BLIND_SELECT
-    → Value Head  (512 → 256 → 1)   — all states
+    Input (842) ─┬→ Shared Trunk (768 → 768 → 512) ─┐
+                 │                                   (+)→ Play/Shop/Blind Head → 45
+                 └→ Relational Encoder ─ attn_to_policy (zero-init) ─┘
+    Input (842) ─┬→ Value Trunk  (768 → 768 → 512) ─┐
+                 └→ Relational Encoder ─ attn_to_value  (zero-init) ─(+)→ Value Head → 1
+
+The encoder (agent/set_encoder.py) runs self-attention over the joint joker
+set (5 owned + 3 shop) so the policy can reason about pairwise synergy / xmult
+stacking. Its contribution is ADDED to the trunk outputs via zero-initialized
+projections, so a freshly-grafted encoder is a no-op at load (no regression to
+the loaded policy) and learns from the first update.
 
 The game state determines which policy head produces the action logits.
 The value head always produces a scalar state-value estimate.
@@ -22,6 +29,7 @@ import torch.nn as nn
 import numpy as np
 
 from environment.game_state import STATE_VECTOR_SIZE
+from agent.set_encoder import RelationalEncoder, ENCODER_OUT_DIM
 from environment.action_space import (
     ACTION_HEAD_SIZE,
     TARGET_SHOP_JOKER_OFFSET, SHOP_JOKER_SLOTS,
@@ -171,8 +179,28 @@ class BalatronNetwork(nn.Module):
         # Value head (reads the value trunk)
         self.value_head = ValueHead(self.trunk_output_size, VALUE_HEAD_HIDDEN)
 
+        # RELATIONAL ENCODER (dec-031, plan C). Self-attention over the joint
+        # joker set (5 owned + 3 shop) so the policy can reason about pairwise
+        # synergy / xmult STACKING — the representational ceiling every prior
+        # lever hit. Its contribution is ADDED to the trunk outputs through
+        # ZERO-INITIALIZED projections, so at load the encoder contributes
+        # exactly zero (the loaded policy is unchanged) and then learns from the
+        # first update. Separate projections for the policy vs decoupled value
+        # trunk (their gradients must stay disjoint, per dec-029).
+        self.encoder = RelationalEncoder()
+        self.attn_to_policy = nn.Linear(ENCODER_OUT_DIM, self.trunk_output_size)
+        self.attn_to_value = nn.Linear(ENCODER_OUT_DIM, self.trunk_output_size)
+
         # Initialize weights
         self.apply(self._init_weights)
+
+        # Zero the encoder output projections AFTER the orthogonal init pass so
+        # the grafted encoder starts as a no-op (no regression to the loaded
+        # agent). Gradient still flows: the projection weights get a non-zero
+        # gradient at step 0, so they lift off zero and the encoder trains.
+        for _proj in (self.attn_to_policy, self.attn_to_value):
+            nn.init.zeros_(_proj.weight)
+            nn.init.zeros_(_proj.bias)
 
     @staticmethod
     def _init_weights(module: nn.Module):
@@ -193,9 +221,11 @@ class BalatronNetwork(nn.Module):
             action_logits: shape (batch, 45) — raw logits before masking
             state_value: shape (batch,) — scalar value estimate
         """
-        trunk_out = self.trunk(state)
+        attn_emb = self.encoder(state)
+        trunk_out = self.trunk(state) + self.attn_to_policy(attn_emb)
         action_logits = self._policy_heads[head_idx](trunk_out)
-        state_value = self.value_head(self.value_trunk(state))  # decoupled trunk
+        # decoupled value trunk gets its own zero-init encoder projection
+        state_value = self.value_head(self.value_trunk(state) + self.attn_to_value(attn_emb))
         return action_logits, state_value
 
     def forward_mixed(self, states: torch.Tensor,
@@ -214,10 +244,12 @@ class BalatronNetwork(nn.Module):
             state_values: shape (batch,)
         """
         batch_size = states.shape[0]
-        trunk_out = self.trunk(states)
+        attn_emb = self.encoder(states)  # (batch, ENCODER_OUT_DIM)
+        trunk_out = self.trunk(states) + self.attn_to_policy(attn_emb)
 
         # Value head runs on everything — from its OWN decoupled trunk (dec-029)
-        state_values = self.value_head(self.value_trunk(states))
+        # plus its own zero-init encoder projection.
+        state_values = self.value_head(self.value_trunk(states) + self.attn_to_value(attn_emb))
 
         # Policy heads — group by head index
         action_logits = torch.zeros(batch_size, self.action_size,
@@ -425,6 +457,10 @@ class BalatronNetwork(nn.Module):
         counts["shop_head"] = sum(p.numel() for p in self.shop_head.parameters() if p.requires_grad)
         counts["blind_head"] = sum(p.numel() for p in self.blind_head.parameters() if p.requires_grad)
         counts["value_head"] = sum(p.numel() for p in self.value_head.parameters() if p.requires_grad)
+        counts["encoder"] = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
+        counts["attn_proj"] = sum(
+            p.numel() for m in (self.attn_to_policy, self.attn_to_value)
+            for p in m.parameters() if p.requires_grad)
         counts["total"] = sum(p.numel() for p in self.parameters() if p.requires_grad)
         return counts
 
