@@ -61,14 +61,19 @@ Zero lookahead today; greedy single-step buys. Add forward search at build decis
 Feedforward + memoryless: no place for a plan to live. Today he levels random hand
 types and his reward fights his own economy.
 
-- [ ] **3a. Build-target representation** — a persistent run-level archetype/win-condition
-      he commits to; encode in state; planner + heuristics condition on it.
-- [ ] **3b. Deliberate hand-leveling** — acquire/use planets toward the committed hand
-      type (fix "use planet on sight / pick index 0").
+- [x] **3a. Build-target representation** — DONE first slice (commit a9c21c6).
+      `planner.target_hand_type(jokers, gs)` = the archetype the build commits to
+      (highest `score_hand_type * HAND_ACHIEVABILITY` — strong AND makeable). Derived
+      from the build each decision (heuristic commitment; no neural memory organ yet).
+- [x] **3b. Deliberate hand-leveling** — DONE (a9c21c6). `plan_consumable_use` levels the
+      committed archetype / played hands and HOLDS off-build planets; `pick_best_planet`
+      gets a 2x bias toward the committed archetype. Fixes "use planet on sight".
 - [ ] **3c. Economy save-then-spike** — replace the anti-hoard penalty with bankroll-aware
       spike timing.
 - [ ] **3d. Boss preparation** — shop conditions on the upcoming boss (perception already
       exists; preparation doesn't).
+- [ ] **3a+. Persistent archetype memory** — currently re-derived each decision; if it
+      thrashes between hands, make it sticky (carry the commitment across the run).
 
 **Checkpoint (the goal):** fresh-run win rate climbs off ~1% toward a reliable ante-8 clear.
 
