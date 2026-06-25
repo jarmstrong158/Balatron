@@ -192,6 +192,35 @@ def test_planner_swap_protects_eternal():
     assert ax._planner_pick_swap(owned, raw, money=10) is None  # can't sell the eternal
 
 
+def test_planner_reroll_gate():
+    """Reroll-to-assemble only fires on genuine surplus above the interest floor,
+    with buy-money left, under the per-shop cap."""
+    from training.action_executor import ActionExecutor
+    import types
+    ax = ActionExecutor(policy_authority=True)
+    raw = {"round": {"reroll_cost": 5}, "used_vouchers": []}
+    env = types.SimpleNamespace(shop_rerolls=0)
+    # plenty of surplus above $25 floor -> ok
+    assert ax._planner_reroll_ok(env, raw, money=40) is True
+    # at/just above floor: $28 - $5 = $23 < $25 floor -> not surplus -> no
+    assert ax._planner_reroll_ok(env, raw, money=28) is False
+    # too little to buy after rerolling -> no
+    assert ax._planner_reroll_ok(env, raw, money=6) is False
+    # over the per-shop cap -> no
+    env.shop_rerolls = 3
+    assert ax._planner_reroll_ok(env, raw, money=60) is False
+
+
+def test_planner_reroll_respects_seed_money_floor():
+    from training.action_executor import ActionExecutor
+    import types
+    ax = ActionExecutor(policy_authority=True)
+    env = types.SimpleNamespace(shop_rerolls=0)
+    raw = {"round": {"reroll_cost": 5}, "used_vouchers": ["v_seed_money"]}  # floor $50
+    assert ax._planner_reroll_ok(env, raw, money=45) is False   # below the raised floor
+    assert ax._planner_reroll_ok(env, raw, money=70) is True
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))

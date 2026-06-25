@@ -174,6 +174,27 @@ class ActionExecutor:
             print(f"[SHOP] planner swap failed ({e})", flush=True)
             return None
 
+    # Reroll to assemble the build when the shop is barren (dec-034 Pillar 2):
+    # a build_value (antes of survivability gained) below this means the best
+    # shop joker barely advances the build — worth rerolling for a real piece.
+    PLANNER_REROLL_THRESHOLD = 0.12
+
+    def _planner_reroll_ok(self, env, raw_state: dict, money: float) -> bool:
+        """Is a planner-driven reroll safe right now? Only on genuine SURPLUS
+        above the interest floor, with enough left to buy after, under a per-shop
+        cap — so seeking build pieces can't drain the economy."""
+        reroll_cost = raw_state.get("round", {}).get("reroll_cost", 5)
+        if money < reroll_cost + 4:           # keep enough to buy after rerolling
+            return False
+        vouchers = raw_state.get("used_vouchers", [])
+        v = set(vouchers) if isinstance(vouchers, list) else set()
+        floor = 125 if "v_money_tree" in v else 50 if "v_seed_money" in v else 25
+        if money - reroll_cost < floor:        # only spend surplus above interest
+            return False
+        if getattr(env, "shop_rerolls", 0) >= 3:   # cap planner rerolls per shop
+            return False
+        return True
+
     def _encode_executed_action(self, api_method: str,
                                 api_params: Optional[dict],
                                 sampled_action: np.ndarray
@@ -482,6 +503,24 @@ class ActionExecutor:
                         pk = shop_cards[pick_idx]
                         pick_name = _api_key_to_name(
                             pk.get("joker_key", "") or pk.get("key", ""))
+                    # Reroll-to-assemble: if the best the planner found barely
+                    # advances the build (shop is barren) AND we have a true open
+                    # slot + surplus, reroll for a real engine piece instead of
+                    # buying junk — the strong-player move that gets engines online
+                    # (the audit's early-death cost). Gated so it can't drain econ.
+                    if joker_count < joker_limit:
+                        try:
+                            from environment.planner import build_value as _bval
+                            pick_card = shop_cards[pick_idx] if 0 <= pick_idx < len(shop_cards) else None
+                            pick_val = _bval(pick_card, jokers_raw, raw_state) if pick_card else 0.0
+                        except Exception:
+                            pick_val = 1.0  # on error, just buy
+                        if (pick_val < self.PLANNER_REROLL_THRESHOLD
+                                and self._planner_reroll_ok(env, raw_state, money)):
+                            env.shop_rerolls = env.shop_rerolls + 1
+                            print(f"[SHOP] PLANNER reroll (barren shop, best "
+                                  f"d-surv={pick_val:.2f}, open slot)", flush=True)
+                            return "reroll", None
                     tag = "PLANNER" if pick_idx != target_idx else "NN=planner"
                     print(f"[SHOP] {tag} buy: {pick_name or joker_key} "
                           f"(slot {pick_idx}, NN wanted {target_idx})", flush=True)
