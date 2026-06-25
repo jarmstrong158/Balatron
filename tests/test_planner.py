@@ -154,6 +154,44 @@ def test_planner_pick_falls_back_on_unaffordable():
     assert ax._planner_pick_joker([], raw, money=5, default_idx=3) == 3
 
 
+def test_planner_swap_upgrades_full_slots():
+    """Full-slot planning: with 5 weak jokers and a strong xmult in the shop, the
+    planner should sell a weak one and buy the upgrade (survivability improves)."""
+    from training.action_executor import ActionExecutor
+    ax = ActionExecutor(policy_authority=True)
+    owned = [{"key": "j_joker", "id": i, "cost": {"sell": 2}} for i in range(5)]
+    raw = {"ante_num": 3, "hands": {"Pair": {"played": 5, "chips": 60, "mult": 8}},
+           "cards": {"cards": []}, "round": {},
+           "shop": {"cards": [{"key": "j_cavendish", "id": 99, "cost": {"buy": 4}}]}}
+    swap = ax._planner_pick_swap(owned, raw, money=10)
+    assert swap is not None, "planner should upgrade a weak full roster"
+    sell_idx, buy_idx = swap
+    assert 0 <= sell_idx < 5 and buy_idx == 0
+
+
+def test_planner_swap_declines_when_no_improvement():
+    """Don't downgrade: selling a strong xmult for a weak joker must return None."""
+    from training.action_executor import ActionExecutor
+    ax = ActionExecutor(policy_authority=True)
+    owned = [{"key": "j_cavendish", "id": i, "cost": {"sell": 3}} for i in range(5)]
+    raw = {"ante_num": 3, "hands": {"Pair": {"played": 5, "chips": 60, "mult": 8}},
+           "cards": {"cards": []}, "round": {},
+           "shop": {"cards": [{"key": "j_joker", "id": 99, "cost": {"buy": 4}}]}}
+    assert ax._planner_pick_swap(owned, raw, money=10) is None
+
+
+def test_planner_swap_protects_eternal():
+    """An eternal joker is unsellable — the planner must not propose selling it."""
+    from training.action_executor import ActionExecutor
+    ax = ActionExecutor(policy_authority=True)
+    owned = [{"key": "j_joker", "id": 0, "cost": {"sell": 2},
+              "modifier": {"eternal": True}}]  # only joker, eternal
+    raw = {"ante_num": 3, "hands": {"Pair": {"played": 5, "chips": 60, "mult": 8}},
+           "cards": {"cards": []}, "round": {},
+           "shop": {"cards": [{"key": "j_cavendish", "id": 99, "cost": {"buy": 4}}]}}
+    assert ax._planner_pick_swap(owned, raw, money=10) is None  # can't sell the eternal
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))

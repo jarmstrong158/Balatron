@@ -131,6 +131,49 @@ class ActionExecutor:
                   flush=True)
             return default_idx
 
+    def _planner_pick_swap(self, jokers_raw: list, raw_state: dict, money: float):
+        """Pillar 2 full-slot planning (dec-034): slots are full, so evaluate
+        sell-one + buy-one SWAPS by resulting build survivability and return
+        (sell_idx, buy_idx) for the best IMPROVING swap, or None (don't downgrade
+        the build). THE PLATEAU ZONE — by ante ~2-3 slots fill, and the planner
+        was previously inert there (heuristic weakest-sell + the policy's buy), so
+        planning did nothing exactly where it matters most. Survivability handles
+        engine protection implicitly (selling a key joker tanks the score)."""
+        try:
+            from environment.planner import build_survivability
+            from environment.action_space import (
+                _is_non_joker_card, _api_key_to_name, BAD_JOKERS, _joker_sell_value,
+            )
+            base = build_survivability(jokers_raw, raw_state)
+            shop_cards = raw_state.get("shop", {}).get("cards", [])
+            best = None  # (survivability, sell_idx, buy_idx)
+            for bi, sc in enumerate(shop_cards):
+                if _is_non_joker_card(sc):
+                    continue
+                scn = _api_key_to_name(sc.get("joker_key", "") or sc.get("key", ""))
+                if scn and scn in BAD_JOKERS:
+                    continue
+                bc = sc.get("cost", {})
+                buy_cost = bc.get("buy", 999) if isinstance(bc, dict) else 999
+                for si, owned in enumerate(jokers_raw):
+                    mod = owned.get("modifier", {})
+                    if isinstance(mod, dict) and (
+                            mod.get("eternal") or mod.get("edition") == "NEGATIVE"):
+                        continue  # unsellable — protect
+                    sell_price = _joker_sell_value(owned)
+                    if buy_cost > money + sell_price:
+                        continue
+                    roster = [j for k, j in enumerate(jokers_raw) if k != si] + [sc]
+                    surv = build_survivability(roster, raw_state)
+                    if best is None or surv > best[0]:
+                        best = (surv, si, bi)
+            if best is not None and best[0] > base + 1e-6:
+                return best[1], best[2]
+            return None
+        except Exception as e:
+            print(f"[SHOP] planner swap failed ({e})", flush=True)
+            return None
+
     def _encode_executed_action(self, api_method: str,
                                 api_params: Optional[dict],
                                 sampled_action: np.ndarray
@@ -501,14 +544,31 @@ class ActionExecutor:
                           f"(no viable joker in shop)", flush=True)
                     return "gamestate", None
             else:
-                # Slots full. SHOP-AUTHORITY Phase B (dec-027): under
-                # policy_authority, HONOR the policy's targeted buy via
-                # sell-weakest-then-buy, applying only HARD guards (a sellable
-                # joker exists; affordable after the sell). The old soft gate
-                # (swap_score > current*1.1) silently no-op'd any buy whose value
-                # is FUTURE compounding — i.e. exactly the 2nd/3rd xmult scaler
-                # that builds the engine — which is why the dec-026 perception+
-                # incentive levers were null: the buy could not fire.
+                # Slots full. PLANNER full-slot planning (dec-034 Pillar 2): under
+                # policy_authority, the PLANNER evaluates sell+buy SWAPS by build
+                # survivability and picks the best improving one — instead of the
+                # old "sell the heuristic-weakest, buy the policy's slot". This is
+                # the plateau zone (slots fill by ante ~2-3), where the planner was
+                # previously inert. If no swap improves the build, don't downgrade.
+                if self.policy_authority:
+                    swap = self._planner_pick_swap(jokers_raw, raw_state, money)
+                    if swap is None:
+                        return "gamestate", None  # no swap improves the build
+                    sell_idx, buy_idx = swap
+                    sell_nm = jokers_raw[sell_idx].get("label", "?")
+                    shop_cards = raw_state.get("shop", {}).get("cards", [])
+                    buy_nm = ""
+                    if 0 <= buy_idx < len(shop_cards):
+                        bk = shop_cards[buy_idx]
+                        buy_nm = _api_key_to_name(
+                            bk.get("joker_key", "") or bk.get("key", ""))
+                    print(f"[SHOP] PLANNER swap: sell {sell_nm} -> buy "
+                          f"{buy_nm or buy_idx} (NN wanted slot {target_idx})",
+                          flush=True)
+                    env.pending_upgrade_buy = buy_idx
+                    return "sell", {"joker": sell_idx}
+
+                # ---- non-authority heuristic path (legacy) ----
                 weakest_idx, _ = _find_weakest_sellable_joker(
                     jokers_raw, raw_state)
                 if weakest_idx < 0:
@@ -523,20 +583,6 @@ class ActionExecutor:
                 swap_score = estimate_score_for_hand_type(swapped, raw_state)
                 weak_name = jokers_raw[weakest_idx].get("label", "?")
                 shop_name = name or joker_key
-
-                if self.policy_authority:
-                    # Confirmation: count when the OLD gate would have VETOED
-                    # this policy buy (swap doesn't improve current-hand score) —
-                    # i.e. how often the gate was blocking the stack.
-                    if swap_score <= current_score * 1.1:
-                        self._fullslot_gate_lifts = getattr(
-                            self, "_fullslot_gate_lifts", 0) + 1
-                        print(f"[SHOP] Phase-B buy (old gate would VETO): sell "
-                              f"{weak_name} → buy {shop_name} (cur "
-                              f"{current_score:.0f}, swap {swap_score:.0f}) "
-                              f"[lift #{self._fullslot_gate_lifts}]", flush=True)
-                    env.pending_upgrade_buy = target_idx
-                    return "sell", {"joker": weakest_idx}
 
                 # Legacy heuristic gate (non-authority mode only)
                 swap_threshold = 1.05 if is_high_value else 1.1
