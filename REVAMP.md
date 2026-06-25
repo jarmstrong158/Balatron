@@ -44,14 +44,16 @@ watch fresh-only panel for a small bump even before planning (greedy-but-accurat
 ## PILLAR 2 — PLANNING  (give him the computer's superpower)
 Zero lookahead today; greedy single-step buys. Add forward search at build decisions.
 
-- [ ] **2a. Transition model** — `simulate_shop_action(state, action) -> state'` (apply
-      joker to roster, advance money/interest) + the known Balatro **future-ante
-      blind-target curve** (not modeled today).
-- [ ] **2b. Search** — shallow expectimax/beam over shop actions (branching ≤ ~8):
-      scoring sim as the model, RL **value head** as the leaf evaluator (AlphaZero-style
-      search + learned value). Even depth 1–2 lets him value build-*potential*.
-- [ ] **2c. Wire into the shop seam** `training/action_executor.py:288-503`, replacing the
-      greedy `_estimate_joker_value` core.
+- [x] **2a. Future-ante blind-target curve** — DONE (commit e148c77). `planner.py`
+      `ANTE_BASE_TARGET` + `ante_target(ante, blind)` (boss=2x), extrapolated past 8.
+- [x] **2c. Wire into the shop seam (first slice)** — DONE (e148c77). `build_survivability`
+      = fractional deepest ante a build clears; `build_value(joker)` = survivability gain;
+      `action_executor._planner_pick_joker` makes the PLANNER choose which joker to buy
+      under policy_authority (policy still owns buy-vs-reroll-vs-skip tempo). 5 tests.
+- [ ] **2b. Full search** — current slice is depth-1 + multi-ante horizon eval. Upgrade to
+      shallow expectimax/beam over shop actions (reroll/draw as chance nodes) with the RL
+      **value head** as the leaf evaluator. Also: extend `_planner_pick` to the full-slot
+      (sell-weakest-then-buy) path and to reroll EV.
 
 **Checkpoint:** agent makes build-around buys (weak-now/strong-later) a greedy agent never would.
 
