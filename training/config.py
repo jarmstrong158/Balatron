@@ -86,14 +86,18 @@ class TrainConfig:
     # reaches ante >= demo_min_ante to a persistent buffer, so Phase 2 can
     # replay the agent's own successes through the BC loss. Capture does NOT
     # touch the policy — safe to run alongside other experiments.
-    # State-injection CURRICULUM (dec-030, plan A step 2). The policy is
-    # near-converged for the current reward because wins are 0.5%-rare and
-    # advantages are tiny. Harvest ante-4/5 partial-build states (BalatroBot
-    # save endpoint) and start a fraction of rollouts from them (load) so wins
-    # become frequent and advantages become real where engines matter. Anneals
-    # to 0 so training finishes on full self-play. Self-bootstraps (library
-    # starts empty -> fresh runs harvest -> loads kick in).
-    curriculum_enabled: bool = True
+    # State-injection CURRICULUM (dec-030) — DISABLED 06-24 (dec-034 era).
+    # It seeds ~40% of runs from banked ante-4/5 states. Turned OFF because:
+    # (1) it NULLED — never moved fresh-run skill; (2) DISTRIBUTION SHIFT — the
+    # policy distills on mid-game states it can't reach via its own early game
+    # (builds it didn't construct), so it learns the wrong things and nothing
+    # about getting TO ante 5; (3) OBSOLETE post-revamp — its job was to densify
+    # rare wins so the RL credit signal could learn BUILD decisions, but the
+    # planner (dec-034 Pillar 2) now makes build decisions by search, so the
+    # policy no longer needs seeded deep-regime exposure. SIL still reinforces the
+    # agent's OWN wins (in-distribution), so deep-regime signal isn't lost. Train
+    # purely on fresh runs from ante 1 — what we actually want it good at.
+    curriculum_enabled: bool = False
     curriculum_prob: float = 0.4         # P(load a seed) at update 0
     curriculum_anneal_updates: int = 800  # anneal prob -> 0 over this many updates
     curriculum_min_ante: int = 4         # harvest runs at ante 4..5 with >=1 xmult
