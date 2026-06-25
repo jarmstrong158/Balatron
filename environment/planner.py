@@ -55,10 +55,16 @@ def ante_target(ante: int, blind: str = "boss") -> float:
 def build_survivability(jokers: list[dict], gamestate: dict) -> float:
     """Fractional highest ante whose BOSS target this build can still clear.
 
-    A proxy for 'how deep does this build go' — the planning objective. Uses the
-    accurate per-hand estimate (incl. projected scaling) times HANDS_PER_BLIND.
+    A proxy for 'how deep does this build go' — the planning objective. Per-hand
+    power = the MAX of the build's committed-archetype potential (forward-looking,
+    so a flush build is judged on its Flush ceiling even while it's still playing
+    Pairs early) and the best already-played hand (so an established build isn't
+    underrated). Both include projected scaling (Pillar 1). x HANDS_PER_BLIND.
     """
-    power = estimate_score_for_hand_type(jokers, gamestate) * HANDS_PER_BLIND
+    ht = target_hand_type(jokers, gamestate)
+    per_hand = max(score_hand_type(ht, jokers, gamestate),
+                   estimate_score_for_hand_type(jokers, gamestate))
+    power = per_hand * HANDS_PER_BLIND
     if power <= 0:
         return 0.0
     prev_target = 0.0
