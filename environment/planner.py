@@ -16,7 +16,13 @@ nodes, RL value head as the leaf) is a later refinement within this pillar.
 
 from environment.hand_eval import (
     estimate_score_for_hand_type, _estimate_joker_scoring_for_type, BASE_HAND_SCORES,
+    _api_key_to_name,
 )
+
+# Solver phase 1 (dec-036): how many effective scaling increments an engine gains
+# per ante, used to PROJECT an engine's value forward when evaluating whether a
+# build out-scales the exponential blind curve. Mirrors the shop-projection rate.
+ENGINE_INCREMENTS_PER_ANTE = 2.0
 
 # Hand types a build can commit to and concentrate leveling on (Pillar 3).
 COMMITTABLE_HANDS = ["Pair", "Two Pair", "Three of a Kind", "Straight",
@@ -52,33 +58,57 @@ def ante_target(ante: int, blind: str = "boss") -> float:
     return base * BLIND_MULT.get(blind, 2.0)
 
 
-def build_survivability(jokers: list[dict], gamestate: dict) -> float:
-    """Fractional highest ante whose BOSS target this build can still clear.
+def _project_jokers(jokers: list[dict], antes_ahead: float) -> list[dict]:
+    """Copy the joker list, advancing each SCALING engine's value antes_ahead
+    antes into the future (current/start value + increment * rate * antes_ahead).
+    Static jokers pass through unchanged. This is how the solver models whether a
+    build keeps pace with the exponential blind curve (dec-036)."""
+    if antes_ahead <= 0:
+        return jokers
+    from data.jokers import JOKERS
+    out = []
+    for j in jokers:
+        n = _api_key_to_name(j.get("key", "") or j.get("joker_key", ""))
+        sch = JOKERS.get(n) if n else None
+        if sch and sch.get("scaling_type"):
+            inc = sch.get("scaling_increment") or 0.0
+            if inc > 0:
+                cur = j.get("_scaled_value")
+                base = cur if cur is not None else (sch.get("scaling_start_value") or 0.0)
+                jj = dict(j)
+                jj["_scaled_value"] = base + inc * ENGINE_INCREMENTS_PER_ANTE * antes_ahead
+                out.append(jj)
+                continue
+        out.append(j)
+    return out
 
-    A proxy for 'how deep does this build go' — the planning objective. Per-hand
-    power = the MAX of the build's committed-archetype potential (forward-looking,
-    so a flush build is judged on its Flush ceiling even while it's still playing
-    Pairs early) and the best already-played hand (so an established build isn't
-    underrated). Both include projected scaling (Pillar 1). x HANDS_PER_BLIND.
-    """
+
+def build_survivability(jokers: list[dict], gamestate: dict) -> float:
+    """TRAJECTORY-AWARE fractional deepest ante this build can clear (solver
+    phase 1, dec-036). At each future ante it PROJECTS the build's engines forward
+    to that ante and checks the projected power vs the boss target — so a build
+    whose engines out-scale the exponential curve projects deep, while a flat
+    additive build plateaus. This is the evaluator the ceiling audit (dec-035)
+    requires: it values builds by whether they KEEP PACE with the curve, not by
+    static current power. Committed-archetype hand fixed once (the build's plan)."""
     ht = target_hand_type(jokers, gamestate)
-    per_hand = max(score_hand_type(ht, jokers, gamestate),
-                   estimate_score_for_hand_type(jokers, gamestate))
-    power = per_hand * HANDS_PER_BLIND
-    if power <= 0:
-        return 0.0
-    prev_target = 0.0
-    for a in range(1, MAX_PLAN_ANTE + 1):
+    try:
+        cur = int(gamestate.get("ante_num", gamestate.get("ante", 1)) or 1)
+    except (TypeError, ValueError):
+        cur = 1
+    import math
+    prev_target = ante_target(cur - 1, "boss") if cur > 1 else 0.0
+    for a in range(cur, MAX_PLAN_ANTE + 1):
+        pj = _project_jokers(jokers, a - cur)               # engines matured to ante a
+        power = score_hand_type(ht, pj, gamestate) * HANDS_PER_BLIND
         tgt = ante_target(a, "boss")
         if power >= tgt:
             prev_target = tgt
             continue
-        # fractional progress into ante a (log-spaced — targets grow ~geometrically)
-        import math
         lo = math.log10(prev_target + 1.0)
         hi = math.log10(tgt + 1.0)
-        cur = math.log10(power + 1.0)
-        frac = (cur - lo) / max(hi - lo, 1e-9)
+        cur_p = math.log10(max(power, 0.0) + 1.0)
+        frac = (cur_p - lo) / max(hi - lo, 1e-9)
         return (a - 1) + max(0.0, min(frac, 1.0))
     return float(MAX_PLAN_ANTE)
 

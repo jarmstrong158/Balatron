@@ -192,6 +192,34 @@ def test_planner_swap_protects_eternal():
     assert ax._planner_pick_swap(owned, raw, money=10) is None  # can't sell the eternal
 
 
+def test_project_jokers_advances_engines_only():
+    """Solver phase 1: _project_jokers grows a scaling engine's value forward,
+    leaves static jokers untouched, and is a no-op at antes_ahead=0."""
+    from environment.planner import _project_jokers, ENGINE_INCREMENTS_PER_ANTE
+    holo = {"key": "j_hologram", "id": 1, "_scaled_value": 1.5}  # inc 0.25
+    flat = {"key": "j_cavendish", "id": 2}                       # fixed xmult, no scaling
+    out = _project_jokers([holo, flat], antes_ahead=2)
+    # Hologram: 1.5 + 0.25 * rate * 2
+    assert out[0]["_scaled_value"] == pytest.approx(1.5 + 0.25 * ENGINE_INCREMENTS_PER_ANTE * 2)
+    assert "_scaled_value" not in out[1]                        # static joker untouched
+    src = [holo, flat]
+    assert _project_jokers(src, 0) is src                        # no-op at antes_ahead=0
+
+
+def test_trajectory_credits_scaling_in_a_deep_build():
+    """In a build strong enough to reach the deep antes, a faster-scaling engine
+    must project at least as deep as a slower one (trajectory awareness)."""
+    from environment.planner import build_survivability
+    # strong leveled base so the build reaches the antes where scaling pays off
+    gs = {"ante_num": 3, "cards": {"cards": []}, "round": {},
+          "hands": {"Flush": {"played": 5, "chips": 300, "mult": 50}}}
+    fast = build_survivability([{"key": "j_hologram", "id": 1, "_scaled_value": 3.0},
+                                {"key": "j_cavendish", "id": 2}], gs)   # inc 0.25
+    slow = build_survivability([{"key": "j_vampire", "id": 1, "_scaled_value": 3.0},
+                                {"key": "j_cavendish", "id": 2}], gs)   # inc 0.10
+    assert fast >= slow
+
+
 def test_planner_reroll_gate():
     """Reroll-to-assemble only fires on genuine surplus above the interest floor,
     with buy-money left, under the per-shop cap."""
