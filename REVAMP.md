@@ -27,18 +27,19 @@ accurately today.
       in `hand_eval.py` projects start + inc*(antes_left*2), capped (xmult≤6, flat≤50),
       applied in the valuation scorer's shop fallback. Shop Hologram/Vampire/Green Joker
       now valued by a fair mid-run value instead of ~×1.0. 5 tests.
-- [ ] **1b. `magnitude_source` jokers** — ~10 jokers carry magnitude metadata never read,
-      so they score their flat base or ×1.0. Steel Joker & Joker Stencil score ×1.0 (no
-      effect) everywhere; Stone, Erosion, Swashbuckler, Banner, Driver's License,
-      Supernova, Throwback, Mystic Summit magnitude. Implement the magnitude table in
-      BOTH scoring paths (`compute_joker_scoring` AND `estimate_score_for_hand_type`).
-- [ ] **1c. Economy engines** — ~62 economy/utility jokers score 0. Give money-generators
-      (Rocket, Bull, To the Moon, Golden, interest jokers) a build value (money → future
-      power) so tempo/economy investment is visible.
-- [ ] **1d. Unify / cross-check the two scoring paths** so fixes can't silently drift.
+- [x] **1b. `magnitude_source` jokers** — DONE (commit 3f25153). `_resolve_magnitude_contribution`
+      + `_magnitude_count` in `hand_eval.py`; Steel/Stencil xmult, Stone/Bull/Banner chips,
+      Erosion/Swashbuckler/Supernova mult, gate jokers (Mystic Summit/Driver's License/
+      Bootstraps). Wired into the valuation scorer. 8 tests.
+- [x] **1c. Economy engines** — DONE (commit 3f25153). `_estimate_joker_value` gives
+      `economy=True` jokers a build value `money_per_round * 30` so all ~62 econ jokers
+      are no longer invisible to the buy decision. 1 test.
+- [ ] **1d. Live scoring path (`compute_joker_scoring`) magnitude** — the VALUATION path
+      (buy decision) is fixed; the live tactical scorer still mis-scores some magnitude
+      jokers (affects which hand to play when holding them). Secondary; revisit if it bites.
 
-**Checkpoint:** agent buys scaling/Steel/economy jokers at sane rates; expect a small
-fresh-ante bump even before planning (greedy-but-accurate).
+**Checkpoint:** PILLAR 1 DEPLOYED. agent should buy scaling/Steel/economy at sane rates;
+watch fresh-only panel for a small bump even before planning (greedy-but-accurate).
 
 ## PILLAR 2 — PLANNING  (give him the computer's superpower)
 Zero lookahead today; greedy single-step buys. Add forward search at build decisions.
