@@ -99,6 +99,12 @@ REWARD_XMULT_GROWTH_PREMIUM = 3.0
 REWARD_XMULT_FIRST_ENGINE = 1.5
 REWARD_GOLD_HOARD_PENALTY = -0.02     # Per-dollar penalty above reroll buffer (Scale phase)
 REWARD_GOLD_HOARD_BUFFER = 10         # Dollar threshold for hoarding penalty
+# Balatro interest cap (dec-034 Pillar 3c): $1 interest per $5 held, capped at
+# $5/round = $25 held. Money UP TO this earns interest and is the optimal
+# "war chest" a White-Stake player banks toward a power-spike shop — so it must
+# NOT be penalized. Only money ABOVE the cap is truly idle. (Seed Money/Money Tree
+# vouchers raise the cap; using the base $25 is mildly conservative.)
+INTEREST_CAP = 25
 
 
 # ============================================================
@@ -641,25 +647,25 @@ class RewardCalculator:
         return result
 
     def _check_gold_hoarding(self, new_state: dict) -> float:
-        """Penalize holding excess gold during Scale phase (antes 3-5).
-
-        Buffer = max(reroll_cost * 2, 10). Gold above this threshold
-        incurs a small per-dollar penalty scaled by w_scale.
-        """
+        """Penalize ONLY truly-idle gold — money above the interest cap ($25),
+        where extra dollars earn no more interest and should be spent on power
+        (dec-034 Pillar 3c: save-then-spike). Holding UP TO the cap is OPTIMAL
+        (max interest = the war chest a White-Stake player banks toward a
+        power-spike shop), so it is NOT penalized. The old $10 buffer actively
+        fought that strategy by punishing the very $10-25 accumulation that funds
+        the spike (strategy audit's #3 gap)."""
         ante = new_state.get("ante_num", 1)
         _, w_scale, _ = compute_phase_weights(ante)
         if w_scale < 0.1:
             return 0.0  # negligible outside Scale phase
 
         money = new_state.get("money", 0)
-        reroll_cost = new_state.get("round", {}).get("reroll_cost", 5)
-        buffer = max(reroll_cost * 2, REWARD_GOLD_HOARD_BUFFER)
-
-        excess = money - buffer
+        # Money up to the interest cap earns interest — never penalize the chest.
+        excess = money - INTEREST_CAP
         if excess <= 0:
             return 0.0
 
-        # Gradual penalty: small per-dollar, capped
+        # Gradual penalty on idle money ABOVE the cap only, capped.
         penalty = excess * REWARD_GOLD_HOARD_PENALTY * w_scale
         return max(penalty, -0.15)  # hard floor
 

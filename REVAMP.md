@@ -68,8 +68,11 @@ types and his reward fights his own economy.
 - [x] **3b. Deliberate hand-leveling** — DONE (a9c21c6). `plan_consumable_use` levels the
       committed archetype / played hands and HOLDS off-build planets; `pick_best_planet`
       gets a 2x bias toward the committed archetype. Fixes "use planet on sight".
-- [ ] **3c. Economy save-then-spike** — replace the anti-hoard penalty with bankroll-aware
-      spike timing.
+- [x] **3c. Economy save-then-spike** — DONE (commit pending). `_check_gold_hoarding` now
+      penalizes only money ABOVE the $25 interest cap (was $10), so the optimal $10-25
+      war chest is no longer punished. The spend side is handled by the planner buying
+      build-positive jokers when money is available. (Follow-up: detect Seed Money/Money
+      Tree vouchers that raise the cap; planner-driven save-vs-spend timing.)
 - [ ] **3d. Boss preparation** — shop conditions on the upcoming boss (perception already
       exists; preparation doesn't).
 - [ ] **3a+. Persistent archetype memory** — currently re-derived each decision; if it

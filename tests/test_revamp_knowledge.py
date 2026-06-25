@@ -142,6 +142,26 @@ def test_economy_joker_now_has_build_value():
     assert v > 50
 
 
+# ---------------- Pillar 3c: economy save-then-spike ----------------
+
+def test_war_chest_up_to_interest_cap_not_penalized():
+    """dec-034 3c: holding money up to the $25 interest cap during Scale phase is
+    OPTIMAL (the war chest) and must NOT be penalized — the old $10 buffer did."""
+    from environment.reward import RewardCalculator, INTEREST_CAP
+    rc = RewardCalculator(phase=1)
+    # ante 4 = Scale phase (w_scale high)
+    assert rc._check_gold_hoarding({"ante_num": 4, "money": 20, "round": {}}) == 0.0
+    assert rc._check_gold_hoarding({"ante_num": 4, "money": INTEREST_CAP, "round": {}}) == 0.0
+
+
+def test_idle_money_above_cap_still_penalized():
+    from environment.reward import RewardCalculator
+    rc = RewardCalculator(phase=1)
+    pen = rc._check_gold_hoarding({"ante_num": 4, "money": 45, "round": {}})
+    assert pen < 0.0           # money well above the cap is idle -> mild penalty
+    assert pen >= -0.15        # hard floor respected
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
