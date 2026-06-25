@@ -108,6 +108,9 @@ class ActionExecutor:
         never crashes the shop loop."""
         try:
             from environment.planner import build_value
+            from environment.action_space import (
+                BAD_JOKERS, _api_key_to_name, _is_non_joker_card,
+            )
             shop_cards = raw_state.get("shop", {}).get("cards", [])
             best_idx, best_val = default_idx, None
             for si, sc in enumerate(shop_cards):

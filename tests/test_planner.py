@@ -69,6 +69,37 @@ def test_survivability_uses_hands_per_blind():
     assert HANDS_PER_BLIND > 1.0
 
 
+def test_planner_pick_joker_integration():
+    """Integration: ActionExecutor._planner_pick_joker must run without error
+    (the local-import scope bug that made it fail-fast on every live call) and
+    pick the build-best affordable shop joker over a weak one."""
+    from training.action_executor import ActionExecutor
+    ax = ActionExecutor(policy_authority=True)
+    raw = {
+        "ante_num": 2,
+        "hands": {"Pair": {"played": 5, "chips": 60, "mult": 8}},
+        "cards": {"cards": []},
+        "round": {},
+        "shop": {"cards": [
+            {"key": "j_joker", "id": 1, "cost": {"buy": 4}},        # weak flat (slot 0)
+            {"key": "j_cavendish", "id": 2, "cost": {"buy": 4}},    # xmult     (slot 1)
+        ]},
+    }
+    # policy wanted slot 0 (the weak one); planner should override to slot 1
+    pick = ax._planner_pick_joker([], raw, money=10, default_idx=0)
+    assert pick == 1, f"planner picked {pick}, expected the xmult joker (slot 1)"
+
+
+def test_planner_pick_falls_back_on_unaffordable():
+    from training.action_executor import ActionExecutor
+    ax = ActionExecutor(policy_authority=True)
+    raw = {"ante_num": 2, "hands": {"Pair": {"played": 5, "chips": 60, "mult": 8}},
+           "cards": {"cards": []}, "round": {},
+           "shop": {"cards": [{"key": "j_cavendish", "id": 2, "cost": {"buy": 99}}]}}
+    # nothing affordable -> keep the policy's pick
+    assert ax._planner_pick_joker([], raw, money=5, default_idx=3) == 3
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
