@@ -3539,6 +3539,85 @@ SCALE_PROJECT_XMULT_CAP = 6.0
 SCALE_PROJECT_FLAT_CAP = 50.0
 
 
+# Pillar 1b (dec-034 KNOWLEDGE): magnitude_source jokers carry a magnitude_source
+# + detail in their schema but the per-unit coefficient is NOT in the static
+# schema, so neither scoring path read them — Steel Joker / Joker Stencil scored
+# x1.0 (no effect) and Stone/Bull/Banner/etc. scored their flat base. This
+# resolver computes the real state-dependent contribution. Per-unit xmult coeffs
+# are game constants (not in schema); chip/mult coeffs come from the schema base.
+_XMULT_PER_UNIT = {"Steel Joker": 0.2, "Joker Stencil": 1.0, "Throwback": 0.25}
+
+
+def _magnitude_count(detail: str, gamestate: dict, hand_type: str, joker: dict) -> float:
+    """How many 'units' a magnitude_source joker currently has (deck/board/run)."""
+    cards = gamestate.get("cards", {}).get("cards", [])
+    rd = gamestate.get("round", {}) or gamestate.get("current_round", {})
+    jinfo = gamestate.get("jokers", {})
+    if detail == "discards_remaining":
+        return rd.get("discards_left", 0) or 0
+    if detail == "stone_card_count":
+        return sum(1 for c in cards if card_enhancement(c) == "STONE")
+    if detail == "steel_card_count":
+        return sum(1 for c in cards if card_enhancement(c) == "STEEL")
+    if detail == "enhanced_card_count":
+        return sum(1 for c in cards if card_enhancement(c))
+    if detail == "empty_joker_slots":
+        return max((jinfo.get("limit", 5) or 5) - len(jinfo.get("cards", [])), 0)
+    if detail == "cards_below_starting_size":
+        return max(52 - len(cards), 0) if cards else 0
+    if detail == "dollars":
+        return gamestate.get("money", gamestate.get("dollars", 0)) or 0
+    if detail == "blinds_skipped":
+        return gamestate.get("blinds_skipped", gamestate.get("skips", 0)) or 0
+    if detail == "times_hand_type_played":
+        return gamestate.get("hands", {}).get(hand_type, {}).get("played", 0) or 0
+    if detail == "joker_count":
+        return len(jinfo.get("cards", []))
+    if detail == "all_other_jokers":
+        total, myid = 0, joker.get("id")
+        for j in jinfo.get("cards", []):
+            if j.get("id") != myid:
+                c = j.get("cost", {})
+                total += c.get("sell", 0) if isinstance(c, dict) else 0
+        return total
+    return 0
+
+
+def _resolve_magnitude_contribution(joker: dict, schema: dict, gamestate: dict,
+                                     hand_type: str):
+    """(chips, mult, xmult) for a magnitude_source SCORE joker, or None if it
+    isn't one. Gate jokers (Mystic Summit, Driver's License) return their flat
+    bonus only when their condition is met."""
+    src = schema.get("magnitude_source")
+    effects = schema.get("score_effect")
+    if not src or not effects:
+        return None
+    detail = schema.get("magnitude_source_detail", "")
+    name = _api_key_to_name(joker.get("joker_key", "") or joker.get("key", ""))
+    count = _magnitude_count(detail, gamestate, hand_type, joker)
+    chips = mult = 0.0
+    xmult = 1.0
+
+    # Gate jokers: flat bonus only when the condition holds.
+    if name == "Mystic Summit":          # +15 mult when 0 discards remaining
+        return (0.0, (schema.get("mult_value") or 15.0) if count == 0 else 0.0, 1.0)
+    if name == "Driver's License":       # X3 with >= 16 enhanced cards
+        return (0.0, 0.0, (schema.get("xmult_value") or 3.0) if count >= 16 else 1.0)
+    if name == "Bootstraps":             # +2 mult per $5
+        return (0.0, (schema.get("mult_value") or 2.0) * (count // 5), 1.0)
+
+    for eff in effects:
+        if eff == "xmult":
+            per = _XMULT_PER_UNIT.get(name, 0.0)
+            xmult = 1.0 + per * count
+        elif eff == "chips":
+            chips = (schema.get("chip_value") or 0.0) * count
+        elif eff == "mult":
+            # Swashbuckler/Supernova have no base -> coefficient 1 per unit.
+            mult = (schema.get("mult_value") or 1.0) * count
+    return (chips, mult, xmult)
+
+
 def _project_shop_scaling_value(schema: dict, gamestate: dict):
     """Projected mid-run value for an un-owned scaling joker, or None if the
     schema carries no usable scaling increment."""
@@ -3801,7 +3880,8 @@ def _estimate_joker_scoring_for_type(hand_type: str, jokers: list[dict],
             # Scaling engines always count in valuation: owned ones via their
             # injected value, shop candidates via projection (dec-034 1a) — so a
             # scaling joker is never skipped just because it isn't owned yet.
-            if _st:
+            # magnitude_source jokers (1b) likewise always count.
+            if _st or schema.get("magnitude_source"):
                 triggered = True
                 trigger_count = 1
             else:
@@ -3850,6 +3930,17 @@ def _estimate_joker_scoring_for_type(hand_type: str, jokers: list[dict],
         scaling_type = schema.get("scaling_type")
         if scaled_value is None and scaling_type:
             scaled_value = _project_shop_scaling_value(schema, gamestate)
+
+        # magnitude_source jokers (dec-034 1b): real state-dependent value
+        # (Steel/Stencil xmult, Stone/Bull/Banner chips, Erosion/Swashbuckler
+        # mult, gate jokers). Replaces the base/x1.0 the loop would otherwise use.
+        _mag = _resolve_magnitude_contribution(joker, schema, gamestate, hand_type)
+        if _mag is not None:
+            bonus_chips += _mag[0]
+            bonus_mult += _mag[1]
+            if _mag[2] != 1.0:
+                xmult_product *= _mag[2]
+            continue
 
         for effect in score_effect:
             if effect == "chips":

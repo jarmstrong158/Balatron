@@ -168,6 +168,14 @@ def _interest_penalty(money: int, cost: int) -> float:
     return math.exp(-HAND_BIAS_STRENGTH * 0.15 * lost_tiers)
 
 
+# Economy-joker valuation (dec-034 Pillar 1c). Money has no immediate score, so
+# economy jokers are valued by their dollars/round translated to a flat
+# score-equivalent. Calibrated so a strong econ engine (~$4/round) is a solid
+# mid-tier buy, not top priority. Tunable; Pillar 2 will value money via sim.
+ECON_SCORE_PER_DOLLAR = 30.0
+ECON_DEFAULT_MONEY_PER_ROUND = 2.5   # for economy=True jokers lacking the field
+
+
 def _estimate_joker_value(joker: dict, current_jokers: list[dict],
                           gamestate: dict) -> float:
     """Estimate a joker's scoring contribution via delta evaluation.
@@ -237,6 +245,21 @@ def _estimate_joker_value(joker: dict, current_jokers: list[dict],
                     floor = max(baseline * 0.01, 10.0)
                     if raw_delta < floor:
                         raw_delta = floor
+
+        # Economy engines (dec-034 Pillar 1c): money -> future power. These score
+        # ~0 (no score_effect), so they were valued at 0/floor and effectively
+        # ignored — all ~62 economy jokers invisible to the buy decision. Give a
+        # build value from money output: dollars/round translated to a flat
+        # score-equivalent (stage-independent; money's worth doesn't scale with
+        # the current board). Coarse on purpose — Pillar 2's planner will value
+        # money properly by simulating the builds it funds.
+        if name:
+            sch = JOKERS.get(name)
+            if sch and sch.get("economy"):
+                mpr = sch.get("money_per_round") or ECON_DEFAULT_MONEY_PER_ROUND
+                econ_value = mpr * ECON_SCORE_PER_DOLLAR
+                if econ_value > raw_delta:
+                    raw_delta = econ_value
 
         return raw_delta
 

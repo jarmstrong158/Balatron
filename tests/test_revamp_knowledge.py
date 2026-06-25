@@ -12,8 +12,20 @@ import pytest
 from data.jokers import JOKERS
 from environment.hand_eval import (
     _project_shop_scaling_value, estimate_score_for_hand_type,
-    SCALE_PROJECT_XMULT_CAP,
+    _resolve_magnitude_contribution, SCALE_PROJECT_XMULT_CAP,
 )
+
+
+def _steel_card():
+    return {"modifier": {"enhancement": "STEEL"}}
+
+
+def _stone_card():
+    return {"modifier": {"enhancement": "STONE"}}
+
+
+def _mag(name, key, gs):
+    return _resolve_magnitude_contribution({"key": key, "id": 1}, JOKERS[name], gs, "Pair")
 
 
 def _gs(ante=3):
@@ -62,6 +74,72 @@ def test_owned_scaling_value_still_wins_over_projection():
     big = estimate_score_for_hand_type([{"key": "j_hologram", "id": 1, "_scaled_value": 6.0}], gs)
     proj = estimate_score_for_hand_type([{"key": "j_hologram", "id": 1}], gs)
     assert big > proj
+
+
+# ---------------- Pillar 1b: magnitude_source jokers ----------------
+
+def test_steel_joker_xmult_from_steel_cards():
+    gs = _gs(); gs["cards"]["cards"] = [_steel_card()] * 4   # 4 steel cards
+    c, m, x = _mag("Steel Joker", "j_steel_joker", gs)
+    assert x == pytest.approx(1.0 + 0.2 * 4)               # was x1.0 (no effect) before
+    # no steel cards -> x1.0 (correct: worthless without a steel deck)
+    assert _mag("Steel Joker", "j_steel_joker", _gs())[2] == pytest.approx(1.0)
+
+
+def test_joker_stencil_xmult_from_empty_slots():
+    gs = _gs(); gs["jokers"] = {"limit": 5, "cards": [{"id": 9}, {"id": 10}]}  # 3 empty
+    assert _mag("Joker Stencil", "j_stencil", gs)[2] == pytest.approx(1.0 + 3)
+
+
+def test_stone_joker_chips_from_stone_cards():
+    gs = _gs(); gs["cards"]["cards"] = [_stone_card()] * 3
+    assert _mag("Stone Joker", "j_stone", gs)[0] == pytest.approx(25.0 * 3)
+
+
+def test_bull_chips_from_dollars():
+    gs = _gs(); gs["money"] = 20
+    assert _mag("Bull", "j_bull", gs)[0] == pytest.approx(2.0 * 20)
+
+
+def test_mystic_summit_gate():
+    gs = _gs(); gs["round"] = {"discards_left": 0}
+    assert _mag("Mystic Summit", "j_mystic_summit", gs)[1] == pytest.approx(15.0)
+    gs2 = _gs(); gs2["round"] = {"discards_left": 2}
+    assert _mag("Mystic Summit", "j_mystic_summit", gs2)[1] == 0.0
+
+
+def test_drivers_license_gate():
+    gs = _gs(); gs["cards"]["cards"] = [{"modifier": {"enhancement": "BONUS"}}] * 16
+    assert _mag("Driver's License", "j_drivers_license", gs)[2] == pytest.approx(3.0)
+    assert _mag("Driver's License", "j_drivers_license", _gs())[2] == pytest.approx(1.0)
+
+
+def test_steel_joker_now_raises_estimated_score():
+    """End-to-end: Steel Joker with a steel-heavy deck must raise the estimate
+    (it scored x1.0 = no effect everywhere before 1b)."""
+    gs = _gs(); gs["cards"]["cards"] = [_steel_card()] * 6
+    base = estimate_score_for_hand_type([], gs)
+    withsteel = estimate_score_for_hand_type([{"key": "j_steel_joker", "id": 1}], gs)
+    assert withsteel > base * 1.3
+
+
+def test_non_magnitude_joker_returns_none():
+    assert _resolve_magnitude_contribution({"key": "j_joker"}, JOKERS["Joker"], _gs(), "Pair") is None
+
+
+# ---------------- Pillar 1c: economy engines ----------------
+
+def test_economy_joker_now_has_build_value():
+    """Economy jokers score ~0, so they were valued at the floor and ignored.
+    Now they carry a money-output build value."""
+    from environment.action_space import (
+        _estimate_joker_value, ECON_SCORE_PER_DOLLAR,
+    )
+    gs = _gs()
+    v = _estimate_joker_value({"key": "j_golden_joker", "id": 1}, [], gs)  # $4/round
+    assert v == pytest.approx(4.0 * ECON_SCORE_PER_DOLLAR)
+    # comfortably above the generic ~10 floor a no-score joker would otherwise get
+    assert v > 50
 
 
 if __name__ == "__main__":
