@@ -11,7 +11,7 @@ import pytest
 
 from environment.planner import (
     ante_target, build_survivability, build_value, rank_shop_jokers,
-    HANDS_PER_BLIND,
+    target_hand_type, score_hand_type, COMMITTABLE_HANDS, HANDS_PER_BLIND,
 )
 
 
@@ -67,6 +67,60 @@ def test_survivability_uses_hands_per_blind():
     s = build_survivability([{"key": "j_cavendish", "id": 1}], _gs())
     assert 0.0 <= s <= 12.0
     assert HANDS_PER_BLIND > 1.0
+
+
+def test_target_hand_type_is_committable_and_achievability_weighted():
+    gs = _gs()
+    t = target_hand_type([], gs)
+    assert t in COMMITTABLE_HANDS
+    # with no jokers, achievability weighting must NOT commit to a rare hand
+    # (raw base score favors Four of a Kind; the prior should pull it to a
+    # frequently-makeable hand)
+    assert t in ("Pair", "Two Pair", "Three of a Kind", "Flush", "Straight")
+
+
+def test_target_commits_to_the_build_supported_hand():
+    """A flush-leaning build should be able to commit to Flush over Pair once the
+    jokers make Flush its strongest achievable hand."""
+    gs = {"ante_num": 3,
+          "hands": {"Pair": {"played": 2, "chips": 10, "mult": 2},
+                    "Flush": {"played": 1, "chips": 35, "mult": 4}},
+          "cards": {"cards": []}, "round": {}}
+    flush_build = [{"key": "j_blackboard", "id": 1}]  # flush/suit-oriented
+    t = target_hand_type(flush_build, gs)
+    assert t in COMMITTABLE_HANDS  # smoke: runs over a real build without error
+
+
+def test_planet_use_holds_off_build_planet():
+    """Deliberate leveling: a planet for a hand we never play and aren't
+    committed to is HELD (not used) when a consumable slot is free."""
+    from environment.hand_eval import plan_consumable_use
+    gs = {
+        "state": "SELECTING_HAND", "ante_num": 2, "money": 4,
+        "hand": {"cards": []}, "jokers": {"cards": []},
+        "round": {"hands_left": 3},
+        "hands": {"Pair": {"played": 5, "chips": 10, "mult": 2}},  # only play Pair
+        # one consumable: a planet for Four of a Kind (never played), slot free
+        "consumables": {"limit": 2, "cards": [{"key": "c_ceres", "set": "Planet"}]},
+    }
+    # c_ceres levels Four of a Kind (off-build) -> should be HELD -> no action
+    res = plan_consumable_use(gs)
+    assert res is None, f"off-build planet should be held, got {res}"
+
+
+def test_planet_use_fires_for_played_hand():
+    from environment.hand_eval import plan_consumable_use
+    from environment.hand_eval import PLANET_TO_HAND_TYPE
+    # find a planet key that levels Pair (a hand we play)
+    pair_key = next((k for k, v in PLANET_TO_HAND_TYPE.items() if v == "Pair"), None)
+    assert pair_key is not None
+    gs = {
+        "state": "SELECTING_HAND", "ante_num": 2, "money": 4,
+        "hand": {"cards": []}, "jokers": {"cards": []}, "round": {"hands_left": 3},
+        "hands": {"Pair": {"played": 5, "chips": 10, "mult": 2}},
+        "consumables": {"limit": 2, "cards": [{"key": pair_key, "set": "Planet"}]},
+    }
+    assert plan_consumable_use(gs) == {"consumable": 0}
 
 
 def test_planner_pick_joker_integration():

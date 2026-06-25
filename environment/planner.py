@@ -14,7 +14,21 @@ projects scaling-joker growth). Full multi-step expectimax (reroll/draw chance
 nodes, RL value head as the leaf) is a later refinement within this pillar.
 """
 
-from environment.hand_eval import estimate_score_for_hand_type
+from environment.hand_eval import (
+    estimate_score_for_hand_type, _estimate_joker_scoring_for_type, BASE_HAND_SCORES,
+)
+
+# Hand types a build can commit to and concentrate leveling on (Pillar 3).
+COMMITTABLE_HANDS = ["Pair", "Two Pair", "Three of a Kind", "Straight",
+                     "Flush", "Full House", "Four of a Kind"]
+
+# How reliably each hand can actually be MADE each round (rough prior). Commit
+# weights raw power by achievability so the build doesn't "commit" to a rare hand
+# (Four of a Kind) it never plays — it must be both strong AND makeable.
+HAND_ACHIEVABILITY = {
+    "Pair": 1.0, "Two Pair": 0.7, "Three of a Kind": 0.6, "Straight": 0.45,
+    "Flush": 0.5, "Full House": 0.35, "Four of a Kind": 0.2,
+}
 
 # Balatro White-Stake SMALL-blind base chip requirement by ante (big = 1.5x,
 # boss = 2x). Known game constants; extrapolate geometrically past ante 8 so the
@@ -70,6 +84,31 @@ def build_value(joker: dict, current_jokers: list[dict], gamestate: dict) -> flo
     before = build_survivability(current_jokers, gamestate)
     after = build_survivability(list(current_jokers) + [joker], gamestate)
     return after - before
+
+
+def score_hand_type(ht: str, jokers: list[dict], gamestate: dict) -> float:
+    """Per-hand-type score for the current build (the hand's current level from
+    gamestate + joker effects). Forward-looking: reflects what the jokers
+    SUPPORT, not just what's been played (Pillar 3 COMMITMENT)."""
+    info = gamestate.get("hands", {}).get(ht, {})
+    bc, bm = BASE_HAND_SCORES.get(ht, (5, 1))
+    ht_chips = info.get("chips", bc)
+    ht_mult = info.get("mult", bm)
+    jc, jm, jx = _estimate_joker_scoring_for_type(ht, jokers, gamestate)
+    return (ht_chips + 40.0 + jc) * (ht_mult + jm) * jx
+
+
+def target_hand_type(jokers: list[dict], gamestate: dict) -> str:
+    """The hand type this BUILD is committed to — the one it scores highest at.
+    Build-based (not the lagging most-played heuristic), so leveling and buys can
+    concentrate on ONE archetype instead of diluting across hand types — the
+    single biggest White-Stake scaling mistake the strategy audit flagged."""
+    best, best_ht = -1.0, "Pair"
+    for ht in COMMITTABLE_HANDS:
+        s = score_hand_type(ht, jokers, gamestate) * HAND_ACHIEVABILITY.get(ht, 0.5)
+        if s > best:
+            best, best_ht = s, ht
+    return best_ht
 
 
 def rank_shop_jokers(shop_jokers: list[dict], current_jokers: list[dict],

@@ -3463,6 +3463,14 @@ def pick_best_planet(pack_cards: list[dict], jokers: list[dict],
         total = max(len(deck_cards), 1)
         ds = {s: n / total for s, n in counts.items()}
 
+    # Pillar 3b: the build's COMMITTED archetype — bias leveling toward it so a
+    # pack concentrates levels on one hand instead of chasing lagging frequency.
+    try:
+        from environment.planner import target_hand_type as _tgt_ht
+        committed_ht = _tgt_ht(jokers, gamestate)
+    except Exception:
+        committed_ht = None
+
     best_idx = 0
     best_gain = -1.0
 
@@ -3517,6 +3525,9 @@ def pick_best_planet(pack_cards: list[dict], jokers: list[dict],
         ) if isinstance(hands_data, dict) else 0
         play_share = times_played / total_played if total_played > 0 else 0.0
         gain *= (0.05 + 0.95 * play_share)
+        # Concentrate leveling on the committed archetype (Pillar 3b).
+        if committed_ht is not None and ht_name == committed_ht:
+            gain *= 2.0
 
         if gain > best_gain:
             best_gain = gain
@@ -4770,10 +4781,25 @@ def plan_consumable_use(gamestate: dict) -> Optional[dict]:
         key = cons.get("key", "")
         card_set = cons.get("set", "")
 
-        # ── PLANET CARDS ──
-        # Always use planet cards — they level up hand types permanently
+        # ── PLANET CARDS ── (Pillar 3b: deliberate, COMMITTED leveling)
+        # Old behavior used every planet on sight regardless of hand type,
+        # diluting Balatro's biggest scaling lever across hands the build never
+        # plays. Now: level the build's COMMITTED archetype (target_hand_type),
+        # or a hand we actually play, or when forced (consumable slots full);
+        # otherwise HOLD an off-build planet rather than waste it.
         if "PLANET" in card_set.upper() or key in PLANET_TO_HAND_TYPE:
-            return {"consumable": cons_idx}
+            from environment.planner import target_hand_type as _tgt_ht
+            planet_ht = PLANET_TO_HAND_TYPE.get(key)
+            cons_limit = gamestate.get("consumables", {}).get("limit", 2)
+            slots_full = len(consumable_cards) >= cons_limit
+            played = gamestate.get("hands", {}).get(planet_ht or "", {}).get("played", 0)
+            try:
+                committed = _tgt_ht(jokers, gamestate)
+            except Exception:
+                committed = best_ht
+            if planet_ht is None or planet_ht == committed or played > 0 or slots_full:
+                return {"consumable": cons_idx}
+            continue  # hold this off-build planet — don't dilute leveling
 
         # ── THE HERMIT ──
         # Doubles money (cap $20). Use at $20+ for guaranteed max payout,
