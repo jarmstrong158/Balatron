@@ -99,6 +99,35 @@ class ActionExecutor:
         self.policy_authority = policy_authority
         self._shop_block_count = 0
 
+    def _planner_pick_joker(self, jokers_raw: list, raw_state: dict,
+                            money: float, default_idx: int) -> int:
+        """Pillar 2 (dec-034 PLANNING): among affordable, valid shop jokers, pick
+        the one the planner says advances the build deepest (multi-ante
+        survivability), instead of blindly buying the policy's targeted slot.
+        Falls back to the policy's pick (default_idx) on any error or empty set —
+        never crashes the shop loop."""
+        try:
+            from environment.planner import build_value
+            shop_cards = raw_state.get("shop", {}).get("cards", [])
+            best_idx, best_val = default_idx, None
+            for si, sc in enumerate(shop_cards):
+                if _is_non_joker_card(sc):
+                    continue
+                cost = sc.get("cost", {})
+                if (cost.get("buy", 999) if isinstance(cost, dict) else 999) > money:
+                    continue
+                scn = _api_key_to_name(sc.get("joker_key", "") or sc.get("key", ""))
+                if scn and scn in BAD_JOKERS:
+                    continue
+                val = build_value(sc, jokers_raw, raw_state)
+                if best_val is None or val > best_val:
+                    best_val, best_idx = val, si
+            return best_idx
+        except Exception as e:
+            print(f"[SHOP] planner pick failed ({e}) -> NN slot {default_idx}",
+                  flush=True)
+            return default_idx
+
     def _encode_executed_action(self, api_method: str,
                                 api_params: Optional[dict],
                                 sampled_action: np.ndarray
@@ -392,10 +421,25 @@ class ActionExecutor:
                 # buy THAT one. Which joker to buy is a judgment call the policy
                 # owns; don't override it with a heuristic "best" scan.
                 if self.policy_authority:
-                    buy_name = name or joker_key
-                    print(f"[SHOP] Buying NN pick: {buy_name} (slot {target_idx})",
-                          flush=True)
-                    return "buy", {"card": target_idx}
+                    # PLANNER picks WHICH joker (dec-034 Pillar 2): the policy
+                    # decided to BUY (tempo/economy judgment it owns), but which
+                    # joker most advances the build is a lookahead question — rank
+                    # affordable shop jokers by multi-ante survivability instead of
+                    # blindly buying the policy's slot. This is where reacting
+                    # becomes planning. PPO records the EXECUTED buy, so the policy
+                    # distills toward the planner's picks over time.
+                    pick_idx = self._planner_pick_joker(
+                        jokers_raw, raw_state, money, target_idx)
+                    shop_cards = raw_state.get("shop", {}).get("cards", [])
+                    pick_name = ""
+                    if 0 <= pick_idx < len(shop_cards):
+                        pk = shop_cards[pick_idx]
+                        pick_name = _api_key_to_name(
+                            pk.get("joker_key", "") or pk.get("key", ""))
+                    tag = "PLANNER" if pick_idx != target_idx else "NN=planner"
+                    print(f"[SHOP] {tag} buy: {pick_name or joker_key} "
+                          f"(slot {pick_idx}, NN wanted {target_idx})", flush=True)
+                    return "buy", {"card": pick_idx}
 
                 # Open slot — scan ALL shop jokers and buy the best one,
                 # not just whichever one the NN happened to pick.
