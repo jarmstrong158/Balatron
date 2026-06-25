@@ -159,6 +159,42 @@ gate-lift). The arc that finally localized it:
   update 1. **Pre-committed:** if this too leaves the leading indicator flat over
   hundreds of updates, accept ante-4 competence as the deliverable.
 
+### Reward differentiation, and why it nulled — 06-23/24 (`dec-032/033`)
+The encoder didn't move it either, and a deep audit said why: the reward credits
+*survival depth*, which additive builds earn as well as xmult ones at the antes
+the agent reaches, while the xmult-differentiating reward (the deep/win payoff) is
+~0.5%-rare. So `dec-032` made the dense **xmult-engine growth** signal pay 3× the
+additive rate (differentiation, not a global knob) and un-suppressed the early
+acquisition bonus; `dec-033` added a one-shot **first-engine** bonus to fix
+`dec-032`'s chicken-and-egg (the growth premium only fires once you *own* an
+xmult). Both **null**: a direct +1.5 reward for the first xmult buy did **not**
+move the buy rate at all — proving the ~31% rate is *opportunity/economy-bound*,
+not reward-bound. Reward shaping can't manufacture shop RNG/affordability. That
+closed the reward/credit lever and the whole reactive-policy category.
+
+### The revamp: reactor → planner — 06-24 (`dec-034`, `REVAMP.md`)
+Five reactive levers nulled; the user reset the goal to *consistently beat White
+Stake*. Three parallel audits converged: the agent is **a greedy local optimizer
+with incomplete knowledge and no memory**, and greedy-in-isolation *is* a ~ante-4
+strategy. In the most computer-favorable game possible (fully observable,
+deterministic scoring) it uses **none** of the computer's search advantage. The
+revamp, in forced dependency order (roadmap + checkboxes in `REVAMP.md`):
+- **Pillar 1 KNOWLEDGE** — `_project_shop_scaling_value` (scaling jokers were
+  valued ~×1.0 in the shop), `_resolve_magnitude_contribution` (Steel/Stencil
+  scored ×1.0, Stone/Bull/Banner/etc. flat-base), economy-joker valuation.
+- **Pillar 2 PLANNING** — `environment/planner.py`: a future-ante blind-target
+  curve + `build_survivability` + `build_value`. `action_executor._planner_pick_joker`
+  makes the **planner** choose which joker to buy (deepest build, multi-ante),
+  overriding the policy's slot; PPO records the executed buy so the policy distills
+  toward the planner. Verified live: ~23% of buys overridden, KL rose to 0.0168.
+- **Pillar 3 COMMITMENT** — `planner.target_hand_type` (build commits to one
+  archetype = strongest × achievability); `plan_consumable_use` levels the
+  committed hand and **holds** off-build planets (was "use on sight");
+  `pick_best_planet` biases the committed hand. Remaining: economy save-then-spike,
+  boss prep, sticky archetype memory, full lookahead search (value-head leaf).
+Keep the near-optimal tactical heuristics (card selection, joker ordering) — the
+gap is *strategic*, not tactical.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
