@@ -17,7 +17,29 @@ the `ANTE_BASE_TARGET` curve, and the RL value head (candidate learned leaf).
 
 ---
 
-## PHASE 1 — WIN-PROBABILITY EVALUATOR (trajectory-aware)  ← START HERE
+## ⚠ REDIRECT (dec-037, deep research): the evaluator is INCOMPLETE and the
+## focus was wrong. Three audits converged: the binding constraint at depth is
+## the COMPLETE multiplicative product (hand-LEVEL × flat-mult × xmult), NOT
+## xmult count (data: advance rate flat across 0-4 engines at the 5→6 wall). The
+## evaluator is BLIND to the two biggest levers — hand-LEVELING (build_survivability
+## freezes planet level) and ECONOMY (no save→spike). Revised order below; do NOT
+## build Phase-2 search on an incomplete/unvalidated leaf (search amplifies its errors).
+
+### PHASE 0 — INSTRUMENT depth deaths (prerequisite; near-zero cost)  ← START HERE
+Extend the build_progression writer (train.py ~1137) with per-ante: money,
+committed hand type + LEVEL, board-power (estimate_score×HANDS_PER_BLIND) + margin
+over ante_target, the chips/flat-mult/xmult decomposition, rerolls/planets bought.
+Without this, depth deaths are undiagnosable and the evaluator is unvalidatable.
+
+### PHASE 1.5 — COMPLETE THE EVALUATOR (after instrumentation)
+- [ ] Project committed-hand LEVELING forward in build_survivability (#1 gap —
+      leveling is half the exponent; currently frozen at the current level).
+- [ ] Value ECONOMY as future build potential (save→spike), not just an interest floor.
+- [ ] Raise/fix the xmult projection cap (SCALE_PROJECT_XMULT_CAP=6.0 strangles engines).
+- [ ] (maybe) route planner valuation through the ordered compute_joker_scoring.
+- [ ] VALIDATE: does build_survivability rank-correlate with real deep-ante advance?
+
+## PHASE 1 — WIN-PROBABILITY EVALUATOR (trajectory-aware)  [engine projection DONE dec-036]
 Replace `build_survivability` (static power vs curve) with `win_probability`:
 project each engine's value FORWARD to each future ante (scaling growth), score
 the build's power at that ante (multiplicative stacking preserved), and compute

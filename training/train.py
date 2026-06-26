@@ -1132,15 +1132,49 @@ class Trainer:
             if ante > env.last_logged_ante:
                 env.last_logged_ante = ante
                 try:
-                    nx, ns, nj = _build_composition(
-                        raw_state.get("jokers", {}).get("cards", []))
+                    jcards = raw_state.get("jokers", {}).get("cards", [])
+                    nx, ns, nj = _build_composition(jcards)
+                    record = {
+                        "ante": ante, "n_xmult": nx, "n_scaling": ns,
+                        "n_jokers": nj, "env": env.env_id,
+                        "step": self.global_step,
+                    }
+                    # dec-037 depth-death instrumentation: log the FULL picture at
+                    # each ante boundary so deep deaths (economy vs LEVELING vs
+                    # composition) are diagnosable and the evaluator is validatable.
+                    # money / committed-hand base chips+mult (encodes planet level)
+                    # / board power vs boss target / chips-mult-xmult decomposition.
+                    try:
+                        from environment.planner import (
+                            target_hand_type, ante_target, HANDS_PER_BLIND,
+                        )
+                        from environment.hand_eval import (
+                            _estimate_joker_scoring_for_type, BASE_HAND_SCORES,
+                            estimate_score_for_hand_type,
+                        )
+                        ht = target_hand_type(jcards, raw_state)
+                        hinfo = raw_state.get("hands", {}).get(ht, {})
+                        bc, bm = BASE_HAND_SCORES.get(ht, (5, 1))
+                        jc, jm, jx = _estimate_joker_scoring_for_type(ht, jcards, raw_state)
+                        power = estimate_score_for_hand_type(jcards, raw_state) * HANDS_PER_BLIND
+                        tgt = ante_target(ante, "boss")
+                        record.update({
+                            "money": raw_state.get("money", 0),
+                            "ht": ht,
+                            "base_chips": round(float(hinfo.get("chips", bc)), 1),
+                            "base_mult": round(float(hinfo.get("mult", bm)), 1),
+                            "j_chips": round(float(jc), 1),
+                            "j_mult": round(float(jm), 1),
+                            "xmult": round(float(jx), 2),
+                            "power": round(float(power), 0),
+                            "target": round(float(tgt), 0),
+                            "margin": round(float(power) / max(float(tgt), 1.0), 3),
+                        })
+                    except Exception:
+                        pass  # diagnostics are best-effort; never block the log
                     with open(os.path.join("logs", "build_progression.jsonl"),
                               "a") as _bf:
-                        _bf.write(json.dumps({
-                            "ante": ante, "n_xmult": nx, "n_scaling": ns,
-                            "n_jokers": nj, "env": env.env_id,
-                            "step": self.global_step,
-                        }) + "\n")
+                        _bf.write(json.dumps(record) + "\n")
                     # Curriculum harvest: bank ante-4/5 partial-build states
                     # (with an xmult engine started) from FRESH runs as seeds.
                     if (self.config.curriculum_enabled and ante in (4, 5)
