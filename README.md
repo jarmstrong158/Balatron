@@ -3,9 +3,9 @@
 
 # Balatron
 
-A reinforcement learning agent that plays [Balatro](https://www.playbalatro.com/) autonomously, combining deep domain knowledge with PPO (Proximal Policy Optimization) to master the game's complex scoring mechanics, economy management, and joker synergy systems.
+An agent that plays [Balatro](https://www.playbalatro.com/) autonomously. It began as a PPO (Proximal Policy Optimization) reinforcement-learning policy sitting on a heuristic layer, and has since grown a **planner**: rather than reacting to the current state, it now chooses its build by *simulating candidate builds forward* against Balatro's exponentially-growing blind-score curve. The RL policy handles tempo and distills the planner's judgment over time; near-optimal heuristics still own the tactical math (which cards to play, joker ordering). The current frontier is a true **solver** — a trajectory-aware evaluator (does this build *out-scale* the curve?) plus lookahead search.
 
-**Goal:** Achieve consistent Ante 8 clears (Phase 1), then push toward **naneinf** — the score ceiling where 64-bit floats overflow and the game displays "naneinf" (~1.80e308).
+**Goal:** consistently beat White Stake (reliably clear Ante 8) the way a skilled human does (~85%). This is an **active research project**, and the README reflects an evolving architecture — see [DECISIONS.md](DECISIONS.md), `REVAMP.md`, and `SOLVER.md` for the running design log. The honest state: the agent is competent through the early antes and the work is currently focused on the real wall — *build strength at depth* (antes 5–8), where blind targets grow exponentially and only a complete, fast-scaling engine clears them.
 
 ---
 
@@ -15,6 +15,7 @@ A reinforcement learning agent that plays [Balatro](https://www.playbalatro.com/
 - [Architecture](#architecture)
   - [Hybrid Decision System](#hybrid-decision-system)
   - [Neural Network](#neural-network)
+  - [Planner (Build Search)](#planner-build-search)
   - [State Vector](#state-vector)
   - [Action Space](#action-space)
   - [Reward Shaping](#reward-shaping)
@@ -39,7 +40,7 @@ A reinforcement learning agent that plays [Balatro](https://www.playbalatro.com/
 
 Balatron connects to a live instance of Balatro through the [BalatroBot](https://github.com/coder/balatrobot) mod, which exposes the full game state and accepts action commands via a JSON-RPC 2.0 HTTP API on `127.0.0.1:12346`. No screen capture or computer vision is needed — the agent reads structured game data directly.
 
-The agent observes the game state (hand cards, jokers, economy, blind targets, deck composition, shop contents), encodes it into an 842-dimensional vector, and uses a PPO neural network to select actions. A sophisticated heuristic layer validates and enhances the network's decisions with Balatro-specific domain knowledge — optimal hand selection, joker ordering, consumable usage, pack evaluation, and economy management.
+The agent observes the game state (hand cards, jokers, economy, blind targets, deck composition, shop contents), encodes it into an 842-dimensional vector, and runs three decision systems in concert: a **PPO neural network** (with a relational attention encoder over the joker set) for tempo/judgment, a **planner** that owns the build decision by simulating builds forward against the blind curve, and a **heuristic layer** for the tactical math (optimal hand selection, joker ordering, consumable usage) and hard legality.
 
 ```
 Balatro Game
@@ -49,16 +50,17 @@ Balatro Game
 Game State Encoder (842-dim vector)
     |
     v
-PPO Neural Network (shared trunk + 3 policy heads)
-    |
-    v
-Action Mask (hard legality only)
-    |
-    v
-Heuristic Validator (hand eval, scoring math, economy guards)
-    |
-    v
-API Action Command --> Balatro Game
+PPO Net (shared trunk + relational joker-set encoder + 3 policy heads)
+    |                                    |
+    | tempo: buy/reroll/skip             | build decision delegated to ->
+    v                                    v
+Heuristic legality + tactics      PLANNER  (simulate candidate builds forward
+(hand eval, joker order,           vs the exponential blind curve; pick the
+ economy guards)                   build that goes deepest)
+    |                                    |
+    +------------------+-----------------+
+                       v
+       API Action Command --> Balatro Game
 ```
 
 ---
@@ -67,31 +69,43 @@ API Action Command --> Balatro Game
 
 ### Hybrid Decision System
 
-Balatron uses a **hybrid architecture** — but the split is **judgment vs. computation**, and the policy owns the judgment. As of the 06-13 audit (`policy_authority`), the network's chosen action actually **executes**: it decides play-vs-discard, which joker to buy, when to reroll/skip/sell/leave. The heuristic layer was demoted from *making* those calls (it used to override them, which made the net decorative and unable to learn) to **tactical computation + hard legality only**. That's what makes this a genuine RL agent — the policy's decisions have causal stake in outcomes.
+Balatron splits decisions three ways — **planning, judgment, and computation** — by what each does best.
+
+The arc that got here: the agent started as a pure-heuristic system, became an RL policy whose choices actually *execute* (the `policy_authority` audit demoted heuristics from *making* the consequential calls — which made the net decorative and unable to learn — to tactical computation + hard legality), and then grew a **planner**. The planner exists because of a hard-won lesson (see `DECISIONS.md` dec-034/035): a reactive RL policy is a strong *tactician* but a weak *strategist*, and Balatro is a fully-observable, deterministic-scoring game where the build decision rewards *search*, not reaction. So the build decision — which joker to buy/sell, when to reroll for a missing piece — moved to a planner that **simulates candidate builds forward** and picks the one that goes deepest; the policy distills toward it via PPO (the executed action is what's stored).
 
 | Layer | Responsibility | Examples |
 |-------|---------------|----------|
-| **Neural Network (policy)** | **All judgment calls** — and they execute | Play vs. discard, which joker to buy, when to reroll/skip/sell/leave shop |
-| **Heuristic — tactical math** | The *computation* behind the policy's decision (rules, not strategy) | Which exact cards score best for the chosen play, optimal joker order, draw probabilities |
+| **Planner** | **The build decision**, by lookahead | Which joker most advances the build (multi-ante survivability), sell+buy swaps when slots are full, reroll-to-assemble when the shop is barren |
+| **Neural Network (policy)** | **Tempo & judgment** — and it executes; distills the planner's build picks | Buy vs. reroll vs. skip, play vs. discard, blind select/skip; a relational attention encoder lets it reason over the joker set |
+| **Heuristic — tactical math** | The *computation* behind a decision (rules, near-optimal, not strategy) | Which exact cards score best, optimal joker order, draw probabilities, committed-hand leveling |
 | **Heuristic — hard legality** | Block only structurally invalid actions | Affordability, slot limits, never sell your only joker, force-buy Blueprint/Brainstorm |
-| **Scoring Engine** | Full Balatro math for hand evaluation | Exact scores with joker effects, retriggers, editions, enhancements, boss debuffs |
+| **Scoring Engine** | Full Balatro math for hand evaluation — *also the planner's forward model* | Exact scores with joker effects, retriggers, editions, enhancements, boss debuffs |
 | **Observation features** | Surface the computed math *to* the policy so its judgment is informed | Hand-eval block (gap-to-target, draw odds), shop context (per-joker marginal value, build coverage) |
 
 ### Neural Network
 
 ```
-Input (842) --> Shared Trunk (842 -> 768 -> 768 -> 512)
-                    |
-                    |--> Play Head   (512 -> 256 -> 45)  -- SELECTING_HAND state
-                    |--> Shop Head   (512 -> 256 -> 45)  -- SHOP state
-                    |--> Blind Head  (512 -> 128 -> 45)  -- BLIND_SELECT state
-                    |--> Value Head  (512 -> 256 -> 1)   -- all states
+Input (842) --> Shared Trunk (842 -> 768 -> 768 -> 512) --(+)--> Play/Shop/Blind Heads (-> 45)
+            \                                          /
+             \--> Relational Encoder --> attn (zero-init) --> [also added to a decoupled Value Trunk -> Value Head -> 1]
+                  (self-attention over the
+                   joint joker set: 5 owned + 3 shop)
 ```
 
 - **3 policy heads** specialized for different game phases — the shop head never sees hand-play decisions and vice versa
-- **Shared trunk** learns representations useful across all phases (joker synergies, economy state, deck composition)
+- **Relational attention encoder** (dec-031) runs self-attention over the joint joker set (5 owned + 3 shop) so the network can reason about *pairwise synergy and xmult stacking* — a flat MLP over fixed slots can't relate joker-to-joker. Added **additively through zero-initialized projections** so grafting it onto a trained policy is a no-op at load (no regression), then it learns from the first update.
+- **Decoupled value trunk** (dec-029) — the value head reads its own trunk, so the large value-loss gradient doesn't dominate the shared representation and freeze the (smaller) policy gradient.
 - **Layer normalization** + **ReLU activation** for training stability
 - **Action-conditioned target sampling** — after selecting an action type, target logits are masked so only valid targets can be chosen (e.g., `buy_pack` can only target pack slots, not joker slots)
+
+### Planner (Build Search)
+
+The planner (`environment/planner.py`) is what turns the agent from a *reactor* into something that *plans*. When the policy decides to act in the shop, the planner decides **which** build move to make by looking ahead — using the scoring engine as a side-effect-free forward model.
+
+- **Objective — "does this build out-scale the curve?"** Balatro's blind targets grow exponentially (≈ ante 5: 22k → ante 8: 100k boss). The planner scores a build by its **trajectory-aware survivability**: it projects each scaling engine *forward to every future ante*, scores the projected build, and finds the deepest ante it can still clear. A build whose engines keep pace with the curve projects deep; a flat additive build plateaus. (A static "current power" evaluator can't see this — it's the difference between *strong now* and *grows into a win*.)
+- **What it decides:** which shop joker most raises survivability (open slot); the best sell-one + buy-one **swap** when slots are full (the plateau zone, where a greedy reactor was inert); and **reroll-to-assemble** when the shop offers nothing that advances the build (gated to surplus above the interest floor so it can't drain the economy).
+- **The policy distills it.** The planner overrides the policy's raw pick, and PPO stores the *executed* action — so over training the policy learns to imitate the planner's build judgment.
+- **Where it's going (`SOLVER.md`).** The trajectory evaluator is phase 1 of a planned **solver**: phase 2 adds shallow lookahead search (depth-2 receding-horizon expectimax over sampled future shops); phase 3 folds economy (save→spike) and deliberate hand-leveling into the same forward objective. A deep research pass (dec-037) found the real binding constraint at depth is the *complete multiplicative product* — hand-level × flat-mult × xmult — not engine count alone, so completing the evaluator to model **leveling and economy** is the active work.
 
 ### State Vector
 
@@ -263,13 +277,15 @@ Each schema captures:
 ```
 balatron/
 |-- agent/
-|   |-- network.py          # Neural network (shared trunk + 3 heads + value)
+|   |-- network.py          # Neural network (shared trunk + relational encoder + 3 heads + value)
+|   |-- set_encoder.py      # Relational attention encoder over the joint joker set (dec-031)
 |   |-- ppo.py              # PPO trainer, rollout buffer, GAE
 |
 |-- environment/
 |   |-- game_state.py       # 842-dim state vector encoder
 |   |-- action_space.py     # Action masks, target mapping, joker evaluation
 |   |-- hand_eval.py        # Full scoring engine, hand classifier, strategic advisor
+|   |-- planner.py          # Build planner: trajectory-aware survivability eval + search (dec-034/036)
 |   |-- reward.py           # Reward shaping (log-scaled, multi-tier)
 |
 |-- data/
@@ -291,10 +307,15 @@ balatron/
 |-- scripts/
 |   |-- sim_bloodstone.py   # Simulation utilities
 |
-|-- tests/
+|-- tests/                  # ~95 tests: scoring, planner, encoder, reward, SIL, knowledge
 |   |-- test_scoring.py     # Scoring engine validation
+|   |-- test_planner.py     # Planner: survivability, build_value, swaps, reroll gate, trajectory
+|   |-- test_set_encoder.py # Relational encoder: regression-free graft, NaN-safety, checkpoint compat
+|   |-- test_revamp_knowledge.py # Joker-valuation knowledge fixes (scaling/magnitude/economy)
 |
 |-- DECISIONS.md            # Running log of design decisions + hard-won gotchas
+|-- REVAMP.md               # Reactor -> planner rebuild roadmap (Knowledge / Planning / Commitment)
+|-- SOLVER.md               # Solver roadmap (trajectory evaluator -> lookahead search -> full scope)
 |-- NOTES.md                # Architecture decisions, state vector layout, design rationale
 |-- LICENSE                  # MIT License
 |-- README.md                # This file
@@ -506,6 +527,10 @@ Pure RL would require millions of games to learn basic Balatro math from scratch
 - **Heuristics** handle what's computable — exact scoring, hand classification, joker ordering
 - **NN** handles what requires judgment — shop strategy, risk assessment, build direction
 - **Action masks** enforce hard legality only; heuristic guidance enters as a *separate annealing prior-KL teacher* (not baked into the policy softmax) so it can fade and let the policy surpass it
+
+### Why a Planner (not just a bigger / better-trained policy)?
+
+A reactive policy reaches ~ante 4 and stalls, and a long series of training-signal levers (exploration, curriculum, reward shaping, a relational encoder) all failed to push past it. The diagnosis: Balatro is **fully observable with deterministic scoring** — the single most favorable possible setting for *search* — and a reflex policy throws that advantage away. Build decisions reward *looking ahead* ("what does this buy do to my run three antes out?"), which a stateless policy can't represent and RL can't learn from when wins are <1% (almost no gradient). The planner uses the scoring engine as a forward model to actually simulate that lookahead, and the policy distills the result. This is the difference between a strong reflex player and one that *plans a build* — see `DECISIONS.md` (dec-034/035) for the full arc and the ceiling analysis that motivated it.
 
 ### Why Property Fingerprints over Joker IDs?
 
