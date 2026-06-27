@@ -46,6 +46,19 @@ BLIND_MULT = {"small": 1.0, "big": 1.5, "boss": 2.0}
 # A blind is cleared over several played hands, not one — so a build's
 # blind-clearing power is its per-hand estimate times the hands typically spent.
 HANDS_PER_BLIND = 3.0
+
+# EMPIRICAL CALIBRATION (dec-038). The raw estimate (score x HANDS_PER_BLIND) is
+# a best-case point estimate: it assumes every hand is the committed full-power
+# hand. Real play is worse — you don't always draw the committed hand, boss
+# debuffs cut scoring, and weak hands get discarded. Validated against 5,018
+# instrumented self-play games: real boss-blind advance crosses 50% at raw
+# margin 2.30x, NOT 1.0x — the estimate overshoots realized clearing by ~2.3x.
+# This factor (1/2.30) recalibrates power so margin>=1 means a real ~50/50 clear,
+# which stops the planner greenlighting additive builds it wrongly thinks survive
+# deep and raises the marginal value of multiplicative (xmult) scaling. Applied
+# ONLY in the decision path; the build_progression log stays RAW so this
+# calibration can be re-validated on fresh data.
+REALIZATION_FACTOR = 0.43
 MAX_PLAN_ANTE = 12
 
 
@@ -100,7 +113,7 @@ def build_survivability(jokers: list[dict], gamestate: dict) -> float:
     prev_target = ante_target(cur - 1, "boss") if cur > 1 else 0.0
     for a in range(cur, MAX_PLAN_ANTE + 1):
         pj = _project_jokers(jokers, a - cur)               # engines matured to ante a
-        power = score_hand_type(ht, pj, gamestate) * HANDS_PER_BLIND
+        power = score_hand_type(ht, pj, gamestate) * HANDS_PER_BLIND * REALIZATION_FACTOR
         tgt = ante_target(a, "boss")
         if power >= tgt:
             prev_target = tgt

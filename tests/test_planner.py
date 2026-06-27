@@ -12,6 +12,7 @@ import pytest
 from environment.planner import (
     ante_target, build_survivability, build_value, rank_shop_jokers,
     target_hand_type, score_hand_type, COMMITTABLE_HANDS, HANDS_PER_BLIND,
+    REALIZATION_FACTOR,
 )
 
 
@@ -67,6 +68,21 @@ def test_survivability_uses_hands_per_blind():
     s = build_survivability([{"key": "j_cavendish", "id": 1}], _gs())
     assert 0.0 <= s <= 12.0
     assert HANDS_PER_BLIND > 1.0
+
+
+def test_realization_factor_discounts_survivability(monkeypatch):
+    """dec-038 calibration: the realization factor (raw estimate overshoots real
+    clearing ~2.3x) must make builds report a SHALLOWER deepest ante than the
+    un-discounted estimate would — that's how the planner stops greenlighting
+    additive builds it wrongly thinks survive deep."""
+    import environment.planner as P
+    gs = _gs(ante=3)
+    jokers = [{"key": "j_cavendish", "id": 1}]
+    discounted = build_survivability(jokers, gs)
+    monkeypatch.setattr(P, "REALIZATION_FACTOR", 1.0)
+    raw = build_survivability(jokers, gs)
+    assert 0.0 < REALIZATION_FACTOR < 1.0           # it is a genuine discount
+    assert discounted < raw                          # discount -> shallower projected depth
 
 
 def test_target_hand_type_is_committable_and_achievability_weighted():

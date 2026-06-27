@@ -1156,6 +1156,9 @@ class Trainer:
                         hinfo = raw_state.get("hands", {}).get(ht, {})
                         bc, bm = BASE_HAND_SCORES.get(ht, (5, 1))
                         jc, jm, jx = _estimate_joker_scoring_for_type(ht, jcards, raw_state)
+                        # NOTE: logged power/margin are RAW (no REALIZATION_FACTOR) on
+                        # purpose — this is the unbiased yardstick the calibration is
+                        # validated against (dec-038). Do NOT apply the discount here.
                         power = estimate_score_for_hand_type(jcards, raw_state) * HANDS_PER_BLIND
                         tgt = ante_target(ante, "boss")
                         record.update({
