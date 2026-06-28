@@ -563,7 +563,12 @@ def start_trainer() -> bool:
     trainer_log = open(trainer_log_path, "a", encoding="utf-8")
     subprocess.Popen(
         [sys.executable, "-u", "-m", "training.train",
-         "--total-timesteps", "5000000",
+         # 50M, not 5M (dec-039): the model reached the old 5M budget and every
+         # restart then loaded an already-complete checkpoint, printed "TRAINING
+         # COMPLETE", and exited — the supervisor relaunched it every ~5 min into
+         # the same instant-exit, so it IDLED (not trained) for hours. Trainer
+         # resumes from the latest checkpoint, so this just lets it keep going.
+         "--total-timesteps", "50000000",
          "--device", "cpu",
          "--checkpoint-interval", "2",
          "--num-envs", str(NUM_ENVS),
