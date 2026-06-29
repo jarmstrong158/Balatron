@@ -2,7 +2,10 @@
 
 A running log of the **why** behind Balatron's design, and the hard-won lessons
 behind its fixes. New sessions (human or AI) should read this before changing
-core logic. The machine-queryable mirror lives in `.context/` (Context Keeper).
+core logic. The machine-queryable mirror lives in `.context/` (Context Keeper);
+**the two are kept in sync** — every recorded `dec-NNN` is mirrored here in the
+same commit (decisions ≤ dec-034 were also manually maintained; dec-035→047 were
+back-filled from Context Keeper on 06-29).
 
 ---
 
@@ -194,6 +197,96 @@ revamp, in forced dependency order (roadmap + checkboxes in `REVAMP.md`):
   boss prep, sticky archetype memory, full lookahead search (value-head leaf).
 Keep the near-optimal tactical heuristics (card selection, joker ordering) — the
 gap is *strategic*, not tactical.
+
+### The ceiling audit — 06-25 (`dec-035`, `SOLVER.md`)
+The dec-034 hybrid caps ~0.5–2%: the planner optimizes a **depth-1 static
+survivability proxy**, but winning needs builds whose engines **scale fast enough
+to keep pace with the exponential blind curve**. Each deep ante (5+) is a ~35%
+gate; 85% wins needs ~96% per gate → builds must be ~10–100× stronger by ante 5–6.
+Reframed the goal from "win occasionally" to "out-scale the curve" → a real
+search-based **solver** (`SOLVER.md`).
+
+### Solver phase 1: trajectory-aware evaluator — 06-25 (`dec-036`)
+`build_survivability` made trajectory-aware: walk current→ante 8, project each
+scaling engine forward (`_project_jokers`) and score the matured build vs the boss
+target — so a build is valued by whether it **out-scales** the curve, not by
+static current power.
+
+### Deep-research redirect: leveling + economy, not engine count — 06-26 (`dec-037`)
+Three audits converged: the binding constraint at depth is the **complete
+multiplicative product (hand-level × flat-mult × xmult), NOT xmult count** (advance
+rate is flat across 0–4 engines at the 5→6 wall). The evaluator was **blind to the
+two biggest levers**: hand-**leveling** (`build_survivability` froze planet level)
+and **economy** (no save→spike). Order set: instrument depth deaths → complete +
+**validate** the evaluator → then Phase-2 search. Shipped Phase-0 instrumentation
+(per-ante money/level/power/margin in `build_progression.jsonl`).
+
+### Evaluator calibration: realization factor — 06-26 (`dec-038`)
+5,018 instrumented games showed `build_survivability` is **~2.3× optimistic** (real
+boss-blind advance crosses 50% at predicted margin 2.3×, not 1.0×). Added
+`REALIZATION_FACTOR = 0.43` so margin ≥ 1 ≈ a real ~50/50 clear. (Later found
+stale after dec-040/042 shifted the estimator — flagged for a data-driven re-fit.)
+
+### Training budget 5M → 50M — 06-28 (`dec-039`)
+The trainer had silently hit its hardcoded 5M-step budget and was **idling** — each
+supervisor restart reloaded the done checkpoint, printed "TRAINING COMPLETE", and
+exited (~5-min loop, frozen checkpoint, fake high FPS). Raised `--total-timesteps`
+to 50M; the trainer resumes the existing model.
+
+### Deep-audit batch — 06-28 (`dec-040`)
+A 5-agent audit found the build under-makes multiplicative xmult (87–109% of the
+lethal power gap at depth) plus two compounding RL failures. Shipped: ante-scaled
+xmult projection cap (was a flat 6.0, below median realized xmult); per-hand-type
+scoring chips (killed the flat +40 that inflated Pair); **wins-only SIL** capture
+(the demo buffer was 96–99% *losing* runs → SIL was imitating losses);
+`REWARD_GAME_WIN` 15 → 150; a 500-ep WR metric (the 20-ep WR is noise at 0.5%).
+
+### Discard honors the committed hand — 06-28 (`dec-041`)
+`find_best_discard` greedily dug for whatever was closest (usually Pair), so the
+agent **leveled Flush but played Pair** — the largest cause of the 2.3× realization
+gap. Added a 1.4× bias toward the strategy advancing `target_hand_type`.
+
+### Second deep-audit batch — 06-28 (`dec-042`)
+Found a self-inflicted regression (win=150 spiked value loss 28→171, EV→0.11 on
+wins) and a new binding constraint (the agent is **too broke** to reroll for
+xmult). Shipped: **Huber value loss** (tames the win shock; normal value learning
+unchanged); `build_survivability` now **projects committed-hand leveling forward**
++ **commit hysteresis** (stops the Pair flip-flop so planets concentrate); reroll
+floor relaxed to $5 in antes ≤5; planet vouchers un-blacklisted; **skip-to-harvest**
+supply tags enabled; two action bugs fixed (consumable garbage-index, standard-pack
+spin); committed-hand + score/target appended to the observation (842→850,
+checkpoint-migration-safe).
+
+### Disk exhaustion + first measurement finding — 06-28 (`dec-043`)
+C: hit **0 bytes** (silently breaks checkpoint saves). Causes: 43.7 GB of
+never-pruned checkpoints + a 1.6 GB unbounded debug log. Fixes: auto-prune
+checkpoints to newest 15; disable the joker-order log; (dec-044) a supervisor disk
+guard. **Measurement finding** (ante-controlled): realized xmult **VALUE** predicts
+deep-ante advance; engine **COUNT** does not — the lever is engine *maturity*.
+
+### Live scoring +40 fix + ops — 06-28 (`dec-044`)
+dec-040 fixed the flat +40 only in the planner; the **live** paths
+(`estimate_score_for_hand_type`, `pick_best_planet`) still used it, distorting
+every shop/planet choice. Made `SCORING_CARD_CHIPS` (in `hand_eval.py`) the single
+source of truth. Also fixed a latent ConfigurableReward crash + added the
+supervisor disk guard.
+
+### Foundations-first pivot + eval harness — 06-28/29 (`dec-045`/`dec-046`)
+After 42 decisions with a flat win rate, the comprehensive audit's verdict: the
+project couldn't **measure** improvement (no held-out eval; win rate invisible at
+0.5%) and the evaluator was never validated. Decision (with the user): build the
+measurement loop first; keep Balatron a **learning** AI via an eventual
+AlphaZero-style *learned* evaluator (not a hand-coded solver). Built `eval_report.py`
+(advance curve + Wilson CIs + paired A/B), a 300-seed fixed bank, and a held-out
+**eval run-loop** (`evaluate.py` / `Trainer.run_eval`, gated behind `eval_mode` so
+training is untouched, reusing the real play path). Validated live on 3 seeds.
+
+### Strategy bets: xmult value, depth gradient — 06-29 (`dec-047`)
+First properly-measurable changes: reward now targets xmult **value** (dropped the
+count-based stack premium per dec-043), not count; **depth-graded loss** so a
+shallow death is much worse than a near-win (breaking the "safe ante-5 farm" local
+optimum). Training-time changes — validated by train-then-eval vs a baseline on the
+seed bank, not an instant A/B.
 
 ---
 
