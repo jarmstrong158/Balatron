@@ -1943,7 +1943,15 @@ class Trainer:
                         print(f"[CURRICULUM] load failed ({e}) -> fresh start",
                               flush=True)
                 env.from_curriculum = False
-                seed = ''.join(random.choices(string.ascii_uppercase, k=8))
+                # dec-045: eval seam. If this env has a forced-seed queue (set by
+                # the eval harness) use the next fixed seed so runs are reproducible
+                # and two checkpoints can be A/B'd on identical seeds. Production
+                # leaves forced_seeds unset -> random, unchanged behavior.
+                forced = getattr(env, "forced_seeds", None)
+                if forced:
+                    seed = forced.pop(0)
+                else:
+                    seed = ''.join(random.choices(string.ascii_uppercase, k=8))
                 try:
                     await env.game.execute_action(
                         "start", {"deck": "RED", "stake": "WHITE", "seed": seed}
