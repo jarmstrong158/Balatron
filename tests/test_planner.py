@@ -108,6 +108,35 @@ def test_realization_factor_discounts_survivability(monkeypatch):
     assert discounted < raw                          # discount -> shallower projected depth
 
 
+def _api_card(rank: str, suit: str) -> dict:
+    short = {"Hearts": "H", "Diamonds": "D", "Clubs": "C", "Spades": "S"}
+    return {"value": {"rank": rank, "suit": short[suit]}}
+
+
+def test_discard_digs_for_the_committed_hand():
+    """dec-041: the discard must honor the committed (leveled) archetype. Same
+    8 cards (4-heart flush draw that also contains a pair) + same deck: when the
+    build is committed to FLUSH the discard digs for the flush; when committed to
+    PAIR it does not chase the flush — so leveling no longer goes to waste."""
+    from environment.hand_eval import find_best_discard
+    hand = [_api_card("2", "Hearts"), _api_card("5", "Hearts"),
+            _api_card("8", "Hearts"), _api_card("J", "Hearts"),
+            _api_card("8", "Spades")]                         # 4 hearts + pair of 8s
+    deck = [_api_card(r, "Hearts") for r in
+            ("3", "4", "6", "7", "9", "T", "Q", "K", "A", "2")]  # hearts to complete a flush
+
+    def gs(level_hand):
+        hands = {h: {"chips": 10, "mult": 2} for h in COMMITTABLE_HANDS}
+        hands[level_hand] = {"chips": 300, "mult": 30}        # commit via leveling
+        return {"ante_num": 3, "hands": hands,
+                "cards": {"cards": deck}, "round": {}}
+
+    flush_pick = find_best_discard(hand, deck, [], gs("Flush"))
+    pair_pick = find_best_discard(hand, deck, [], gs("Pair"))
+    assert flush_pick["strategy"].startswith("flush")        # committed to Flush -> dig flush
+    assert not pair_pick["strategy"].startswith("flush")     # committed to Pair -> don't
+
+
 def test_target_hand_type_is_committable_and_achievability_weighted():
     gs = _gs()
     t = target_hand_type([], gs)

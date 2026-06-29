@@ -1966,8 +1966,38 @@ def find_best_discard(hand_cards: list[dict], deck_cards: list[dict],
             "expected_score": base_ev,
         })
 
-    # Pick the best strategy
-    best = max(candidates, key=lambda c: c["expected_score"])
+    # dec-041: bias digging toward the COMMITTED hand so the planet-leveling
+    # poured into that archetype actually pays off. Without this the discard
+    # greedily digs for whatever's closest in the current 8 cards (usually Pair),
+    # so the agent levels e.g. Flush but keeps playing Pair — wasting the leveling
+    # (tactical audit: the single largest cause of the 2.3x realization gap).
+    # Only RE-WEIGHTS selection among existing candidates; the EV math is
+    # untouched, and a dramatically stronger off-build draw still wins.
+    try:
+        from environment.planner import target_hand_type as _target_ht
+        committed = _target_ht(jokers, gamestate)
+    except Exception:
+        committed = None
+    _PAIR_FAMILY = {"Pair", "Two Pair", "Three of a Kind", "Four of a Kind",
+                    "Full House", "Five of a Kind"}
+
+    def _advances_commit(strategy: str) -> bool:
+        if not committed:
+            return False
+        if strategy.startswith("flush"):
+            return committed in ("Flush", "Flush House", "Flush Five",
+                                 "Straight Flush")
+        if strategy == "straight_draw":
+            return committed in ("Straight", "Straight Flush")
+        if strategy == "keep_pairs":
+            return committed in _PAIR_FAMILY
+        return False
+
+    COMMIT_BIAS = 1.4
+
+    # Pick the best strategy (committed-hand strategies get a tie-breaking boost)
+    best = max(candidates, key=lambda c: c["expected_score"]
+               * (COMMIT_BIAS if _advances_commit(c["strategy"]) else 1.0))
     all_indices = set(range(n))
     best["discard_indices"] = all_indices - best["keep_indices"]
 
