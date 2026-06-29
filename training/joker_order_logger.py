@@ -16,9 +16,13 @@ class JokerOrderLogger:
     and rearrange failures for post-training review.
     """
 
-    def __init__(self, log_dir: str = "logs"):
+    def __init__(self, log_dir: str = "logs", enabled: bool = True):
         os.makedirs(log_dir, exist_ok=True)
         self._log_path = os.path.join(log_dir, "joker_order_log.jsonl")
+        # dec-043: gate the append. In production this file grew UNBOUNDED to
+        # 1.6 GB (write-only, never analyzed) and helped fill the disk to 0 bytes,
+        # which silently breaks checkpoint saves. Off in env_session; tests keep it on.
+        self._enabled = enabled
         self._current_round: dict = {}
         self._plays: list[dict] = []
         self._rearrange_failures: list[str] = []
@@ -76,6 +80,10 @@ class JokerOrderLogger:
     def _flush(self):
         """Write the current round entry to the log file."""
         if not self._current_round:
+            self._active = False
+            return
+        if not self._enabled:
+            self._current_round = {}
             self._active = False
             return
 

@@ -2080,6 +2080,27 @@ class Trainer:
             json.dump(meta, f, indent=2, default=str)
 
         print(f"  Checkpoint saved: {path}")
+        self._prune_checkpoints(keep=15)
+
+    def _prune_checkpoints(self, keep: int = 15):
+        """Keep only the newest `keep` numbered checkpoints (+ any final/best),
+        deleting older .pt and their _meta.json. dec-043: checkpoints saved every
+        2 updates were NEVER pruned and grew to 43.7 GB / 1183 files, filling the
+        disk to 0 bytes — which silently breaks future saves. Runs after each save."""
+        try:
+            import glob
+            cps = glob.glob(os.path.join(self.config.checkpoint_dir,
+                                         f"balatron_phase{self.config.phase}_update*.pt"))
+            cps.sort(key=os.path.getmtime, reverse=True)
+            for old in cps[keep:]:
+                for p in (old, old.replace(".pt", "_meta.json")):
+                    try:
+                        if os.path.exists(p):
+                            os.remove(p)
+                    except OSError:
+                        pass
+        except Exception:
+            pass  # never let pruning break training
 
     def _print_summary(self):
         """Print final training summary."""

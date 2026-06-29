@@ -30,7 +30,7 @@ class EnvSession:
         self.port = port
         self.game = GameStateManager(port=port)
         self.reward_calc = RewardCalculator(phase=phase)
-        self.joker_logger = JokerOrderLogger()
+        self.joker_logger = JokerOrderLogger(enabled=False)  # dec-043: off (unbounded disk)
         self.recorder = recorder if recorder is not None else NullRecorder()
         self.balatro_process: Optional[subprocess.Popen] = None
 
