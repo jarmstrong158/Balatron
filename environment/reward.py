@@ -84,7 +84,14 @@ REWARD_XMULT_ACQUIRE_SCALING = 0.5    # Acquiring a scaling xMult joker (rarer, 
 # reward priced the 2nd/3rd xmult identically to the 1st. Multiply the
 # acquisition reward by (1 + this * #xmult_already_held), so 2nd xmult ~2x, 3rd
 # ~3x — pulling hardest at the 1->2 transition that distinguishes deep runs.
-REWARD_XMULT_STACK_BONUS = 1.0
+REWARD_XMULT_STACK_BONUS = 0.0   # dec-047 (#4): DROPPED. The eval-validated
+                                 # finding (dec-043) is that realized xmult VALUE
+                                 # predicts deep-ante advance while engine COUNT
+                                 # does NOT (flat once ante-controlled; 3+ engines
+                                 # is diminishing). This premium rewarded the 2nd/
+                                 # 3rd engine (COUNT) — the wrong target. Value is
+                                 # still rewarded via REWARD_XMULT_GROWTH_PREMIUM;
+                                 # the first engine via REWARD_XMULT_FIRST_ENGINE.
 # xMult-engine GROWTH premium (dec-032). The audits found the plateau is bound
 # by the reward not differentiating xmult from additive builds: _check_scaling_
 # growth paid an xmult engine compounding X1.5->X3.0 the SAME per-log-unit as an
@@ -311,10 +318,15 @@ class RewardCalculator:
             if self.phase == 2:
                 reward += self._check_naneinf(new_state)
         else:
-            # Loss (includes dying on the ante-8 boss) — base penalty + partial
-            # credit for progress.
-            reward += REWARD_GAME_LOSS
-            reward += ante * REWARD_PER_ANTE_SURVIVED
+            # Loss (includes dying on the ante-8 boss). dec-047 (#5): DEPTH-GRADED.
+            # The reward audit found mid-game shaping (~+45/run) out-earned the flat
+            # -5 loss, making a safe ante-5 death (net ~+40) a stable local optimum
+            # vs a risky deep push. Grade the penalty by how FAR from ante 8 the run
+            # died (a shallow death is much worse; a near-win ~neutral), and make
+            # the progress credit CONVEX so each deeper ante is worth more.
+            shortfall = max(0, 8 - ante)
+            reward += REWARD_GAME_LOSS * (shortfall / 8.0)      # ~ -4.4 @a2 ... ~0 @a8
+            reward += (ante ** 1.5) * REWARD_PER_ANTE_SURVIVED  # convex depth credit
 
         return reward
 
