@@ -32,7 +32,9 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float, float]:
     return (p, max(0.0, center - half), min(1.0, center + half))
 
 
-def load_games(path: str) -> list[dict]:
+def load_games(path: str, seed_set: set = None) -> list[dict]:
+    """Load game records; if seed_set is given, keep only games whose seed is in
+    it (isolates an eval run's games from training rows in a shared history)."""
     games = []
     with open(path) as f:
         for line in f:
@@ -40,9 +42,12 @@ def load_games(path: str) -> list[dict]:
             if not line:
                 continue
             try:
-                games.append(json.loads(line))
+                g = json.loads(line)
             except json.JSONDecodeError:
-                pass
+                continue
+            if seed_set is not None and g.get("seed") not in seed_set:
+                continue
+            games.append(g)
     return games
 
 
@@ -67,8 +72,8 @@ def win_rate(games: list[dict]) -> tuple[float, float, float, int, int]:
     return (p, lo, hi, w, n)
 
 
-def print_single(path: str):
-    games = load_games(path)
+def print_single(path: str, seed_set: set = None):
+    games = load_games(path, seed_set)
     print(f"=== {path}: {len(games)} games ===")
     print(f"{'reach>=A':>9} {'n':>6} {'advance':>8} {'95% CI':>16}")
     for r in advance_curve(games):
@@ -80,13 +85,13 @@ def print_single(path: str):
     print(f"WIN: {100*p:.2f}% [{100*lo:.2f},{100*hi:.2f}]  ({w}/{n})")
 
 
-def compare(path_a: str, path_b: str):
+def compare(path_a: str, path_b: str, seed_set: set = None):
     """A/B. Paired McNemar on per-seed advance when both files share seeds;
     otherwise unpaired curve comparison with CIs."""
-    ga, gb = load_games(path_a), load_games(path_b)
-    print_single(path_a)
+    ga, gb = load_games(path_a, seed_set), load_games(path_b, seed_set)
+    print_single(path_a, seed_set)
     print()
-    print_single(path_b)
+    print_single(path_b, seed_set)
     sa = {g["seed"] for g in ga if "seed" in g}
     sb = {g["seed"] for g in gb if "seed" in g}
     shared = sa & sb
@@ -117,10 +122,19 @@ def compare(path_a: str, path_b: str):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 2:
-        print_single(sys.argv[1])
-    elif len(sys.argv) == 3:
-        compare(sys.argv[1], sys.argv[2])
+    import argparse
+    ap = argparse.ArgumentParser(description="Balatron eval report")
+    ap.add_argument("files", nargs="+", help="1 file = single curve; 2 = A/B")
+    ap.add_argument("--seeds", help="seed-bank file: analyze ONLY games whose "
+                    "seed is in it (isolates an eval run from training rows)")
+    args = ap.parse_args()
+    seed_set = None
+    if args.seeds:
+        with open(args.seeds) as f:
+            seed_set = {s.strip() for s in f if s.strip()}
+    if len(args.files) == 1:
+        print_single(args.files[0], seed_set)
+    elif len(args.files) == 2:
+        compare(args.files[0], args.files[1], seed_set)
     else:
-        print(__doc__)
-        sys.exit(1)
+        ap.error("pass 1 or 2 files")

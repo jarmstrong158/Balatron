@@ -28,6 +28,7 @@ An agent that plays [Balatro](https://www.playbalatro.com/) autonomously. It beg
 - [Usage](#usage)
   - [Training](#training)
   - [Resuming from Checkpoint](#resuming-from-checkpoint)
+  - [Evaluation (held-out, fixed-seed)](#evaluation-held-out-fixed-seed)
 - [Training Phases](#training-phases)
 - [Key Design Decisions](#key-design-decisions)
 - [Decisions & Gotchas Log](DECISIONS.md)
@@ -479,6 +480,32 @@ Only **winning** runs are recorded and kept (via ffmpeg screen capture); every l
 ```powershell
 python -u -m training.train --total-timesteps 1500000 --device cuda --checkpoint checkpoints/balatron_phase1_final.pt --no-record
 ```
+
+### Evaluation (held-out, fixed-seed)
+
+Win rate is statistically invisible at this stage (~0.5%): a 500-game sample
+expects ~2.5 wins, so its confidence interval includes zero. Progress is instead
+measured by the **conditional-advance curve** (of runs reaching ante A, what
+fraction advance to A+1) with Wilson 95% confidence intervals — that signal has
+tight CIs at the shallow antes, so a real change shows up in far fewer games. The
+project judges changes by this, not by raw win rate.
+
+A held-out evaluator plays a **fixed seed bank** with a *frozen* checkpoint and
+no learning (`eval_mode`, gated so training is untouched), tagging each run's
+outcome by seed so two checkpoints can be A/B'd on **identical seeds** (paired,
+removing seed-luck variance):
+
+```powershell
+# Pause training first (free the game-server ports), then:
+python evaluate.py --checkpoint checkpoints/balatron_phase1_updateNNNNNN.pt --seeds eval_seeds.txt --num-envs 3
+# Analyze (filter to just the eval seeds for a clean read):
+python eval_report.py logs/game_history.jsonl --seeds eval_seeds.txt
+# A/B two checkpoints run on the same bank:
+python eval_report.py eval_A.jsonl eval_B.jsonl
+```
+
+`eval_seeds.txt` is a versioned bank of 300 fixed seeds. A full 300-seed eval is
+a multi-hour run.
 
 ---
 
