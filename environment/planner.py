@@ -28,6 +28,20 @@ ENGINE_INCREMENTS_PER_ANTE = 2.0
 COMMITTABLE_HANDS = ["Pair", "Two Pair", "Three of a Kind", "Straight",
                      "Flush", "Full House", "Four of a Kind"]
 
+# Approx chips contributed by the SCORING CARDS themselves (their rank values),
+# by hand type. Real Balatro scores only the cards that FORM the hand: a Pair
+# scores 2 cards, a Flush/Straight/Full House scores 5. The old hardcoded flat
+# +40 (≈5 cards) inflated 2-4 card hands ~1.5-1.9x — biasing the committed-
+# archetype pick toward Pair (the weakest hand, and the modal commit + most-
+# played hand in the data). Per-hand values ≈ num_scoring_cards * ~8.5 avg chips
+# (dec-040, scoring-sim fidelity audit).
+SCORING_CARD_CHIPS = {
+    "High Card": 9.0, "Pair": 18.0, "Two Pair": 34.0, "Three of a Kind": 26.0,
+    "Straight": 42.0, "Flush": 42.0, "Full House": 42.0, "Four of a Kind": 34.0,
+    "Straight Flush": 42.0, "Five of a Kind": 45.0,
+    "Flush House": 50.0, "Flush Five": 50.0,
+}
+
 # How reliably each hand can actually be MADE each round (rough prior). Commit
 # weights raw power by achievability so the build doesn't "commit" to a rare hand
 # (Four of a Kind) it never plays — it must be both strong AND makeable.
@@ -144,7 +158,8 @@ def score_hand_type(ht: str, jokers: list[dict], gamestate: dict) -> float:
     ht_chips = info.get("chips", bc)
     ht_mult = info.get("mult", bm)
     jc, jm, jx = _estimate_joker_scoring_for_type(ht, jokers, gamestate)
-    return (ht_chips + 40.0 + jc) * (ht_mult + jm) * jx
+    scoring_chips = SCORING_CARD_CHIPS.get(ht, 40.0)   # per-hand, not flat +40 (dec-040)
+    return (ht_chips + scoring_chips + jc) * (ht_mult + jm) * jx
 
 
 def target_hand_type(jokers: list[dict], gamestate: dict) -> str:

@@ -24,7 +24,13 @@ from typing import Optional
 # ============================================================
 
 # Terminal rewards
-REWARD_GAME_WIN = 15.0           # Cleared Ante 8 (Phase 1 goal) — largest single signal
+REWARD_GAME_WIN = 150.0          # Cleared Ante 8 (Phase 1 goal) — largest single signal.
+                                 # dec-040: raised 15->150. The RL audit found the
+                                 # old +15 was DWARFED by ~28-60 of accumulated
+                                 # shaping per run, so the value head was calibrated
+                                 # to shaping, not winning, and PPO had almost no
+                                 # gradient pointing at win-vs-deep-loss. 150 makes
+                                 # the terminal win dominate the trajectory return.
 REWARD_GAME_LOSS = -5.0          # Game over base penalty (harsh — dying is bad)
 REWARD_NANEINF = 50.0            # Achieved naneinf (Phase 2 goal)
 REWARD_PER_ANTE_SURVIVED = 0.3   # Bonus per ante reached before dying (less forgiveness)

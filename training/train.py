@@ -207,8 +207,13 @@ class Trainer:
         if self.demo_buffer is None:
             return
         traj = env.episode_traj
-        keep = bool(traj) and (
-            env.win_recorded or env.max_ante_seen >= self.config.demo_min_ante)
+        # dec-040: WINS-ONLY capture. The old condition also banked any run that
+        # merely REACHED demo_min_ante (6) even if it LOST. With ~0 wins the buffer
+        # filled ~96-99% with losing ante-6/7/8 trajectories, and _sil_loss has no
+        # positive-advantage filter — so SIL was imitating LOSSES (a degenerate
+        # attractor pinning the plateau; RL audit's #1 finding). Imitate only true
+        # successes; once real wins appear, SIL becomes a correct flywheel.
+        keep = bool(traj) and env.win_recorded
         if keep:
             n = self.demo_buffer.add_trajectory(
                 [t[0] for t in traj], [t[1] for t in traj],
@@ -2034,6 +2039,8 @@ class Trainer:
             f"R {ep_stats['mean_reward']:>7.2f} | "
             f"Ante {ep_stats['mean_ante']:>4.1f} | "
             f"WR {ep_stats['win_rate']:>5.1%} | "
+            f"WR500 {ep_stats.get('win_rate_long', 0.0):>5.2%}"
+            f"(W{ep_stats.get('lifetime_wins', 0)}) | "
             f"PL {metrics['policy_loss']:>7.4f} | "
             f"VL {metrics['value_loss']:>7.4f} | "
             f"Ent {metrics['entropy']:>6.3f} | "

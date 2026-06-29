@@ -3547,6 +3547,12 @@ def pick_best_planet(pack_cards: list[dict], jokers: list[dict],
 # Pillar 2's planner will later estimate this properly via simulation.
 SCALE_PROJECT_INCREMENTS_PER_ANTE = 2.0
 SCALE_PROJECT_XMULT_CAP = 6.0
+# dec-040: the flat 6.0 xmult cap sat BELOW the median realized xmult from ante 8
+# on (8.7) and below p90 from ante 4 — it strangled exactly the compounding
+# engines that win (deep-death forensics: the xmult factor is 87-109% of the
+# lethal power gap at depth). Let the cap grow with remaining runway so an engine
+# bought EARLY can project to the real compounding depth it would reach.
+SCALE_PROJECT_XMULT_CAP_PER_ANTE = 3.0
 SCALE_PROJECT_FLAT_CAP = 50.0
 
 
@@ -3644,7 +3650,8 @@ def _project_shop_scaling_value(schema: dict, gamestate: dict):
     horizon = antes_left * SCALE_PROJECT_INCREMENTS_PER_ANTE
     projected = start + inc * horizon
     if schema.get("scaling_type") == "xmult":
-        return max(1.0, min(projected, SCALE_PROJECT_XMULT_CAP))
+        cap = SCALE_PROJECT_XMULT_CAP + SCALE_PROJECT_XMULT_CAP_PER_ANTE * antes_left
+        return max(1.0, min(projected, cap))
     return min(projected, SCALE_PROJECT_FLAT_CAP)
 
 

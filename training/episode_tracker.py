@@ -245,6 +245,13 @@ class EpisodeTracker:
         recent_a = self.max_antes[-window:]
         recent_wins = sum(1 for a in recent_a if a > 8)
 
+        # dec-040: a 20-ep WR window is pure noise at a ~0.5% win rate (expect ~0
+        # wins/window, with occasional 5-10% spikes) — it cannot show learning.
+        # Add a long (500-ep) window + lifetime cumulative as the real trend.
+        long_a = self.max_antes[-500:]
+        long_wins = sum(1 for a in long_a if a > 8)
+        lifetime_wins = sum(1 for a in self.max_antes if a > 8)
+
         return {
             "episodes": self.completed_episodes,
             "mean_reward": np.mean(recent_r),
@@ -252,4 +259,7 @@ class EpisodeTracker:
             "mean_ante": np.mean(recent_a),
             "max_ante": max(recent_a),
             "win_rate": recent_wins / len(recent_a),
+            "win_rate_long": long_wins / len(long_a),
+            "win_rate_long_n": len(long_a),
+            "lifetime_wins": lifetime_wins,
         }

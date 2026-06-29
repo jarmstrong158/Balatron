@@ -70,6 +70,29 @@ def test_survivability_uses_hands_per_blind():
     assert HANDS_PER_BLIND > 1.0
 
 
+def test_scoring_chips_are_per_hand_type_not_flat_40():
+    """dec-040: per-hand-type scoring chips (not a flat +40). With identical base
+    levels and no jokers, a 5-card hand (Flush) must out-score a 2-card hand
+    (Pair) — the +40 flat constant made them tie, biasing commits toward Pair."""
+    gs = {"ante_num": 2,
+          "hands": {"Pair": {"chips": 10, "mult": 2},
+                    "Flush": {"chips": 10, "mult": 2}},
+          "cards": {"cards": []}, "round": {}}
+    assert score_hand_type("Flush", [], gs) > score_hand_type("Pair", [], gs)
+
+
+def test_xmult_projection_cap_scales_with_runway():
+    """dec-040: the xmult projection cap grows with remaining antes, so an engine
+    bought EARLY can project to a deeper compounding value than the old flat 6.0."""
+    from environment.hand_eval import _project_shop_scaling_value
+    sch = {"scaling_increment": 5.0, "scaling_start_value": 1.0,
+           "scaling_type": "xmult"}
+    early = _project_shop_scaling_value(sch, {"ante_num": 1})
+    late = _project_shop_scaling_value(sch, {"ante_num": 7})
+    assert early > late          # more runway -> higher cap
+    assert early > 6.0           # breaks past the old flat cap
+
+
 def test_realization_factor_discounts_survivability(monkeypatch):
     """dec-038 calibration: the realization factor (raw estimate overshoots real
     clearing ~2.3x) must make builds report a SHALLOWER deepest ante than the
