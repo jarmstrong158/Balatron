@@ -49,6 +49,19 @@ BASE_HAND_SCORES: dict[str, tuple[int, int]] = {
     "Flush Five":       (160, 16),
 }
 
+# Approx chips from the SCORING CARDS themselves (their rank values), by hand
+# type. Real Balatro scores only the cards forming the hand: Pair=2, Flush/
+# Straight/Full House=5, etc. ~num_scoring_cards * ~8.5 avg. dec-043: this is the
+# single source of truth (planner imports it); replaces the flat +40 that
+# inflated 2-4 card hands ~1.5-1.9x in every live buy/planet decision (dec-040
+# only fixed the planner's copy).
+SCORING_CARD_CHIPS: dict[str, float] = {
+    "High Card": 9.0, "Pair": 18.0, "Two Pair": 34.0, "Three of a Kind": 26.0,
+    "Straight": 42.0, "Flush": 42.0, "Full House": 42.0, "Four of a Kind": 34.0,
+    "Straight Flush": 42.0, "Five of a Kind": 45.0,
+    "Flush House": 50.0, "Flush Five": 50.0,
+}
+
 # Chip value each card contributes when scored
 CARD_CHIP_VALUES = {
     "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7,
@@ -3407,7 +3420,7 @@ def estimate_score_for_hand_type(jokers: list[dict], gamestate: dict) -> float:
         ht_chips = ht_info.get("chips", base_chips_default)
         ht_mult = ht_info.get("mult", base_mult_default)
 
-        scoring_card_chips = 40.0 + retrig_card_chip_bonus
+        scoring_card_chips = SCORING_CARD_CHIPS.get(ht_name, 40.0) + retrig_card_chip_bonus
 
         j_chips, j_mult, j_xmult = _estimate_joker_scoring_for_type(
             ht_name, jokers, gamestate, dominant_suit=dominant_suit,
@@ -3523,8 +3536,8 @@ def pick_best_planet(pack_cards: list[dict], jokers: list[dict],
         # Per-level increment
         l_chips, l_mult = HAND_LEVEL_INCREMENTS.get(ht_name, (10, 1))
 
-        # Estimate card chips contributed by scoring cards (rough average)
-        scoring_card_chips = 40.0
+        # Per-hand scoring-card chips (dec-043: was flat 40.0; see SCORING_CARD_CHIPS)
+        scoring_card_chips = SCORING_CARD_CHIPS.get(ht_name, 40.0)
 
         # Current score with jokers
         j_chips, j_mult, j_xmult = _estimate_joker_scoring_for_type(

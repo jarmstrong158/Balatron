@@ -44,6 +44,7 @@ import datetime
 import glob
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -96,6 +97,10 @@ CHECKPOINT_GLOB = os.path.join(REPO, "checkpoints", "balatron_phase1_update*.pt"
 # to 7-14 GB; normal < 1 GB), so the guardian CLOSES THE WHOLE CLIENT — killing
 # only the helper lets Steam respawn it and re-leak (see close logic below).
 MEM_CRITICAL_PCT = 72.0        # system RAM at/above this = pressure. 90->72
+DISK_MIN_GB = 10.0             # dec-043: below this free space, prune+alert. A
+                              # full disk silently breaks checkpoint saves; the
+                              # supervisor watched RAM but not disk (that's how
+                              # C: hit 0 bytes and training persisted nothing).
                                # (06-15): the games crawl to ~30 steps/min at
                                # ~75-83% RAM (Steam leak), but a 90% trigger
                                # never fired — reclaiming the hog at 75% dropped
@@ -642,6 +647,17 @@ def main():
             if time.time() - last_prune > 3600:
                 prune_logs()
                 last_prune = time.time()
+
+            # Disk guardian (dec-043): a full disk silently breaks checkpoint
+            # saves. Checkpoints now self-prune, but alert + prune logs if low.
+            try:
+                free_gb = shutil.disk_usage(REPO).free / (1024 ** 3)
+                if free_gb < DISK_MIN_GB:
+                    log(f"DISK LOW: {free_gb:.1f} GB free (< {DISK_MIN_GB}) — pruning logs")
+                    prune_logs()
+                    last_prune = time.time()
+            except Exception:
+                pass
 
             # Reap orphan launchers every cycle.
             reaped = reap_orphan_launchers()

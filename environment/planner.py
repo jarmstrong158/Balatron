@@ -16,7 +16,7 @@ nodes, RL value head as the leaf) is a later refinement within this pillar.
 
 from environment.hand_eval import (
     estimate_score_for_hand_type, _estimate_joker_scoring_for_type, BASE_HAND_SCORES,
-    _api_key_to_name, HAND_LEVEL_INCREMENTS,
+    _api_key_to_name, HAND_LEVEL_INCREMENTS, SCORING_CARD_CHIPS,
 )
 
 # Solver phase 1 (dec-036): how many effective scaling increments an engine gains
@@ -41,19 +41,8 @@ COMMIT_HYSTERESIS = 1.25
 COMMITTABLE_HANDS = ["Pair", "Two Pair", "Three of a Kind", "Straight",
                      "Flush", "Full House", "Four of a Kind"]
 
-# Approx chips contributed by the SCORING CARDS themselves (their rank values),
-# by hand type. Real Balatro scores only the cards that FORM the hand: a Pair
-# scores 2 cards, a Flush/Straight/Full House scores 5. The old hardcoded flat
-# +40 (≈5 cards) inflated 2-4 card hands ~1.5-1.9x — biasing the committed-
-# archetype pick toward Pair (the weakest hand, and the modal commit + most-
-# played hand in the data). Per-hand values ≈ num_scoring_cards * ~8.5 avg chips
-# (dec-040, scoring-sim fidelity audit).
-SCORING_CARD_CHIPS = {
-    "High Card": 9.0, "Pair": 18.0, "Two Pair": 34.0, "Three of a Kind": 26.0,
-    "Straight": 42.0, "Flush": 42.0, "Full House": 42.0, "Four of a Kind": 34.0,
-    "Straight Flush": 42.0, "Five of a Kind": 45.0,
-    "Flush House": 50.0, "Flush Five": 50.0,
-}
+# SCORING_CARD_CHIPS now lives in hand_eval.py (single source of truth, dec-043)
+# and is imported above — per-hand scoring-card chips replacing the old flat +40.
 
 # How reliably each hand can actually be MADE each round (rough prior). Commit
 # weights raw power by achievability so the build doesn't "commit" to a rare hand

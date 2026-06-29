@@ -899,7 +899,12 @@ class ConfigurableRewardCalculator(RewardCalculator):
 
         return reward
 
-    def _check_scaling_growth(self, scaling_values: dict[int, float]) -> float:
+    def _check_scaling_growth(self, scaling_values: dict[int, float],
+                              new_state: dict = None) -> float:
+        # dec-043: signature must match the base / the step() call site
+        # (scaling_values, new_state) or any sweep using this subclass TypeErrors
+        # on the first scaling update. new_state unused here (sweep keeps the
+        # simpler pre-dec-026 growth model).
         reward = 0.0
         w = self._weights
 
