@@ -171,6 +171,11 @@ class Trainer:
         self.num_updates = 0
         self.start_time = 0.0
 
+        # dec-045: EVAL mode (held-out fixed-seed evaluation). Off for training;
+        # set True only by evaluate.py. Everything eval-specific is gated behind
+        # this flag so the training path is byte-identical when it is False.
+        self.eval_mode = False
+
         # Load checkpoint if provided
         if checkpoint_path:
             self.ppo.load_checkpoint(checkpoint_path)
@@ -205,6 +210,10 @@ class Trainer:
         the policy. Every env feeds it (demo capture is just data, so unlike
         the single-window video recorder, all parallel games' wins count)."""
         if self.demo_buffer is None:
+            return
+        if self.eval_mode:                      # dec-045: don't pollute SIL with eval runs
+            env.episode_traj = []
+            env.max_ante_seen = 1
             return
         traj = env.episode_traj
         # dec-040: WINS-ONLY capture. The old condition also banked any run that
@@ -505,6 +514,35 @@ class Trainer:
 
         self._print_summary()
 
+    async def run_eval(self):
+        """Held-out evaluation (dec-045). Play each env's fixed forced_seeds bank
+        with the loaded (frozen) checkpoint and NO learning, writing per-run
+        outcomes to game_history.jsonl tagged by seed (analyze with eval_report.py).
+
+        Reuses the EXACT training play path (_collect_rollout) so eval behavior
+        matches real play; only the PPO update is skipped and the buffer discarded.
+        The game server(s) on the session ports must be up and NOT in use by a
+        training trainer (pause training first)."""
+        self.eval_mode = True
+        total = sum(len(getattr(e, "forced_seeds", []) or []) for e in self.sessions)
+        print(f"[EVAL] {total} seeds across {len(self.sessions)} env(s) "
+              f"on ports {[e.port for e in self.sessions]}", flush=True)
+        for env in self.sessions:
+            await env.game.connect()
+        try:
+            while not all(getattr(e, "eval_finished", False) for e in self.sessions):
+                active = [e for e in self.sessions
+                          if not getattr(e, "eval_finished", False)]
+                await asyncio.gather(*[self._collect_rollout(e) for e in active])
+                for buf in self.ppo.buffers:      # discard — eval never learns
+                    buf.reset()
+        finally:
+            for env in self.sessions:
+                await env.game.disconnect()
+        print(f"[EVAL] done — {total} seeds played; outcomes in "
+              f"logs/game_history.jsonl (seed-tagged). Run: "
+              f"python eval_report.py logs/game_history.jsonl", flush=True)
+
     async def _collect_rollout(self, env) -> tuple[float, bool]:
         """Collect transitions for ONE env until the COMBINED total
         across all envs reaches rollout_steps.
@@ -517,6 +555,11 @@ class Trainer:
         last_done = False
 
         while self.ppo.total_collected() < cfg.rollout_steps:
+
+            # dec-045: in eval, stop this env once its fixed-seed bank is played
+            # out (set in the run-start seam when forced_seeds empties).
+            if self.eval_mode and getattr(env, "eval_finished", False):
+                break
 
             # Get current game state
             raw_state = await self._get_actionable_state(env)
@@ -626,6 +669,7 @@ class Trainer:
                         "ante": ante, "won": won,
                         "ts": _dt.now().isoformat(timespec="seconds"),
                         "episode": getattr(self, 'episode_count', 0),
+                        "seed": getattr(env, "current_seed", None),  # dec-045: eval attribution
                         # Tag curriculum-loaded runs (started from a banked
                         # ante-4/5 seed) so the dashboard can show FRESH-only
                         # outcomes — loaded runs start deep and inflate the
@@ -1950,8 +1994,13 @@ class Trainer:
                 forced = getattr(env, "forced_seeds", None)
                 if forced:
                     seed = forced.pop(0)
+                elif self.eval_mode:
+                    # Eval bank exhausted — stop starting runs for this env.
+                    env.eval_finished = True
+                    return None
                 else:
                     seed = ''.join(random.choices(string.ascii_uppercase, k=8))
+                env.current_seed = seed   # tagged into game_history for eval attribution
                 try:
                     await env.game.execute_action(
                         "start", {"deck": "RED", "stake": "WHITE", "seed": seed}
