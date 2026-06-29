@@ -151,10 +151,10 @@ def test_velocity_section_populated_in_vector():
     for _ in range(4):
         _play_hand(mgr._scaling_tracker)
     vec = mgr._build_state_vector(raw)
-    # velocity is no longer the LAST block — the xmult-stack block (4 dims) was
-    # appended after it, so slice velocity by its actual position.
-    from environment.game_state import XMULT_STACK_SIZE
-    v_end = STATE_VECTOR_SIZE - XMULT_STACK_SIZE
+    # velocity is no longer the LAST block — the xmult-stack (4) and plan-features
+    # (8) blocks were appended after it, so slice velocity by its actual position.
+    from environment.game_state import XMULT_STACK_SIZE, PLAN_FEATURES_SIZE
+    v_end = STATE_VECTOR_SIZE - XMULT_STACK_SIZE - PLAN_FEATURES_SIZE
     velo = vec[v_end - JOKER_VELOCITY_SIZE:v_end]
     assert velo[0] > 0.0                      # owned, growing joker
     assert np.all(velo[1:] == 0.0)            # empty slots zero-padded
@@ -165,14 +165,15 @@ def test_velocity_section_populated_in_vector():
 def test_xmult_stack_block(tmp_path=None):
     """The appended xmult-stack block exposes owned-xmult COUNT (always) and
     shop-xmult/stack-ready (SHOP only) — the dec-026 perception fix."""
-    from environment.game_state import XMULT_STACK_SIZE
+    from environment.game_state import XMULT_STACK_SIZE, PLAN_FEATURES_SIZE
     mgr = GameStateManager()
     # own 1 xmult (Cavendish); shop has an affordable xmult (The Duo)
     raw = {"state": "SHOP", "money": 10, "ante_num": 3,
            "jokers": {"cards": [{"id": 1, "key": "j_cavendish"}], "limit": 5},
            "shop": {"cards": [{"id": 9, "key": "j_duo", "cost": {"buy": 5}}]},
            "round": {"reroll_cost": 5}, "cards": {"cards": []}}
-    blk = mgr._build_state_vector(raw)[-XMULT_STACK_SIZE:]
+    # xmult-stack is no longer the LAST block — plan-features (8) follow it.
+    blk = mgr._build_state_vector(raw)[-(XMULT_STACK_SIZE + PLAN_FEATURES_SIZE):-PLAN_FEATURES_SIZE]
     assert blk[0] == pytest.approx(1 / 3)   # owned count 1/3
     assert blk[1] == 1.0                     # shop xmult available
     assert blk[2] > 0.0                      # compounding delta
@@ -180,9 +181,22 @@ def test_xmult_stack_block(tmp_path=None):
 
     # Outside SHOP: owned-count still on, shop features zero
     raw["state"] = "SELECTING_HAND"
-    blk2 = mgr._build_state_vector(raw)[-XMULT_STACK_SIZE:]
+    blk2 = mgr._build_state_vector(raw)[-(XMULT_STACK_SIZE + PLAN_FEATURES_SIZE):-PLAN_FEATURES_SIZE]
     assert blk2[0] == pytest.approx(1 / 3)   # count always on
     assert blk2[1] == 0.0 and blk2[3] == 0.0  # shop features gated off
+
+
+def test_plan_features_block():
+    """dec-042: the appended plan block exposes the committed hand (one-hot over
+    the 7 committable hands) so the policy can see the build it's meant to execute."""
+    from environment.game_state import PLAN_FEATURES_SIZE
+    mgr = GameStateManager()
+    raw = {"state": "SHOP", "money": 5, "ante_num": 2,
+           "jokers": {"cards": [], "limit": 5},
+           "hands": {"Flush": {"chips": 300, "mult": 30}},  # leveled -> committed
+           "cards": {"cards": []}, "round": {}}
+    blk = mgr._build_state_vector(raw)[-PLAN_FEATURES_SIZE:]
+    assert blk[:7].sum() == pytest.approx(1.0)   # exactly one committed-hand bit set
 
 
 # ─────────────────────────── Checkpoint migration ───────────────────────────

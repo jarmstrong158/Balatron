@@ -71,6 +71,12 @@ JOKER_VELOCITY_SIZE = JOKER_SLOTS  # 5: one velocity dim per owned joker slot
 # best-compounding-delta, stack-ready. Appended LAST (after velocity) so the
 # checkpoint zero-pad migration keeps all trained weights aligned.
 XMULT_STACK_SIZE = 4
+# Build-PLAN visibility (dec-042). The policy was blind to (a) which hand type the
+# planner committed to — so it couldn't see the plan it's meant to execute — and
+# (b) score-vs-target outside SELECTING_HAND. 8 dims: committed-hand one-hot over
+# the 7 COMMITTABLE_HANDS + an always-on score/blind-target ratio. Appended LAST
+# so checkpoint zero-pad migration keeps all previously-trained weights aligned.
+PLAN_FEATURES_SIZE = 8
 
 STATE_VECTOR_SIZE = (
     GAME_META_SIZE
@@ -86,7 +92,8 @@ STATE_VECTOR_SIZE = (
     + HAND_EVAL_FEATURES  # 40 hand evaluation features
     + SHOP_CONTEXT_SIZE   # 16 shop-decision context features
     + JOKER_VELOCITY_SIZE  # 5 per-joker recent growth velocity
-    + XMULT_STACK_SIZE     # 4 xmult-engine stacking signal (appended last)
+    + XMULT_STACK_SIZE     # 4 xmult-engine stacking signal
+    + PLAN_FEATURES_SIZE   # 8 build-plan visibility (appended last)
 )
 
 # Rank/suit mappings for dense encoding
@@ -1082,8 +1089,11 @@ class GameStateManager:
         # Section 11: Per-Joker Growth Velocity (5)
         offset = self._encode_joker_velocity(vec, offset, raw)
 
-        # Section 12: xmult-engine stacking signal (4) — appended last
+        # Section 12: xmult-engine stacking signal (4)
         offset = self._encode_xmult_stack(vec, offset, raw)
+
+        # Section 13: build-plan visibility (8) — appended last
+        offset = self._encode_plan_features(vec, offset, raw)
 
         assert offset == STATE_VECTOR_SIZE, f"Vector size mismatch: {offset} != {STATE_VECTOR_SIZE}"
         return vec
@@ -1615,6 +1625,46 @@ class GameStateManager:
                 vec[offset + 3] = 1.0 if (owned_xmult >= 1 and affordable) else 0.0
         except Exception:
             pass  # never crash the encoder
+        return end
+
+    def _encode_plan_features(self, vec: np.ndarray, offset: int, raw: dict) -> int:
+        """Make the BUILD PLAN visible to the policy (dec-042). The net never saw
+        which hand type the planner committed to (so it couldn't see the plan it's
+        meant to execute), nor score-vs-target outside SELECTING_HAND. Both are the
+        top state-blindness findings of the second audit. Cheap by design: only
+        target_hand_type (not build_survivability) is computed per step.
+
+        [0-6] committed target-hand one-hot over COMMITTABLE_HANDS
+        [7]   current score / current-blind target (always on), min(ratio,3)/3
+        """
+        end = offset + PLAN_FEATURES_SIZE
+        try:
+            from environment.planner import target_hand_type, COMMITTABLE_HANDS
+            jokers = raw.get("jokers", {}).get("cards", [])
+            gs = {
+                "hands": raw.get("hands", {}),
+                "jokers": raw.get("jokers", {}),
+                "ante_num": raw.get("ante_num", raw.get("ante", 1)),
+                "cards": raw.get("cards", {}),
+                "round": raw.get("round", {}),
+            }
+            ht = target_hand_type(jokers, gs)
+            if ht in COMMITTABLE_HANDS:
+                vec[offset + COMMITTABLE_HANDS.index(ht)] = 1.0
+            # current score / current-blind target — meaningful during a blind,
+            # 0 in the shop (harmless), and no longer zeroed in BLIND_SELECT.
+            rnd = raw.get("round", {}) or raw.get("current_round", {})
+            score = float(rnd.get("chips", 0) or 0)
+            target = 0.0
+            blinds = raw.get("blinds", {})
+            for b in (blinds.values() if isinstance(blinds, dict) else []):
+                if isinstance(b, dict) and b.get("status") == "CURRENT":
+                    target = float(b.get("score", 0) or 0)
+                    break
+            if target > 0:
+                vec[offset + 7] = min(score / target, 3.0) / 3.0
+        except Exception:
+            pass  # best-effort; never break the state build
         return end
 
     @staticmethod
