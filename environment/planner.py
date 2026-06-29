@@ -16,13 +16,26 @@ nodes, RL value head as the leaf) is a later refinement within this pillar.
 
 from environment.hand_eval import (
     estimate_score_for_hand_type, _estimate_joker_scoring_for_type, BASE_HAND_SCORES,
-    _api_key_to_name,
+    _api_key_to_name, HAND_LEVEL_INCREMENTS,
 )
 
 # Solver phase 1 (dec-036): how many effective scaling increments an engine gains
 # per ante, used to PROJECT an engine's value forward when evaluating whether a
 # build out-scales the exponential blind curve. Mirrors the shop-projection rate.
 ENGINE_INCREMENTS_PER_ANTE = 2.0
+
+# dec-042: committed-hand planet LEVELS assumed gained per ante. build_survivability
+# used to FREEZE the hand level for every future ante, so a "commit + level it"
+# plan (e.g. Photograph + Hanging Chad carried by a few Flush levels) projected as
+# if it plateaued and was under-valued vs flat additive. Projecting leveling lets
+# the planner SEE leveling as a real path to depth. Conservative (~<1/ante).
+LEVELS_PER_ANTE = 0.8
+
+# dec-042: stickiness for the committed archetype. The build flip-flopped across
+# ~3 hand types/run, scattering planets to net only ~1 level. Once a hand is the
+# most-invested (most planet levels sunk in), require a clearly better alternative
+# to switch away — so leveling concentrates on one archetype.
+COMMIT_HYSTERESIS = 1.25
 
 # Hand types a build can commit to and concentrate leveling on (Pillar 3).
 COMMITTABLE_HANDS = ["Pair", "Two Pair", "Three of a Kind", "Straight",
@@ -110,6 +123,24 @@ def _project_jokers(jokers: list[dict], antes_ahead: float) -> list[dict]:
     return out
 
 
+def _level_committed_hand(gamestate: dict, ht: str, levels: float) -> dict:
+    """Return a shallow gamestate copy with the committed hand `ht` leveled
+    `levels` planet-levels forward (dec-042). Used to PROJECT leveling in
+    build_survivability so a commit-and-level plan isn't valued as if frozen."""
+    if levels <= 0:
+        return gamestate
+    inc_c, inc_m = HAND_LEVEL_INCREMENTS.get(ht, (10, 1))
+    bc, bm = BASE_HAND_SCORES.get(ht, (5, 1))
+    hands = dict(gamestate.get("hands", {}))
+    info = dict(hands.get(ht, {}))
+    info["chips"] = info.get("chips", bc) + inc_c * levels
+    info["mult"] = info.get("mult", bm) + inc_m * levels
+    hands[ht] = info
+    gs = dict(gamestate)
+    gs["hands"] = hands
+    return gs
+
+
 def build_survivability(jokers: list[dict], gamestate: dict) -> float:
     """TRAJECTORY-AWARE fractional deepest ante this build can clear (solver
     phase 1, dec-036). At each future ante it PROJECTS the build's engines forward
@@ -127,7 +158,8 @@ def build_survivability(jokers: list[dict], gamestate: dict) -> float:
     prev_target = ante_target(cur - 1, "boss") if cur > 1 else 0.0
     for a in range(cur, MAX_PLAN_ANTE + 1):
         pj = _project_jokers(jokers, a - cur)               # engines matured to ante a
-        power = score_hand_type(ht, pj, gamestate) * HANDS_PER_BLIND * REALIZATION_FACTOR
+        gs_a = _level_committed_hand(gamestate, ht, LEVELS_PER_ANTE * (a - cur))
+        power = score_hand_type(ht, pj, gs_a) * HANDS_PER_BLIND * REALIZATION_FACTOR
         tgt = ante_target(a, "boss")
         if power >= tgt:
             prev_target = tgt
@@ -167,9 +199,22 @@ def target_hand_type(jokers: list[dict], gamestate: dict) -> str:
     Build-based (not the lagging most-played heuristic), so leveling and buys can
     concentrate on ONE archetype instead of diluting across hand types — the
     single biggest White-Stake scaling mistake the strategy audit flagged."""
+    # dec-042: commit hysteresis. Find the hand the build has already invested the
+    # most planet-levels in (current chips above its base = levels sunk); give it a
+    # stickiness bonus so the commitment doesn't thrash ante-to-ante and planets
+    # concentrate on one archetype.
+    hands = gamestate.get("hands", {})
+    def _invested(h: str) -> float:
+        bc, _ = BASE_HAND_SCORES.get(h, (5, 1))
+        return hands.get(h, {}).get("chips", bc) - bc
+    committed = max(COMMITTABLE_HANDS, key=_invested)
+    if _invested(committed) <= 0:
+        committed = None                                   # nothing leveled yet -> free choice
     best, best_ht = -1.0, "Pair"
     for ht in COMMITTABLE_HANDS:
         s = score_hand_type(ht, jokers, gamestate) * HAND_ACHIEVABILITY.get(ht, 0.5)
+        if ht == committed:
+            s *= COMMIT_HYSTERESIS
         if s > best:
             best, best_ht = s, ht
     return best_ht

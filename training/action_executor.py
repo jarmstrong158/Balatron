@@ -189,6 +189,18 @@ class ActionExecutor:
         vouchers = raw_state.get("used_vouchers", [])
         v = set(vouchers) if isinstance(vouchers, list) else set()
         floor = 125 if "v_money_tree" in v else 50 if "v_seed_money" in v else 25
+        # dec-042: in the early death-zone antes the agent is chronically BELOW the
+        # $25 interest floor (median $4-17 at antes 1-5), which made this gate
+        # unsatisfiable in 65-79% of those shops — exactly when it must reroll to
+        # FIND an xmult engine (the proven death cause). Relax the floor early so
+        # seeking the build-defining engine isn't blocked by interest optimization;
+        # the per-shop reroll cap below still prevents draining the economy.
+        try:
+            ante = int(raw_state.get("ante_num", raw_state.get("ante", 1)) or 1)
+        except (TypeError, ValueError):
+            ante = 1
+        if ante <= 5:
+            floor = min(floor, 5)
         if money - reroll_cost < floor:        # only spend surplus above interest
             return False
         if getattr(env, "shop_rerolls", 0) >= 3:   # cap planner rerolls per shop
@@ -847,6 +859,14 @@ class ActionExecutor:
         # Use consumable (target 12-13 -> consumable index 0-1)
         if action_type == 8:
             c_idx = target_idx - 12 if target_idx >= 12 else target_idx
+            # dec-042: bounds-guard like the sell path (line ~794). When no
+            # consumable target is legal the conditioned head can sample a garbage
+            # index (uniform over a fully-masked target vector), and this path had
+            # NO check — firing use{consumable: 0-11} at the API. That wasted ~427
+            # actions (320 index-out-of-range + spin loops). No-op instead.
+            consumables = raw_state.get("consumables", {}).get("cards", [])
+            if c_idx < 0 or c_idx >= len(consumables):
+                return "gamestate", None
             game_state = raw_state.get("state", "")
             if game_state == "SELECTING_HAND":
                 hand_cards = raw_state.get("hand", {}).get("cards", [])
@@ -862,20 +882,22 @@ class ActionExecutor:
         if action_type == 9:
             return "select", None
 
-        # Skip blind — ONLY for Investment Tag + strong scoring
+        # Skip blind — harvest high-value free-supply tags (dec-042). Honors the
+        # policy's skip choice for non-boss blinds carrying a worthwhile tag
+        # (planets/jokers/leveling/money); keyword-matched, never on the boss.
         if action_type == 10:
             blinds = raw_state.get("blinds", {})
             for b in (blinds.values() if isinstance(blinds, dict) else []):
                 if isinstance(b, dict) and b.get("status") in ("SELECT", "CURRENT"):
-                    tag_name = b.get("tag_name", "")
-                    if tag_name == "Investment Tag":
-                        scoring_power = estimate_score_for_hand_type(
-                            jokers_raw, raw_state) * 4
-                        blind_target = b.get("score", 0)
-                        if blind_target > 0 and scoring_power > blind_target * 2.0:
-                            return "skip", None
+                    if b.get("type") == "BOSS":
+                        break
+                    tag_name = b.get("tag_name", "") or ""
+                    if any(k in tag_name for k in (
+                            "Investment", "Meteor", "Celestial", "Buffoon",
+                            "Orbital", "Charm", "Ethereal", "Economy", "Coupon")):
+                        return "skip", None
                     break
-            # Conditions not met — select instead
+            # No worthwhile tag — select instead
             return "select", None
 
         # Select pack card (target 14-18 -> pack card index 0-4)
@@ -1071,9 +1093,9 @@ class ActionExecutor:
         SKIP_VOUCHERS = {
             "v_tarot_merchant",   # Tarot cards appear more in shop
             "v_tarot_tycoon",     # Even more tarots
-            "v_planet_merchant",  # Planet cards appear more in shop
-            "v_planet_tycoon",    # Even more planets
-            "v_crystal_ball",     # +1 consumable slot (marginal)
+            # dec-042: planet vouchers UN-blacklisted. Leveling (planets) is a
+            # binding constraint (committed hand stuck ~level 2 through ante 8),
+            # so vouchers that raise planet shop-rate are valuable, not "low value".
             "v_omen_globe",       # Spectral cards in Arcana packs
         }
 

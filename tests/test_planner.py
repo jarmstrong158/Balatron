@@ -289,12 +289,12 @@ def test_trajectory_credits_scaling_in_a_deep_build():
 
 
 def test_planner_reroll_gate():
-    """Reroll-to-assemble only fires on genuine surplus above the interest floor,
+    """Reroll-to-assemble fires on surplus above the interest floor (LATE antes),
     with buy-money left, under the per-shop cap."""
     from training.action_executor import ActionExecutor
     import types
     ax = ActionExecutor(policy_authority=True)
-    raw = {"round": {"reroll_cost": 5}, "used_vouchers": []}
+    raw = {"round": {"reroll_cost": 5}, "used_vouchers": [], "ante_num": 6}  # late: $25 floor
     env = types.SimpleNamespace(shop_rerolls=0)
     # plenty of surplus above $25 floor -> ok
     assert ax._planner_reroll_ok(env, raw, money=40) is True
@@ -307,13 +307,28 @@ def test_planner_reroll_gate():
     assert ax._planner_reroll_ok(env, raw, money=60) is False
 
 
+def test_planner_reroll_relaxed_in_early_antes():
+    """dec-042: the early death-zone antes relax the interest floor to ~$5 so the
+    agent can reroll to FIND an xmult engine while broke."""
+    from training.action_executor import ActionExecutor
+    import types
+    ax = ActionExecutor(policy_authority=True)
+    env = types.SimpleNamespace(shop_rerolls=0)
+    early = {"round": {"reroll_cost": 5}, "used_vouchers": [], "ante_num": 4}
+    # $28-$5=$23 fails the $25 floor LATE, but early the floor is $5 -> ok
+    assert ax._planner_reroll_ok(env, early, money=28) is True
+    # still must keep enough to buy after rerolling
+    assert ax._planner_reroll_ok(env, early, money=6) is False
+
+
 def test_planner_reroll_respects_seed_money_floor():
     from training.action_executor import ActionExecutor
     import types
     ax = ActionExecutor(policy_authority=True)
     env = types.SimpleNamespace(shop_rerolls=0)
-    raw = {"round": {"reroll_cost": 5}, "used_vouchers": ["v_seed_money"]}  # floor $50
-    assert ax._planner_reroll_ok(env, raw, money=45) is False   # below the raised floor
+    # late ante so the seed-money $50 floor applies (early antes relax it)
+    raw = {"round": {"reroll_cost": 5}, "used_vouchers": ["v_seed_money"], "ante_num": 6}
+    assert ax._planner_reroll_ok(env, raw, money=45) is False   # $45-$5=$40 < $50
     assert ax._planner_reroll_ok(env, raw, money=70) is True
 
 

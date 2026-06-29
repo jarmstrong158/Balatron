@@ -45,6 +45,11 @@ class PPOConfig:
     entropy_coef: float = 0.01       # Entropy bonus weight
     value_coef: float = 0.5          # Value loss weight
     max_grad_norm: float = 0.5       # Gradient clipping
+    # dec-042: Huber delta for the value loss. MSE within +/- delta (normal value
+    # learning unchanged) but LINEAR beyond it, so a rare large terminal reward
+    # (REWARD_GAME_WIN=150) can't blow up value loss and starve the policy via
+    # grad-clipping (observed when wins began: VL 28->171, EV 0.74->0.11).
+    value_huber_delta: float = 25.0
 
     # Self-imitation learning (SIL Phase 2): replay saved winning/high-ante
     # trajectories through an imitation loss so the policy reinforces its own
@@ -639,8 +644,14 @@ class PPOTrainer:
         pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - cfg.clip_epsilon, 1.0 + cfg.clip_epsilon)
         policy_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-        # Value loss — clipped
-        value_loss_unclipped = (new_values - returns) ** 2
+        # Value loss — clipped, Huber (dec-042). Huber is MSE within +/-delta and
+        # LINEAR beyond, so a rare +150 win can't explode the value loss and have
+        # max_grad_norm throttle the policy gradient on exactly the win rollouts.
+        def _huber(err):
+            a = err.abs()
+            quad = torch.clamp(a, max=cfg.value_huber_delta)
+            return 0.5 * quad * quad + cfg.value_huber_delta * (a - quad)
+        value_loss_unclipped = _huber(new_values - returns)
         if cfg.clip_value > 0:
             old_values = batch.get("old_values")
             if old_values is not None:
@@ -648,7 +659,7 @@ class PPOTrainer:
                     new_values - old_values,
                     -cfg.clip_value, cfg.clip_value
                 )
-                value_loss_clipped = (values_clipped - returns) ** 2
+                value_loss_clipped = _huber(values_clipped - returns)
                 value_loss = torch.max(value_loss_unclipped, value_loss_clipped).mean()
             else:
                 value_loss = value_loss_unclipped.mean()

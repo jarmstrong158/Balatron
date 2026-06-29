@@ -864,8 +864,10 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                     mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * 0.5) * ip
                     any_good_pack = True
                 else:
-                    # No Hologram — standard packs are low priority but not blocked
-                    mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = math.exp(-HAND_BIAS_STRENGTH * 0.3) * ip
+                    # dec-042: no Hologram — MASK OFF. The executor hard-blocks
+                    # standard packs (action_executor.py ~736), so offering them at
+                    # low weight just produced no-op shop spins (~530 in the logs).
+                    mask[target_offset + TARGET_SHOP_PACK_OFFSET + i] = 0.0
                 continue
 
             # If scoring jokers are available in shop WITH open slots, penalize packs
@@ -1101,27 +1103,22 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 break
 
         if current_blind and not is_boss:
-            # Check if the skip tag is worth it
-            tag_name = current_blind.get("tag_name", "")
-            has_investment_tag = tag_name == "Investment Tag"
-
-            if has_investment_tag:
-                # Investment Tag gives free money — skip if we can handle it
-                joker_cards = raw_state.get("jokers", {}).get("cards", [])
-                scoring_power = estimate_score_for_hand_type(joker_cards, raw_state) * 4
-                blind_target = current_blind.get("score", 0)
-
-                if blind_target > 0 and scoring_power > blind_target * 2.0:
-                    # Can handle skipping — Investment Tag is worth it
-                    mask[ACTION_SKIP_BLIND] = math.exp(HAND_BIAS_STRENGTH * 0.4)
-                    mask[ACTION_SELECT_BLIND] = math.exp(-HAND_BIAS_STRENGTH * 0.2)
-                else:
-                    # Too tight to skip even for Investment Tag
-                    mask[ACTION_SELECT_BLIND] = math.exp(HAND_BIAS_STRENGTH * 0.3)
-                    if mask[ACTION_SKIP_BLIND] > 0:
-                        mask[ACTION_SKIP_BLIND] = math.exp(-HAND_BIAS_STRENGTH * 0.2)
+            # dec-042: expose SKIP for non-boss blinds carrying a high-value
+            # free-supply tag (Meteor/Celestial=planets for leveling, Buffoon=
+            # jokers/xmult, Orbital=direct hand leveling, Charm/Ethereal, and the
+            # Investment/Economy money tags). The agent took 0 skips / 632 runs,
+            # leaving this supply on the table while broke. Both options stay open
+            # (neutral weights) so the policy + reward decide; matched by keyword
+            # so the exact tag_name format need not be pinned.
+            tag_name = current_blind.get("tag_name", "") or ""
+            skip_worthy = any(k in tag_name for k in (
+                "Investment", "Meteor", "Celestial", "Buffoon", "Orbital",
+                "Charm", "Ethereal", "Economy", "Coupon"))
+            if skip_worthy:
+                mask[ACTION_SKIP_BLIND] = math.exp(HAND_BIAS_STRENGTH * 0.3)
+                mask[ACTION_SELECT_BLIND] = math.exp(HAND_BIAS_STRENGTH * 0.3)
             else:
-                # No Investment tag — never skip
+                # No worthwhile tag — select (skip stays masked off)
                 mask[ACTION_SELECT_BLIND] = math.exp(HAND_BIAS_STRENGTH * 0.3)
                 mask[ACTION_SKIP_BLIND] = 0.0
         elif is_boss:
@@ -1307,21 +1304,18 @@ def _is_action_feasible(action_type: int, raw_state: dict) -> bool:
         return True  # Always valid during BLIND_SELECT
 
     elif action_type == ACTION_SKIP_BLIND:
-        # Only skip for Investment Tag + strong enough scoring
+        # dec-042: skip a non-boss blind to harvest a high-value free-supply tag
+        # (keyword-matched; see the blind-select mask branch for rationale).
         blinds = raw_state.get("blinds", {})
         if isinstance(blinds, dict):
             for b in blinds.values():
                 if isinstance(b, dict) and b.get("status") == "CURRENT":
                     if b.get("type") == "BOSS":
                         return False
-                    tag_name = b.get("tag_name", "")
-                    if tag_name != "Investment Tag":
-                        return False
-                    # Check scoring power
-                    joker_cards = raw_state.get("jokers", {}).get("cards", [])
-                    scoring_power = estimate_score_for_hand_type(joker_cards, raw_state) * 4
-                    blind_target = b.get("score", 0)
-                    return blind_target > 0 and scoring_power > blind_target * 2.0
+                    tag_name = b.get("tag_name", "") or ""
+                    return any(k in tag_name for k in (
+                        "Investment", "Meteor", "Celestial", "Buffoon", "Orbital",
+                        "Charm", "Ethereal", "Economy", "Coupon"))
         return False
 
     elif action_type == ACTION_SELECT_PACK_CARD:
