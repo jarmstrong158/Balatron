@@ -377,6 +377,21 @@ whole blind. `needle_should_dig` digs with discards to maximize that single hand
 immediately, via the same `action_executor` PLAY override. Verify via The Needle's
 kill rate in `blind_results`.
 
+### Value-target normalization (PopArt-lite) — 06-30 (`dec-054`, default OFF)
+The audit's CRITICAL RL blocker: the value head can't represent the +150 win, so EV
+craters to ~0.1 on win rollouts and PPO learns nothing from exactly the trajectories
+worth learning. Key realization: the dec-042 Huber tamed the loss *magnitude* but
+**caps the value gradient**, so the head never *learns* the win value — and lowering
+the win reward is a band-aid (Huber caps the gradient regardless of win size). The
+real fix: the value head learns in a **normalized return space** (the win becomes a
+representable few-σ target), denormalized for GAE. A running return mean/std (EMA);
+`store_transition` denormalizes the head output; the value loss + clipping compare
+in normalized space. `config.value_norm` gates **only** the stats update, so OFF
+keeps stats at (0,1) → every (de)norm is an identity → byte-identical to before
+(109 tests unchanged + 2 new). Enabling has a value-head re-scaling transient (no
+PopArt output-layer rescale yet), so **enable + A/B via the eval harness, not blind
+on the live trainer.** Highest-leverage RL change; payoff unproven until A/B'd.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
