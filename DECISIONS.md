@@ -324,6 +324,20 @@ realization is implicated. (Beaten-blind realized is floored at target — the t
 misses the final winning hand; failed-blind realized is accurate via the GAME_OVER
 fallback.)
 
+### The realization gap is the policy under-digging — 06-29 (`dec-050`)
+Investigated dec-049's gap immediately (no waiting). From 1,349 logged blinds:
+dying runs **exhaust all their hands** and die at **~73% of target** — on builds the
+planner judged *adequate* (proj ≥ target in 77–100% of deaths) — while winners
+one/two-shot. So the build's power is concentrated in the committed hand and
+failures never assemble it. Reading the play call site **corrected the hypothesis**:
+`plan_optimal_action`'s "hopeless/unviable chase" give-up branches are the *legacy*
+path, **bypassed under `policy_authority=True`** — the network owns play-vs-discard
+and the heuristic only picks the best available cards. So the gap is the **policy
+playing weak hands instead of discarding to dig** toward its committed hand. Added
+`discards_left` to `blind_results.jsonl` as the decisive test: a run that uses all
+hands but leaves discards **unused** under-dug. (Loops back to dec-048's L3 — the
+policy can't *learn* to dig until the value head can represent wins.)
+
 ---
 
 ## Gotchas & Hard-Won Lessons
