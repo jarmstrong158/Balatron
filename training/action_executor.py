@@ -18,7 +18,7 @@ import numpy as np
 from environment.hand_eval import (
     find_best_discard, find_best_hands, estimate_score_for_hand_type,
     plan_optimal_action, compute_optimal_joker_order,
-    plan_consumable_use, optimize_play_order, mouth_should_dig,
+    plan_consumable_use, optimize_play_order, mouth_should_dig, needle_should_dig,
 )
 
 
@@ -314,7 +314,10 @@ class ActionExecutor:
                         # instead of locking a weak type. Tactical legality guard,
                         # so it overrides the policy's PLAY here (executed action is
                         # what PPO records). Highest single deep-death source (74%).
-                        if mouth_should_dig(hand_cards, jokers_raw, raw_state):
+                        # dec-053 adds The Needle (63%): only 1 hand all blind, so
+                        # dig to maximize it instead of playing a weak hand now.
+                        if (mouth_should_dig(hand_cards, jokers_raw, raw_state)
+                                or needle_should_dig(hand_cards, jokers_raw, raw_state)):
                             advice = find_best_discard(hand_cards, deck_cards,
                                                        jokers_raw, raw_state)
                             dig = list(advice["discard_indices"])[:5]

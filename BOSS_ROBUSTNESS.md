@@ -34,8 +34,12 @@ read the upcoming boss — already in state — and bias the build).
       Psychic is upcoming (structural: the agent commits to Pair too often).
 - [ ] **The Water (Layer 2)** — value low-variance / no-dig-needed builds when Water
       is upcoming.
-- [ ] **The Needle / The Eye (Layer 2)** — prefer builds that one-shot or score
-      across multiple hand types.
+- [x] **The Needle (Layer 1)** — `needle_should_dig` (hand_eval.py) + the same
+      `action_executor` PLAY override (dec-053). The Needle gives only 1 hand all
+      blind; dig with all discards to maximize that single hand instead of playing
+      a weak one immediately. Dig while the best current hand can't clear the target.
+- [ ] **The Eye (Layer 2)** — prefer builds that score across multiple hand types
+      (no-repeat punishes the mono-hand build).
 - [ ] **Plumb the upcoming boss name into the planner** (prerequisite for Layer 2).
 
 ## Verification

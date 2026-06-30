@@ -1820,6 +1820,41 @@ def mouth_should_dig(hand_cards: list[dict], jokers: list[dict],
         BASE_HAND_SCORES.get(current, (5, 1))[0]
 
 
+def needle_should_dig(hand_cards: list[dict], jokers: list[dict],
+                      gamestate: dict) -> bool:
+    """dec-053 — The Needle boss-robustness guard. The Needle gives only ONE hand
+    for the whole blind, so the single hand must be as big as possible. It kills
+    ~63% of deep runs because the agent plays its first hand immediately instead of
+    spending its discards to dig for a hand that can actually clear the target.
+
+    Returns True when a chosen PLAY should be OVERRIDDEN into a discard-to-dig:
+    boss is The Needle, discards remain, and the best hand currently in hand cannot
+    yet clear the remaining target. Once a clearing hand is reachable (or discards
+    run out), play."""
+    blinds = gamestate.get("blinds", {})
+    boss = ""
+    target = 0.0
+    if isinstance(blinds, dict):
+        for b in blinds.values():
+            if isinstance(b, dict) and b.get("status") == "CURRENT":
+                boss = b.get("name", "")
+                target = float(b.get("score", 0) or 0)
+                break
+    if boss != "The Needle":
+        return False
+    rd = gamestate.get("round", {})
+    if int(rd.get("discards_left", 0) or 0) <= 0:
+        return False
+    remaining = target - float(rd.get("chips", 0) or 0)
+    if remaining <= 0:
+        return False
+    top = find_best_hands(hand_cards, jokers, gamestate, top_n=1)
+    if not top:
+        return False
+    # Dig while the best hand we can currently play can't clear the blind.
+    return float(top[0].get("estimated_score", 0) or 0) < remaining
+
+
 def find_best_discard(hand_cards: list[dict], deck_cards: list[dict],
                       jokers: list[dict], gamestate: dict) -> dict:
     """Find the best discard strategy by computing expected value.

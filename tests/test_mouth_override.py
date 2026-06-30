@@ -4,7 +4,28 @@ Covers the safety short-circuits — the override must NEVER fire when the boss
 isn't The Mouth, when a hand type is already locked, or when no discards remain.
 (The positive dig case depends on find_best_hands/target_hand_type over real
 cards and is exercised live.)"""
-from environment.hand_eval import mouth_should_dig
+from environment.hand_eval import mouth_should_dig, needle_should_dig
+
+
+def _needle_state(boss="The Needle", discards=3, target=1000.0, chips=0.0):
+    return {
+        "blinds": {"boss": {"status": "CURRENT", "name": boss, "score": target}},
+        "round": {"discards_left": discards, "chips": chips},
+        "hands": {},
+    }
+
+
+def test_needle_not_boss_never_digs():
+    assert needle_should_dig([], [], _needle_state(boss="The Wall")) is False
+
+
+def test_needle_no_discards_does_not_dig():
+    assert needle_should_dig([], [], _needle_state(discards=0)) is False
+
+
+def test_needle_already_cleared_does_not_dig():
+    # round chips already >= target -> nothing to dig for
+    assert needle_should_dig([], [], _needle_state(target=1000.0, chips=1000.0)) is False
 
 
 def _state(boss, discards=3, played=None):
