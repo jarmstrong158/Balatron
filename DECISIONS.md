@@ -288,6 +288,28 @@ shallow death is much worse than a near-win (breaking the "safe ante-5 farm" loc
 optimum). Training-time changes — validated by train-then-eval vs a baseline on the
 seed bank, not an instant A/B.
 
+### Deep audit: three failure layers, Tier-0 fixes — 06-29 (`dec-048`)
+A 4-agent data-grounded audit (27,164 reconstructed runs + RL-health + planner
+calibration + scoring/regression) explained why dec-040→047 left the curve flat.
+**Three converging causes:** (L1) the **planner over-rates builds at depth** — it
+projected xmult **uncapped** (`_project_jokers` bypassed the dec-040 cap; Canio→19×),
+assumed leveling ~2× too fast, ignored boss effects, and `REALIZATION_FACTOR=0.43`
+is stale (fits ante 4; the gating antes imply it's ~6× too high and should be
+ante-scaled). (L2) the **build makes too little xmult, too late** (median 1.6
+entering ante 5 — xmult magnitude is *the* binding variable; leveling is **not** the
+gap) and **dies rich** (78% of ante-8 deaths hold ≥20 gold → needs spend-down, not
+the dec-042 economy relax). (L3) the **RL can't learn from the +150 win** (value head
+can't represent it → EV craters on win rollouts), and dec-047's depth-loss made dying
+**net-positive** from ante 5 (a "safe deep death" basin). Confirmed good: the policy
+is no longer decorative (KL healthy), SIL works (14 real wins), the eval harness is
+inert for training. **Tier 0 shipped:** revert the depth-loss (terminal loss now ≤0
+at every ante), cap the xmult projection like the shop estimator, `LEVELS_PER_ANTE`
+0.8→0.45. **Forward plan:** Tier 1 — re-fit RF (ante-scaled, on fresh data) + log
+realized end-of-blind score/hands-used (≈40% of deep deaths are adequate-build and
+currently undiagnosable); Tier 2 — return/advantage normalization so wins are
+learnable; Tier 3 (A/B via eval harness) — magnitude-weighted xmult earlier,
+pre-boss spend-down, boss effects in the planner/value path.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
