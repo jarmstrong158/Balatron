@@ -583,6 +583,7 @@ class Trainer:
             prev_state_name = prev_raw.get("state", "") if prev_raw else ""
             if prev_state_name == "SELECTING_HAND" and game_state_name == "SHOP":
                 env.joker_logger.round_end()
+                self._log_blind_result(env, beaten=True)  # dec-049
 
             # Detect win via API 'won' flag (endless mode auto-continues)
             # The Lua mod auto-dismisses the win screen, so GAME_OVER may
@@ -647,6 +648,7 @@ class Trainer:
             # Handle GAME_OVER — end episode, start new one
             if game_state_name == "GAME_OVER":
                 env.joker_logger.round_end()  # flush any pending round data
+                self._log_blind_result(env, beaten=False, raw=raw_state)  # dec-049
                 ante = raw_state.get("ante_num", 1)
                 api_won_flag = raw_state.get("won", False)
                 already_recorded = env.win_recorded
@@ -1222,6 +1224,7 @@ class Trainer:
                             "target": round(float(tgt), 0),
                             "margin": round(float(power) / max(float(tgt), 1.0), 3),
                         })
+                        env.last_proj_power = float(power)  # dec-049: for realized-vs-projected
                     except Exception:
                         pass  # diagnostics are best-effort; never block the log
                     with open(os.path.join("logs", "build_progression.jsonl"),
@@ -1440,6 +1443,13 @@ class Trainer:
                                 current_blind_name = b.get("name", "")
                                 current_blind_score = b.get("score", 0)
                                 break
+                    # dec-049: track realized per-blind progress (flushed on resolve)
+                    _rd = raw.get("round", {})
+                    env.cur_blind_name = current_blind_name
+                    env.cur_blind_target = float(current_blind_score or 0)
+                    env.cur_realized = float(_rd.get("chips", 0) or 0)
+                    env.cur_hands_left = int(_rd.get("hands_left", -1) or -1)
+                    env.cur_blind_ante = int(raw.get("ante_num", 1) or 1)
                     joker_cards = raw.get("jokers", {}).get("cards", [])
                     joker_keys = [j.get("key", "") for j in joker_cards]
                     env.joker_logger.round_start(
@@ -2113,6 +2123,48 @@ class Trainer:
             f"LR {self.ppo.get_learning_rate():.2e} | "
             f"EV {metrics.get('explained_variance', 0.0):>6.3f}"
         )
+
+    def _log_blind_result(self, env, beaten: bool, raw: dict = None):
+        """dec-049 (Tier 1 measurement): write one realized per-blind outcome to
+        logs/blind_results.jsonl when a blind resolves. Separates an UNDER-POWERED
+        build (realized << target) from an ADEQUATE build that died to variance /
+        boss-debuff (realized ~ target, or realized << projected power). Closes the
+        ~40% 'adequate build, dies anyway' blind spot from the deep audit, and gives
+        realized data to re-fit the realization factor. Best-effort; never blocks."""
+        try:
+            tgt = env.cur_blind_target
+            if tgt <= 0:
+                return  # nothing tracked for this blind
+            realized = env.cur_realized
+            if raw is not None:
+                realized = max(realized, float(raw.get("round", {}).get("chips", 0) or 0))
+            proj = env.last_proj_power
+            rec = {
+                "ante": env.cur_blind_ante,
+                "blind": env.cur_blind_name,
+                "beaten": bool(beaten),
+                "realized": round(realized, 0),
+                "target": round(tgt, 0),
+                "realized_margin": round(realized / max(tgt, 1.0), 3),
+                "hands_left": env.cur_hands_left,
+                "proj_power": round(proj, 0),
+                "realized_vs_proj": round(realized / max(proj, 1.0), 3),
+                "env": env.env_id, "step": self.global_step,
+            }
+            path = os.path.join("logs", "blind_results.jsonl")
+            with open(path, "a") as f:
+                f.write(json.dumps(rec) + "\n")
+            env.cur_blind_target = 0.0  # consumed; avoid double-logging the same blind
+            # light rotation (dec-043 lesson: don't grow unbounded)
+            self._blind_log_count = getattr(self, "_blind_log_count", 0) + 1
+            if self._blind_log_count % 2000 == 0:
+                with open(path) as f:
+                    lines = f.readlines()
+                if len(lines) > 50000:
+                    with open(path, "w") as f:
+                        f.writelines(lines[-50000:])
+        except Exception:
+            pass  # instrumentation must never break training
 
     def _save_checkpoint(self, tag: Optional[str] = None):
         """Save training checkpoint."""

@@ -76,3 +76,15 @@ class EnvSession:
         # Curriculum (dec-030): True when this run was LOADED from a banked
         # ante-4/5 seed (don't re-harvest it, and tag its experience).
         self.from_curriculum: bool = False
+
+        # dec-049 (Tier 1 measurement): realized per-blind outcome tracking.
+        # Updated every step in SELECTING_HAND; flushed to blind_results.jsonl when
+        # the blind resolves (beaten -> SHOP, failed -> GAME_OVER). Lets us separate
+        # an UNDER-POWERED build (realized << target) from an ADEQUATE build that
+        # died to variance/boss-debuff (realized ~ target, or realized << projected).
+        self.cur_blind_name: str = ""
+        self.cur_blind_target: float = 0.0
+        self.cur_realized: float = 0.0
+        self.cur_hands_left: int = -1
+        self.cur_blind_ante: int = 0
+        self.last_proj_power: float = 0.0   # last projected power (from build_progression)
