@@ -1448,8 +1448,13 @@ class Trainer:
                     env.cur_blind_name = current_blind_name
                     env.cur_blind_target = float(current_blind_score or 0)
                     env.cur_realized = float(_rd.get("chips", 0) or 0)
-                    env.cur_hands_left = int(_rd.get("hands_left", -1) or -1)
-                    env.cur_discards_left = int(_rd.get("discards_left", -1) or -1)  # dec-050
+                    # dec-050 fix: use explicit None-checks, NOT `or -1` — the latter
+                    # turns a legitimate 0 (all hands/discards used) into -1, masking
+                    # the exact under-dig signal we're measuring.
+                    _hl = _rd.get("hands_left", -1)
+                    _dl = _rd.get("discards_left", -1)
+                    env.cur_hands_left = int(_hl if _hl is not None else -1)
+                    env.cur_discards_left = int(_dl if _dl is not None else -1)
                     env.cur_blind_ante = int(raw.get("ante_num", 1) or 1)
                     joker_cards = raw.get("jokers", {}).get("cards", [])
                     joker_keys = [j.get("key", "") for j in joker_cards]
