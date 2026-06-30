@@ -17,6 +17,7 @@ nodes, RL value head as the leaf) is a later refinement within this pillar.
 from environment.hand_eval import (
     estimate_score_for_hand_type, _estimate_joker_scoring_for_type, BASE_HAND_SCORES,
     _api_key_to_name, HAND_LEVEL_INCREMENTS, SCORING_CARD_CHIPS,
+    SCALE_PROJECT_XMULT_CAP, SCALE_PROJECT_XMULT_CAP_PER_ANTE, SCALE_PROJECT_FLAT_CAP,
 )
 
 # Solver phase 1 (dec-036): how many effective scaling increments an engine gains
@@ -29,7 +30,11 @@ ENGINE_INCREMENTS_PER_ANTE = 2.0
 # plan (e.g. Photograph + Hanging Chad carried by a few Flush levels) projected as
 # if it plateaued and was under-valued vs flat additive. Projecting leveling lets
 # the planner SEE leveling as a real path to depth. Conservative (~<1/ante).
-LEVELS_PER_ANTE = 0.8
+LEVELS_PER_ANTE = 0.45  # dec-048: was 0.8, ~2x faster than runs actually level.
+                        # Real committed-hand base_chips growth (27k-run audit)
+                        # implies a median ~0.4-0.5 levels/ante (p75 ~0.6). 0.8
+                        # over-credited leveling, projecting builds deeper than they
+                        # realize and feeding the planner's depth over-optimism.
 
 # dec-042: stickiness for the committed archetype. The build flip-flopped across
 # ~3 hand types/run, scattering planets to net only ~1 level. Once a hand is the
@@ -105,7 +110,21 @@ def _project_jokers(jokers: list[dict], antes_ahead: float) -> list[dict]:
                 cur = j.get("_scaled_value")
                 base = cur if cur is not None else (sch.get("scaling_start_value") or 0.0)
                 jj = dict(j)
-                jj["_scaled_value"] = base + inc * ENGINE_INCREMENTS_PER_ANTE * antes_ahead
+                projected = base + inc * ENGINE_INCREMENTS_PER_ANTE * antes_ahead
+                # dec-048: CAP the projection like the shop estimator does
+                # (_project_shop_scaling_value). Previously uncapped, so a single
+                # xmult engine projected to ~19x+ and made build_survivability
+                # saturate to ante 12 for ANY owned engine — the planner's #1
+                # over-optimism bug (deep audit, agent 3). xmult -> ante-scaled cap;
+                # flat (chips/mult) -> flat cap. Ante term clamped to <=7 to match
+                # the shop estimator's horizon.
+                ahead = max(min(antes_ahead, 7.0), 0.0)
+                if sch.get("scaling_type") == "xmult":
+                    cap = SCALE_PROJECT_XMULT_CAP + SCALE_PROJECT_XMULT_CAP_PER_ANTE * ahead
+                    projected = max(1.0, min(projected, cap))
+                else:
+                    projected = min(projected, SCALE_PROJECT_FLAT_CAP)
+                jj["_scaled_value"] = projected
                 out.append(jj)
                 continue
         out.append(j)

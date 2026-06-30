@@ -318,15 +318,16 @@ class RewardCalculator:
             if self.phase == 2:
                 reward += self._check_naneinf(new_state)
         else:
-            # Loss (includes dying on the ante-8 boss). dec-047 (#5): DEPTH-GRADED.
-            # The reward audit found mid-game shaping (~+45/run) out-earned the flat
-            # -5 loss, making a safe ante-5 death (net ~+40) a stable local optimum
-            # vs a risky deep push. Grade the penalty by how FAR from ante 8 the run
-            # died (a shallow death is much worse; a near-win ~neutral), and make
-            # the progress credit CONVEX so each deeper ante is worth more.
+            # Loss (includes dying on the ante-8 boss). dec-048: terminal loss must
+            # be <= 0 at EVERY ante. dec-047's convex credit `(ante**1.5)*0.3`
+            # overpowered the penalty and made dying NET-POSITIVE from ante 5 on
+            # (die@8 = +6.79) — a "safe deep death" basin that out-paid the rare win
+            # (deep-audit, 4 agents). Keep ONLY the depth-graded penalty: a shallow
+            # death is much worse (~-4.4 @a2), a near-win ~neutral (~0 @a8). The
+            # per-ante progress credit is already paid DURING the run by
+            # _check_ante_cleared, so a terminal depth CREDIT also double-counted.
             shortfall = max(0, 8 - ante)
-            reward += REWARD_GAME_LOSS * (shortfall / 8.0)      # ~ -4.4 @a2 ... ~0 @a8
-            reward += (ante ** 1.5) * REWARD_PER_ANTE_SURVIVED  # convex depth credit
+            reward += REWARD_GAME_LOSS * (shortfall / 8.0)
 
         return reward
 
