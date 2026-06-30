@@ -356,6 +356,20 @@ planner/scorer don't model**. The next lever is **boss-robustness**, not RF or r
 power. (Discipline win: the re-fit's honest answer was "the constant's already
 right," and the measurement redirected the work.)
 
+### Boss-robustness Layer 1: The Mouth setup-override — 06-30 (`dec-052`, `BOSS_ROBUSTNESS.md`)
+The boss-death breakdown showed deep deaths are dominated by bosses that punish the
+agent's **single-committed-hand** build — led by **The Mouth at 74%**. The Mouth
+locks the round to the first hand TYPE *played* (discarding doesn't lock), and the
+agent plays its best *current* hand before its strong committed hand is assembled,
+locking into a weak type. `mouth_should_dig` (hand_eval.py) + an override in
+`action_executor`'s PLAY branch now **dig (discard) to set up the committed hand
+before the first play locks the type** — but only pre-lock, with discards left, when
+the current best is strictly weaker than the committed target. It's a tactical guard
+overriding the policy's PLAY (the executed action is what PPO records). First change
+with a **boss-specific A/B signal** (verify via The Mouth's kill rate in
+`blind_results`). Remaining bosses + a boss-aware planner (Layer 2) tracked in
+`BOSS_ROBUSTNESS.md`.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
