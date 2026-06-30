@@ -1777,6 +1777,49 @@ def assess_strategy(gamestate: dict) -> np.ndarray:
 # Discard Advisor — Expected Value Calculator
 # ============================================================
 
+def mouth_should_dig(hand_cards: list[dict], jokers: list[dict],
+                     gamestate: dict) -> bool:
+    """dec-052 — The Mouth boss-robustness guard. The Mouth locks every hand this
+    round to the FIRST hand TYPE you PLAY (discarding does not lock). It kills ~74%
+    of deep runs because the agent plays its best CURRENT hand before its strong
+    committed hand is assembled, locking the whole round into a weak type.
+
+    Returns True when a chosen PLAY should be OVERRIDDEN into a discard-to-dig:
+    boss is The Mouth, no type is locked yet, discards remain, and the best hand
+    currently in hand is a WEAKER type than the build's committed target. In that
+    case digging (with find_best_discard's committed-hand bias) to set up the strong
+    hand before the first play is strictly better than locking a weak one.
+    Conservative: returns False once a type is locked, with no discards, or when the
+    best current hand already is (or beats) the committed target."""
+    blinds = gamestate.get("blinds", {})
+    boss = ""
+    if isinstance(blinds, dict):
+        for b in blinds.values():
+            if isinstance(b, dict) and b.get("status") == "CURRENT":
+                boss = b.get("name", "")
+                break
+    if boss != "The Mouth":
+        return False
+    # Already locked? (some hand type has been played this round)
+    for info in gamestate.get("hands", {}).values():
+        if isinstance(info, dict) and info.get("round_played", 0) > 0:
+            return False
+    if int(gamestate.get("round", {}).get("discards_left", 0) or 0) <= 0:
+        return False
+    from environment.planner import target_hand_type as _target_ht
+    committed = _target_ht(jokers, gamestate)
+    if not committed:
+        return False
+    top = find_best_hands(hand_cards, jokers, gamestate, top_n=1)
+    current = top[0]["hand_type"] if top else ""
+    if not current or current == committed:
+        return False  # we already hold (or beat) the committed hand -> play to lock
+    # Only dig if the committed hand is a genuinely STRONGER base than the current
+    # best (don't dig toward a weaker target).
+    return BASE_HAND_SCORES.get(committed, (5, 1))[0] > \
+        BASE_HAND_SCORES.get(current, (5, 1))[0]
+
+
 def find_best_discard(hand_cards: list[dict], deck_cards: list[dict],
                       jokers: list[dict], gamestate: dict) -> dict:
     """Find the best discard strategy by computing expected value.

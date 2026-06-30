@@ -18,7 +18,7 @@ import numpy as np
 from environment.hand_eval import (
     find_best_discard, find_best_hands, estimate_score_for_hand_type,
     plan_optimal_action, compute_optimal_joker_order,
-    plan_consumable_use, optimize_play_order,
+    plan_consumable_use, optimize_play_order, mouth_should_dig,
 )
 
 
@@ -308,6 +308,18 @@ class ActionExecutor:
             if self.policy_authority:
                 try:
                     if action_type == 0:  # PLAY (policy chose it)
+                        # dec-052: The Mouth setup-override. The Mouth locks the
+                        # round to the first hand TYPE played; if our strong
+                        # committed hand isn't assembled yet, dig for it (discard)
+                        # instead of locking a weak type. Tactical legality guard,
+                        # so it overrides the policy's PLAY here (executed action is
+                        # what PPO records). Highest single deep-death source (74%).
+                        if mouth_should_dig(hand_cards, jokers_raw, raw_state):
+                            advice = find_best_discard(hand_cards, deck_cards,
+                                                       jokers_raw, raw_state)
+                            dig = list(advice["discard_indices"])[:5]
+                            if dig:
+                                return "discard", {"cards": dig}
                         top = find_best_hands(hand_cards, jokers_raw, raw_state, top_n=1)
                         cards = list(top[0]["card_indices"])[:5] if top else []
                         if not cards and hand_cards:
