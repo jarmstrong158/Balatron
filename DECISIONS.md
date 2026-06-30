@@ -343,6 +343,19 @@ over-optimistic projection** (greenlights builds at ~3–4× target that realize
 projection honesty + build power (Tier 0's xmult cap + leveling, shipped; plus the
 realization-factor re-fit). (Residual: proves discards are *used*, not *optimally*.)
 
+### RF re-fit confirms 0.43; the real wall is the boss plateau — 06-29 (`dec-051`)
+Re-fit `REALIZATION_FACTOR` on clean per-blind clear data. On the **deep gating
+antes (5–7) boss blinds**, clear-rate is monotonic in projected margin (1×→38%,
+2×→47%, 4×→62%), and 50% clear sits at proj/target **~2.3×** — *exactly* what
+RF=0.43 already encodes. So **RF is correct; no change.** The earlier "~0.075" /
+"~0.71 realized" signals were **confounded** (shallow antes where `proj_power`
+underestimates; and the *failure-conditional* tail read as typical). The real
+finding: **deep-boss clear plateaus at ~62% even at 4–8× margin** — build power
+can't buy past it. That ~38% residual is **boss-debuff + draw variance, which the
+planner/scorer don't model**. The next lever is **boss-robustness**, not RF or raw
+power. (Discipline win: the re-fit's honest answer was "the constant's already
+right," and the measurement redirected the work.)
+
 ---
 
 ## Gotchas & Hard-Won Lessons
