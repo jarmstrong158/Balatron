@@ -335,8 +335,13 @@ path, **bypassed under `policy_authority=True`** — the network owns play-vs-di
 and the heuristic only picks the best available cards. So the gap is the **policy
 playing weak hands instead of discarding to dig** toward its committed hand. Added
 `discards_left` to `blind_results.jsonl` as the decisive test: a run that uses all
-hands but leaves discards **unused** under-dug. (Loops back to dec-048's L3 — the
-policy can't *learn* to dig until the value head can represent wins.)
+hands but leaves discards **unused** under-dug. **Verdict (clean data, 51 failed
+blinds): NOT under-digging** — 84% used *all* discards *and* all hands and still hit
+only ~0.71 of target. So the gap is **genuine build under-power masked by an
+over-optimistic projection** (greenlights builds at ~3–4× target that realize ~0.7×),
+**not** a play-side problem. This rules out a discard fix and points back at
+projection honesty + build power (Tier 0's xmult cap + leveling, shipped; plus the
+realization-factor re-fit). (Residual: proves discards are *used*, not *optimally*.)
 
 ---
 
