@@ -370,6 +370,13 @@ with a **boss-specific A/B signal** (verify via The Mouth's kill rate in
 `blind_results`). Remaining bosses + a boss-aware planner (Layer 2) tracked in
 `BOSS_ROBUSTNESS.md`.
 
+### Boss-robustness Layer 1: The Needle setup-override — 06-30 (`dec-053`)
+Same pattern as The Mouth, applied to **The Needle (63%)** — only *one* hand for the
+whole blind. `needle_should_dig` digs with discards to maximize that single hand
+(while the best current hand can't clear the target) instead of playing a weak one
+immediately, via the same `action_executor` PLAY override. Verify via The Needle's
+kill rate in `blind_results`.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
