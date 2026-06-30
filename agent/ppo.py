@@ -50,6 +50,15 @@ class PPOConfig:
     # (REWARD_GAME_WIN=150) can't blow up value loss and starve the policy via
     # grad-clipping (observed when wins began: VL 28->171, EV 0.74->0.11).
     value_huber_delta: float = 25.0
+    # dec-054: value-target normalization (PopArt-lite). The value head learns in a
+    # NORMALIZED return space (the +150 win becomes a ~few-sigma target it can
+    # actually represent), then values are denormalized for GAE. The Huber clamp
+    # tames the loss MAGNITUDE but caps the value GRADIENT, so the head never
+    # *learns* the win value (EV craters to ~0.1 on win rollouts). Normalizing lets
+    # it learn with appropriately-scaled gradients. OFF by default (flag-off is
+    # byte-identical: stats stay mean=0/std=1, every (de)norm is an identity);
+    # enable + A/B via the eval harness, not blind on the live trainer.
+    value_norm: bool = False
 
     # Self-imitation learning (SIL Phase 2): replay saved winning/high-ante
     # trajectories through an imitation loss so the policy reinforces its own
@@ -322,6 +331,10 @@ class PPOTrainer:
         # Training stats
         self.total_updates = 0
         self.total_steps = 0
+        # dec-054: running return normalizer (PopArt-lite). (0,1) => every (de)norm
+        # is an identity, so value_norm=False is byte-identical to pre-dec-054.
+        self.ret_mean = 0.0
+        self.ret_std = 1.0
 
         # Behavior-cloning anneal anchor: the update count at which BC
         # first engaged. Persisted in checkpoints so frequent restarts
@@ -355,6 +368,10 @@ class PPOTrainer:
             env_id: which parallel environment this transition came from
         """
         head_idx = get_head_index(game_state)
+        # dec-054: the value head outputs in NORMALIZED return space when value_norm
+        # is on; store the DENORMALIZED value so GAE/returns stay in raw reward space.
+        # Identity when off (ret_std=1, ret_mean=0).
+        value = value * self.ret_std + self.ret_mean
         self.buffers[env_id].add(state, action, log_prob, reward, value,
                                  done, mask, head_idx, bc_flag=bc_flag)
         self.total_steps += 1
@@ -405,6 +422,7 @@ class PPOTrainer:
             if buf.size == 0:
                 continue
             lv = last_value[i] if i < len(last_value) else 0.0
+            lv = lv * self.ret_std + self.ret_mean  # dec-054 denorm (identity when off)
             ld = last_done[i] if i < len(last_done) else True
             buf.compute_gae(lv, ld, cfg.gamma, cfg.gae_lambda)
             active.append(buf)
@@ -436,6 +454,13 @@ class PPOTrainer:
         adv_std = c_advantages.std()
         if adv_std > 1e-8:
             c_advantages = (c_advantages - adv_mean) / (adv_std + 1e-8)
+
+        # dec-054: update the running return normalizer (EMA) from this batch's
+        # RAW returns. Only when value_norm is on — otherwise stats stay (0,1) and
+        # the whole value path is byte-identical to pre-dec-054. std floored at 1.0.
+        if cfg.value_norm and n > 1:
+            self.ret_mean = 0.95 * self.ret_mean + 0.05 * float(np.mean(c_returns))
+            self.ret_std = 0.95 * self.ret_std + 0.05 * max(float(np.std(c_returns)), 1.0)
 
         # Learning rate annealing
         if cfg.anneal_lr:
@@ -651,15 +676,20 @@ class PPOTrainer:
             a = err.abs()
             quad = torch.clamp(a, max=cfg.value_huber_delta)
             return 0.5 * quad * quad + cfg.value_huber_delta * (a - quad)
-        value_loss_unclipped = _huber(new_values - returns)
+        # dec-054: compare in NORMALIZED return space. new_values is the head output
+        # (normalized when value_norm is on); bring the raw target + stored values
+        # into the same space. Identity when off (ret_mean=0, ret_std=1).
+        ret_n = (returns - self.ret_mean) / self.ret_std
+        value_loss_unclipped = _huber(new_values - ret_n)
         if cfg.clip_value > 0:
             old_values = batch.get("old_values")
             if old_values is not None:
-                values_clipped = old_values + torch.clamp(
-                    new_values - old_values,
+                old_n = (old_values - self.ret_mean) / self.ret_std
+                values_clipped = old_n + torch.clamp(
+                    new_values - old_n,
                     -cfg.clip_value, cfg.clip_value
                 )
-                value_loss_clipped = _huber(values_clipped - returns)
+                value_loss_clipped = _huber(values_clipped - ret_n)
                 value_loss = torch.max(value_loss_unclipped, value_loss_clipped).mean()
             else:
                 value_loss = value_loss_unclipped.mean()
