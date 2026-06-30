@@ -1449,6 +1449,7 @@ class Trainer:
                     env.cur_blind_target = float(current_blind_score or 0)
                     env.cur_realized = float(_rd.get("chips", 0) or 0)
                     env.cur_hands_left = int(_rd.get("hands_left", -1) or -1)
+                    env.cur_discards_left = int(_rd.get("discards_left", -1) or -1)  # dec-050
                     env.cur_blind_ante = int(raw.get("ante_num", 1) or 1)
                     joker_cards = raw.get("jokers", {}).get("cards", [])
                     joker_keys = [j.get("key", "") for j in joker_cards]
@@ -2153,6 +2154,7 @@ class Trainer:
                 "target": round(tgt, 0),
                 "realized_margin": round(realized / max(tgt, 1.0), 3),
                 "hands_left": env.cur_hands_left,
+                "discards_left": env.cur_discards_left,  # dec-050: under-dig signal
                 "proj_power": round(proj, 0),
                 "realized_vs_proj": round(realized / max(proj, 1.0), 3),
                 "env": env.env_id, "step": self.global_step,

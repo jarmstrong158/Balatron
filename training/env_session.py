@@ -86,5 +86,6 @@ class EnvSession:
         self.cur_blind_target: float = 0.0
         self.cur_realized: float = 0.0
         self.cur_hands_left: int = -1
+        self.cur_discards_left: int = -1    # dec-050: unused discards at death = policy under-dug
         self.cur_blind_ante: int = 0
         self.last_proj_power: float = 0.0   # last projected power (from build_progression)
