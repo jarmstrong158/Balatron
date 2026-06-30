@@ -310,6 +310,20 @@ currently undiagnosable); Tier 2 — return/advantage normalization so wins are
 learnable; Tier 3 (A/B via eval harness) — magnitude-weighted xmult earlier,
 pre-boss spend-down, boss effects in the planner/value path.
 
+### Tier 1 measurement: realized per-blind logging — 06-29 (`dec-049`)
+Added `logs/blind_results.jsonl` — one record per blind resolution (beaten→SHOP /
+failed→GAME_OVER) with realized score, target, `hands_left`, and the planner's
+projected power (`realized_vs_proj`). Closes the audit's #1 blind spot (the per-ante
+logs only had the *projection*, so "adequate build, dies anyway" was undiagnosable).
+**First data was striking:** the agent realizes only **~7–10% of projected power**
+at shallow antes — independently confirming the realization factor should be ~0.075
+(not 0.43), and exposing a large **execution gap** (the build projects strong but the
+agent under-realizes it: hand-selection/variance plus the 3.0-best-hands projection
+assumption). Implication: a calibration scalar alone won't fix it — the *play-side*
+realization is implicated. (Beaten-blind realized is floored at target — the tracker
+misses the final winning hand; failed-blind realized is accurate via the GAME_OVER
+fallback.)
+
 ---
 
 ## Gotchas & Hard-Won Lessons

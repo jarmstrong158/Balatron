@@ -2138,6 +2138,12 @@ class Trainer:
             realized = env.cur_realized
             if raw is not None:
                 realized = max(realized, float(raw.get("round", {}).get("chips", 0) or 0))
+            # The per-step tracker misses the FINAL hand (state jumps
+            # SELECTING_HAND->SHOP), so beaten blinds undercount. A beaten blind
+            # scored >= its target by definition -> floor realized at target.
+            # (Failed-blind realized is accurate via the GAME_OVER raw fallback.)
+            if beaten:
+                realized = max(realized, tgt)
             proj = env.last_proj_power
             rec = {
                 "ante": env.cur_blind_ante,
