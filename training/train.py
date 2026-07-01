@@ -175,6 +175,7 @@ class Trainer:
         # set True only by evaluate.py. Everything eval-specific is gated behind
         # this flag so the training path is byte-identical when it is False.
         self.eval_mode = False
+        self.eval_out_path = None  # dec-055: dedicated resumable eval-results file
 
         # Load checkpoint if provided
         if checkpoint_path:
@@ -539,9 +540,9 @@ class Trainer:
         finally:
             for env in self.sessions:
                 await env.game.disconnect()
-        print(f"[EVAL] done — {total} seeds played; outcomes in "
-              f"logs/game_history.jsonl (seed-tagged). Run: "
-              f"python eval_report.py logs/game_history.jsonl", flush=True)
+        _out = self.eval_out_path or "logs/game_history.jsonl"
+        print(f"[EVAL] done — {total} seeds played this run; outcomes in "
+              f"{_out}. Run: python eval_report.py {_out}", flush=True)
 
     async def _collect_rollout(self, env) -> tuple[float, bool]:
         """Collect transitions for ONE env until the COMBINED total
@@ -661,6 +662,20 @@ class Trainer:
                 print(f"[GAME_OVER] ante={ante} won={won} "
                       f"already_recorded={already_recorded} "
                       f"api_won={api_won_flag}", flush=True)
+
+                # dec-055: dedicated, resumable eval-results file (one row per run,
+                # NO rotation). A teardown mid-eval loses only in-flight seeds —
+                # evaluate.py skips seeds already present here on restart. Clean and
+                # isolated from training's game_history (no seed-filter needed).
+                if self.eval_mode and self.eval_out_path \
+                        and getattr(env, "current_seed", None):
+                    try:
+                        with open(self.eval_out_path, "a") as _ef:
+                            _ef.write(json.dumps({
+                                "seed": env.current_seed, "ante": ante, "won": won,
+                            }) + "\n")
+                    except Exception:
+                        pass
 
                 # Append to game history log (rolling buffer)
                 try:

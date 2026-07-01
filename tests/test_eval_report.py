@@ -1,6 +1,17 @@
 """Tests for the evaluation reporting instrument (eval_report.py)."""
+import json
 import math
 from eval_report import wilson, advance_curve, win_rate
+from evaluate import _done_seeds
+
+
+def test_done_seeds_resume(tmp_path):
+    # dec-055: evaluate.py resumes by skipping seeds already in the results file.
+    p = tmp_path / "eval.jsonl"
+    p.write_text("\n".join(json.dumps({"seed": s, "ante": 4, "won": False})
+                           for s in ("AAA", "BBB", "CCC")) + "\n")
+    assert _done_seeds(str(p)) == {"AAA", "BBB", "CCC"}
+    assert _done_seeds(str(tmp_path / "missing.jsonl")) == set()  # no file -> empty
 
 
 def test_wilson_basic():
