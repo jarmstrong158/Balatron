@@ -62,6 +62,12 @@ class TrainConfig:
     # once the demo buffer has a corpus. Small coef to avoid mode-collapse.
     sil_coef: float = 0.1            # SIL ACTIVE (06-21): replay banked wins.
     sil_batch_size: int = 256
+    # dec-056: value-target normalization (PopArt-lite, dec-054). Enabled for the
+    # live value-head A/B (the +150 win becomes a representable normalized target).
+    # Off = byte-identical to before. Expect an initial EV dip as the value head
+    # re-scales (no PopArt output rescale yet), then EV-on-win-rollouts should
+    # recover instead of cratering to ~0.1.
+    value_norm: bool = False
 
     # Logging
     log_interval: int = 1               # Log every N updates
@@ -133,4 +139,5 @@ class TrainConfig:
             num_envs=self.num_envs,
             sil_coef=self.sil_coef,
             sil_batch_size=self.sil_batch_size,
+            value_norm=self.value_norm,
         )

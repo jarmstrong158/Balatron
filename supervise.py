@@ -577,6 +577,7 @@ def start_trainer() -> bool:
          "--device", "cpu",
          "--checkpoint-interval", "2",
          "--num-envs", str(NUM_ENVS),
+         "--value-norm",  # dec-056: value-head A/B live test (PopArt-lite on)
          "--no-record",  # win-replay ffmpeg recorder OFF: ~0 wins/run while we're
                          # in the flat-ante regime, so it captured-and-discarded
                          # 100% of footage — pure CPU/gdigrab contention that was

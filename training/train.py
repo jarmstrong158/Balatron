@@ -2290,6 +2290,8 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--num-envs", type=int, default=1,
                         help="Parallel Balatro instances "
                              "(ports 12346..12346+N-1; env 0 records)")
+    parser.add_argument("--value-norm", action="store_true",
+                        help="dec-056: enable PopArt-lite value normalization")
 
     args = parser.parse_args()
 
@@ -2304,6 +2306,7 @@ def parse_args() -> TrainConfig:
         checkpoint_interval=args.checkpoint_interval,
         record_wins=not args.no_record,
         num_envs=args.num_envs,
+        value_norm=args.value_norm,
     )
 
     return config, args.checkpoint
