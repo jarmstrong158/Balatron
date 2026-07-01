@@ -402,6 +402,17 @@ The dedicated file is isolated from training's `game_history` (no `--seeds` filt
 needed to analyze). Still needs game servers up + training paused; it does not yet
 launch its own Balatro instance (the truly self-contained fix, deferred on RAM).
 
+### Value-head A/B: value_norm ON (live test) — 06-30 (`dec-056`)
+After ~18 changes with a flat 0.54% win rate, pulled the one real win-rate lever:
+enabled `value_norm` (dec-054) so the policy can finally learn from the +150 win.
+Plumbed `TrainConfig.value_norm → PPOConfig`, a `--value-norm` flag, and the
+supervisor launch. Chose the **fast live test** (watch EV-on-win-rollouts + WR500)
+over the slow formal eval. Rollback point: `checkpoints/rollback_pre_valuenorm.pt`.
+Expect a ~10–30-update EV **dip** as the value head re-scales (no PopArt output
+rescale yet), then EV-on-wins should recover healthy instead of cratering to ~0.1,
+and WR500 should start rising. Revert = drop `--value-norm` + resume from the
+rollback checkpoint.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
