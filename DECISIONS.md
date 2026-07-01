@@ -392,6 +392,16 @@ keeps stats at (0,1) → every (de)norm is an identity → byte-identical to bef
 PopArt output-layer rescale yet), so **enable + A/B via the eval harness, not blind
 on the live trainer.** Highest-leverage RL change; payoff unproven until A/B'd.
 
+### Resumable eval — 06-30 (`dec-055`)
+The first baseline eval died with the session (9/300, unusable) — a multi-hour run
+tied to the session gets killed on teardown (along with the supervisor-owned game
+servers). Fix: `evaluate.py` writes each finished run to a **dedicated** results
+file (`logs/eval_<checkpoint>.jsonl`) and **skips seeds already present** on
+startup, so a crash costs only a restart — re-run the same command and it continues.
+The dedicated file is isolated from training's `game_history` (no `--seeds` filter
+needed to analyze). Still needs game servers up + training paused; it does not yet
+launch its own Balatro instance (the truly self-contained fix, deferred on RAM).
+
 ---
 
 ## Gotchas & Hard-Won Lessons
