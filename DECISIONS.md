@@ -413,6 +413,32 @@ rescale yet), then EV-on-wins should recover healthy instead of cratering to ~0.
 and WR500 should start rising. Revert = drop `--value-norm` + resume from the
 rollback checkpoint.
 
+### The plateau audit: architecture ceiling + optimizer damage — 07-02 (`dec-057`)
+A 4-agent audit answered "why isn't he learning." **Verdict: both.** (1) **Architecture
+ceiling:** a multiplicative per-blind model (51,834 blinds; reproduces the observed
+0.7% win) shows a *perfect* play/discard policy caps at ~2.6% — the network's real
+levers (play/discard timing, shop tempo) are outcome-inert (tempo r²<0.008). The
+agent has already extracted ~half its policy ceiling. **The win rate lives in the
+planner:** boss-aware `build_survivability` alone models to ~3.6% (~5×), and with
+tactics/power fixes **~11–12% is reachable inside the current hybrid** (boss blinds
+sit 15–35 pts below non-boss siblings at every deep ante; `planner.py` hardcodes
+`boss: 2.0` and never reads the boss identity). (2) **Optimizer damage:** the policy
+*did* learn once (u385→1500, ante 3.46→4.41, LR ≤1e-4, median KL 0.005) until
+dec-034 crashed it; then dec-039's 50M budget change **silently raised LR to
+2.7e-4** (first-ever KL>1 hit 66 updates later; 40% of updates now blow target KL),
+dec-054's ret stats are **not persisted** (value scale resets every 90-min recycle —
+the identical VL≈14/EV≈0.3 transient at every session start; EV still craters on win
+rollouts), override transitions stored at log-prob −30 create **e²⁵ ratio bombs**,
+and the KL early-stop fires only post-epoch (destructive steps land on exactly the
+win rollouts). Experience is thin: 41.5% single-choice transitions (blind head 100%
+dead), mask prior pre-decides 57% of steps, return ~92% shaping. Throughput was
+**exonerated** (395 steps/min healthy; crawls = external contention killing games;
+FPS field is garbage after resume). Measured fix feedback: the **Needle override
+worked** (realized/proj 0.42→0.58); Mouth's didn't visibly. Plan: Tier-0 optimizer
+hygiene (persist ret stats, LR→1e-4, ratio-bomb guard, per-minibatch KL stop,
+0·inf guard, torch threads), then **redirect to the planner** (boss-aware, deck
+thinning, save→spike economy) — stop tuning PPO strategy.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
