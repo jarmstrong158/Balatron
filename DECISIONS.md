@@ -458,6 +458,23 @@ even possible — bomb steps inflated batch KL by ~142 nats each, so a naive SB3
 stop would have halted training permanently. Watch after deploy: median KL back
 to ~0.005–0.03, the session-start VL/EV transient gone, entropy stabilizing.
 
+### Boss-aware planner v1 — 07-02 (`dec-059`, the audit's ~5× lever)
+The planner treated every boss as a generic 2× target; it now gates the
+**immediate** ante on the **known** boss's real difficulty. `upcoming_boss()`
+reads the boss name from state (UPCOMING/CURRENT/SELECT; `''` once DEFEATED —
+next boss unknown); `BOSS_DIFFICULTY` holds multipliers **relative to a typical
+boss** — chip facts (The Wall 2.0: it's literally 4× base; Violet Vessel 3.0)
+and mechanic haircuts (Needle 3.0 — one hand vs the 3 the power model assumes;
+Flint 1.8, Eye 1.5, Water 1.4, Crimson Heart 1.4, Arm 1.3, Manacle/Amber 1.2;
+Mouth deliberately 1.0 — dec-052 covers it). **Future/unknown antes stay 1.0:**
+`REALIZATION_FACTOR` was fit against average-boss outcomes (dec-051), so an
+expected-boss multiplier there would double-count the calibration. Effect:
+`build_survivability` (and therefore `build_value` and shop buys) demands
+genuinely sufficient builds exactly when a hard boss looms. Verify via per-boss
+kill rates in `blind_results` (baselines: Wall 67%, Needle 63%, Eye 62%, Water
+61%). Remaining levers (Eye multi-hand builds, suit-debuff pivots, deck
+thinning, save→spike) tracked in `BOSS_ROBUSTNESS.md`.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
