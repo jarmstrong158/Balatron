@@ -439,6 +439,25 @@ hygiene (persist ret stats, LR→1e-4, ratio-bomb guard, per-minibatch KL stop,
 0·inf guard, torch threads), then **redirect to the planner** (boss-aware, deck
 thinning, save→spike economy) — stop tuning PPO strategy.
 
+### Tier-0 optimizer hygiene: stop the active damage — 07-02 (`dec-058`)
+Shipped the audit's six optimizer fixes: **persist `ret_mean`/`ret_std` in
+checkpoints** (the dec-054 value-norm fix was never operative — the scale reset
+every 90-min recycle); **LR locked at 1e-4** (dec-039 had silently raised it to
+2.7e-4; the only durable-improvement era ran ≤1e-4), applied at run-start too (the
+loaded optimizer carried the old LR); **ratio-bomb guard** — steps with
+`|log_ratio|>5` (storage artifacts from override actions stored at log-prob −30)
+contribute zero policy gradient and are excluded from `approx_kl`, making it a true
+drift measure again; **per-minibatch KL stop** (a batch >1.5× target applies *no*
+gradient and halts the update — the old post-epoch check let 4 destructive steps
+land on exactly the win rollouts); **0·inf NaN guard** on the prior term;
+**`torch.set_num_threads(2)`** (unbounded threading was the ~5-core burn that
+starved game instances under external CPU pressure). Bonus: SIL demo capture
+truncates at win-detection (demos no longer imitate the post-win endless death
+tail). Key subtlety: the ratio-guard must come *before* a per-batch KL stop is
+even possible — bomb steps inflated batch KL by ~142 nats each, so a naive SB3
+stop would have halted training permanently. Watch after deploy: median KL back
+to ~0.005–0.03, the session-start VL/EV transient gone, entropy stabilizing.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
