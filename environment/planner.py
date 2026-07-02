@@ -92,6 +92,55 @@ def ante_target(ante: int, blind: str = "boss") -> float:
     return base * BLIND_MULT.get(blind, 2.0)
 
 
+# ── Boss-aware planning (dec-059, the dec-057 audit's top lever) ─────────────
+# The planner treated every boss as a generic 2x target, but boss blinds run
+# 15-35 points below non-boss blinds at every deep ante and deep-boss clear
+# plateaus ~62% regardless of raw power — the mechanics, not the chips, kill
+# runs. EFFECTIVE difficulty multipliers for the KNOWN upcoming boss, relative
+# to a TYPICAL boss (REALIZATION_FACTOR already calibrates the average boss, so
+# future/unknown antes stay at 1.0). Two kinds of entries:
+#   - chip facts: The Wall is literally 4x base (2x a normal boss); Violet
+#     Vessel is 6x base (3x).
+#   - mechanic haircuts: The Needle allows ONE hand vs the HANDS_PER_BLIND=3
+#     the power model assumes (3x); The Eye blocks repeating the committed hand
+#     (~1.5x); The Water removes all discards so the committed hand assembles
+#     less often (deep kill 61%, realized/proj 0.32 vs 0.40 typical → 1.4x);
+#     The Flint halves base chips+mult (~1.8x for level-driven builds);
+#     The Arm de-levels the played hand (1.3x); The Manacle -1 hand size (1.2x).
+# The Mouth is deliberately 1.0: a committed-single-hand build is exactly what
+# it wants, and the dec-052 dig override handles the sequencing.
+BOSS_DIFFICULTY = {
+    "The Wall": 2.0,
+    "Violet Vessel": 3.0,
+    "The Needle": 3.0,
+    "The Eye": 1.5,
+    "The Water": 1.4,
+    "The Flint": 1.8,
+    "The Arm": 1.3,
+    "The Manacle": 1.2,
+    "Crimson Heart": 1.4,   # disables a random joker every hand
+    "Amber Acorn": 1.2,     # flips/shuffles jokers (ordering value lost)
+}
+
+
+def upcoming_boss(gamestate: dict) -> str:
+    """Name of THIS ante's boss if visible/known, else ''. The API's blinds dict
+    is {small, big, boss} with per-blind status; once the boss is DEFEATED the
+    next ante's boss isn't known yet -> '' (no adjustment)."""
+    blinds = gamestate.get("blinds", {})
+    if isinstance(blinds, dict):
+        b = blinds.get("boss")
+        if isinstance(b, dict) and b.get("status") in ("UPCOMING", "CURRENT", "SELECT"):
+            return b.get("name", "") or ""
+    return ""
+
+
+def boss_difficulty(name: str) -> float:
+    """Effective target multiplier for a KNOWN boss, relative to a typical boss
+    (1.0 for unknown/average — the realization factor covers the average)."""
+    return BOSS_DIFFICULTY.get(name, 1.0)
+
+
 def _project_jokers(jokers: list[dict], antes_ahead: float) -> list[dict]:
     """Copy the joker list, advancing each SCALING engine's value antes_ahead
     antes into the future (current/start value + increment * rate * antes_ahead).
@@ -163,12 +212,19 @@ def build_survivability(jokers: list[dict], gamestate: dict) -> float:
     except (TypeError, ValueError):
         cur = 1
     import math
+    # dec-059: this ante's boss is KNOWN (visible in state) — gate the immediate
+    # ante on its REAL difficulty (The Wall is 4x base, The Needle allows 1 hand,
+    # ...). Future antes' bosses are unknown -> 1.0 (the realization factor
+    # already calibrates the average boss).
+    cur_boss_mult = boss_difficulty(upcoming_boss(gamestate))
     prev_target = ante_target(cur - 1, "boss") if cur > 1 else 0.0
     for a in range(cur, MAX_PLAN_ANTE + 1):
         pj = _project_jokers(jokers, a - cur)               # engines matured to ante a
         gs_a = _level_committed_hand(gamestate, ht, LEVELS_PER_ANTE * (a - cur))
         power = score_hand_type(ht, pj, gs_a) * HANDS_PER_BLIND * REALIZATION_FACTOR
         tgt = ante_target(a, "boss")
+        if a == cur:
+            tgt *= cur_boss_mult
         if power >= tgt:
             prev_target = tgt
             continue

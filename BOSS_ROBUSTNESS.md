@@ -38,9 +38,21 @@ read the upcoming boss — already in state — and bias the build).
       `action_executor` PLAY override (dec-053). The Needle gives only 1 hand all
       blind; dig with all discards to maximize that single hand instead of playing
       a weak one immediately. Dig while the best current hand can't clear the target.
-- [ ] **The Eye (Layer 2)** — prefer builds that score across multiple hand types
-      (no-repeat punishes the mono-hand build).
-- [ ] **Plumb the upcoming boss name into the planner** (prerequisite for Layer 2).
+- [x] **Boss-aware planner v1 (Layer 2, dec-059)** — `upcoming_boss()` +
+      `BOSS_DIFFICULTY` in planner.py; `build_survivability` gates the immediate
+      ante at the KNOWN boss's real difficulty (Wall 2.0 = its literal 4x-base
+      chips; Needle 3.0 = one hand vs the 3 the power model assumes; Eye 1.5,
+      Water 1.4, Flint 1.8, Arm 1.3, Manacle 1.2; unknown/future antes 1.0 —
+      the realization factor covers the average boss). Effect: the planner
+      demands genuinely sufficient builds before a hard boss, raising build_value
+      for power exactly when it's needed.
+- [ ] **The Eye (Layer 2, deeper)** — beyond the 1.5x haircut: prefer builds that
+      score across multiple hand types (no-repeat punishes the mono-hand build).
+- [ ] **Suit-debuff bosses (Layer 2)** — if the upcoming boss debuffs suit S and
+      the committed hand is a Flush built on S, penalize/pivot in
+      `target_hand_type` (needs dominant-suit plumbing).
+- [ ] **Deck thinning / save→spike economy** — the other two dec-057 levers
+      (attack the realized/proj≈0.40 gap; value money as spike potential).
 
 ## Verification
 
