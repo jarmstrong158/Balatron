@@ -527,6 +527,7 @@ class PPOTrainer:
                                                  dtype=torch.long),
                 }
 
+        kl_stopped = False
         for epoch in range(cfg.num_epochs):
             epoch_kl = 0.0
             epoch_batches = 0
@@ -547,9 +548,18 @@ class PPOTrainer:
                 epoch_batches += 1
                 num_batches += 1
 
-            metrics["num_epochs_run"] += 1
+                # dec-058: mid-epoch stop — the batch that tripped 1.5x target_kl
+                # applied NO gradient; stop the whole update here instead of
+                # letting 3 more destructive minibatches land.
+                if batch_metrics.get("kl_stop"):
+                    kl_stopped = True
+                    break
 
-            # KL divergence early stopping
+            metrics["num_epochs_run"] += 1
+            if kl_stopped:
+                break
+
+            # KL divergence early stopping (epoch-mean, as before)
             if cfg.target_kl is not None and epoch_batches > 0:
                 mean_kl = epoch_kl / epoch_batches
                 if mean_kl > cfg.target_kl:
@@ -659,15 +669,42 @@ class PPOTrainer:
 
         # Policy loss — clipped surrogate
         log_ratio = new_log_probs - old_log_probs
-        ratio = torch.exp(log_ratio)
 
-        # Approximate KL divergence
-        approx_kl = ((ratio - 1) - log_ratio).mean().item()
+        # dec-058 RATIO-BOMB GUARD: override/recovery transitions are stored with
+        # the EXECUTED action's log-prob (as low as -30), so re-evaluation can give
+        # log_ratio ~ +25 -> ratio e^25. With negative advantage max(pg1,pg2) is
+        # unbounded above, so ONE such transition hijacked whole minibatches
+        # (audit: PL 0.003->7.98, KL 770). A genuine PPO update never moves ~5 nats
+        # in one step — anything beyond is a storage artifact, not policy drift:
+        # exclude it from the policy loss and the KL measure entirely.
+        sane = (log_ratio.abs() <= 5.0)
+        ratio = torch.exp(torch.clamp(log_ratio, -5.0, 5.0))
 
-        # Clipped surrogate
+        # Approximate KL divergence over SANE steps only — this makes approx_kl a
+        # true drift measure (epoch-1 batch-1 ~ 0 again), so KL early-stopping
+        # stops on real drift instead of storage artifacts.
+        n_sane = sane.float().sum().clamp(min=1.0)
+        approx_kl = (((ratio - 1) - log_ratio) * sane.float()).sum().item() / n_sane.item()
+
+        # Clipped surrogate (bomb transitions contribute zero policy gradient)
         pg_loss1 = -advantages * ratio
         pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - cfg.clip_epsilon, 1.0 + cfg.clip_epsilon)
-        policy_loss = torch.max(pg_loss1, pg_loss2).mean()
+        policy_loss = (torch.max(pg_loss1, pg_loss2) * sane.float()).sum() / n_sane
+
+        # dec-058 PER-MINIBATCH KL STOP: the old check ran only AFTER a full epoch,
+        # so a blown update had already applied 4 destructive optimizer steps —
+        # landing precisely on the rare win-containing rollouts. Standard PPO
+        # (SB3) semantics: if this minibatch's (sane) KL already exceeds 1.5x
+        # target, apply NOTHING and signal the caller to stop the whole update.
+        if cfg.target_kl is not None and approx_kl > 1.5 * cfg.target_kl:
+            with torch.no_grad():
+                clip_fraction = ((ratio - 1.0).abs() > cfg.clip_epsilon).float().mean().item()
+            return {
+                "policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0,
+                "bc_loss": 0.0, "prior_kl": 0.0, "sil_loss": 0.0,
+                "total_loss": 0.0, "approx_kl": approx_kl,
+                "clip_fraction": clip_fraction, "kl_stop": True,
+            }
 
         # Value loss — clipped, Huber (dec-042). Huber is MSE within +/-delta and
         # LINEAR beyond, so a rare +150 win can't explode the value loss and have
@@ -729,13 +766,21 @@ class PPOTrainer:
         sil_term = sil_loss if sil_loss is not None \
             else torch.zeros((), device=self.device)
 
+        # dec-058: 0*inf guard. With _prior_coef_now == 0.0 and a batch whose
+        # prior_kl is inf (policy puts ~0 mass where the prior does — logs show
+        # 'Pr inf@0.00'), `0.0 * inf = NaN` would poison the whole gradient.
+        if self._prior_coef_now > 0:
+            prior_term = self._prior_coef_now * prior_kl_loss
+        else:
+            prior_term = torch.zeros((), device=self.device)
+
         # Total loss
         total_loss = (
             policy_loss
             + cfg.value_coef * value_loss
             - cfg.entropy_coef * entropy_loss
             + self._bc_coef_now * bc_loss
-            + self._prior_coef_now * prior_kl_loss
+            + prior_term
             + cfg.sil_coef * sil_term
         )
 
@@ -789,6 +834,13 @@ class PPOTrainer:
                 "total_steps": self.total_steps,
                 "bc_start_update": self.bc_start_update,
                 "prior_start_update": self.prior_start_update,
+                # dec-058: persist the value-norm stats. Without these, every
+                # 90-min supervisor recycle reset the value scale to (0,1) while
+                # the value head's weights encoded the PREVIOUS session's scale —
+                # ~70-80% of every session was spent re-learning it (the audit's
+                # identical VL~14/EV~0.3 transient at every session start).
+                "ret_mean": self.ret_mean,
+                "ret_std": self.ret_std,
                 "config": self.config,
             }, f)
             f.flush()
@@ -843,6 +895,9 @@ class PPOTrainer:
         # Old checkpoints predate prior-KL → None means the anneal anchors at
         # the first update after this change deploys (full prior_coef → 0).
         self.prior_start_update = checkpoint.get("prior_start_update", None)
+        # dec-058: restore value-norm stats (identity defaults for old checkpoints)
+        self.ret_mean = float(checkpoint.get("ret_mean", 0.0))
+        self.ret_std = float(checkpoint.get("ret_std", 1.0))
 
     def get_stats(self) -> dict:
         """Get trainer statistics."""

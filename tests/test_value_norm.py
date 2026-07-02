@@ -35,3 +35,23 @@ def test_value_norm_denormalizes_stored_value():
     t.ret_mean, t.ret_std = 30.0, 40.0   # pretend stats have adapted
     # head emits a normalized value of 2.0 -> stored raw = 2*40 + 30 = 110
     assert abs(_store(t, 2.0) - 110.0) < 1e-4
+
+
+def test_ret_stats_persist_across_checkpoints(tmp_path):
+    # dec-058: the value-norm stats MUST survive save/load — without this, every
+    # supervisor recycle reset the value scale and ~70-80% of each session was
+    # spent re-learning it (the plateau audit's #1 optimizer finding).
+    t = PPOTrainer(BalatronNetwork(), PPOConfig(value_norm=True))
+    t.ret_mean, t.ret_std = 27.5, 38.25
+    p = str(tmp_path / "ckpt.pt")
+    t.save_checkpoint(p)
+    t2 = PPOTrainer(BalatronNetwork(), PPOConfig(value_norm=True))
+    t2.load_checkpoint(p)
+    assert t2.ret_mean == 27.5 and t2.ret_std == 38.25
+    # old checkpoints (no stats saved) -> identity defaults
+    t3 = PPOTrainer(BalatronNetwork(), PPOConfig())
+    t3.save_checkpoint(p)  # saves current (0,1)
+    t4 = PPOTrainer(BalatronNetwork(), PPOConfig())
+    t4.ret_mean, t4.ret_std = 99.0, 99.0
+    t4.load_checkpoint(p)
+    assert t4.ret_mean == 0.0 and t4.ret_std == 1.0

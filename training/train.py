@@ -460,6 +460,12 @@ class Trainer:
               f"(ports {', '.join(str(e.port) for e in self.sessions)})")
 
         try:
+            # dec-058: apply the LR lock IMMEDIATELY — the loaded checkpoint's
+            # optimizer state carries the old (2.6e-4) LR, and the anneal block
+            # only runs after the first update completes.
+            if cfg.anneal_lr:
+                self.ppo.set_learning_rate(1.0e-4)
+
             while self.global_step < cfg.total_timesteps:
                 # Collect one rollout across all envs in parallel. Each
                 # env task plays until the COMBINED buffer total reaches
@@ -475,13 +481,16 @@ class Trainer:
                 metrics = self.ppo.update(last_values, last_dones)
                 self.num_updates += 1
 
-                # LR annealing — FLOORED. At ~75% of total_timesteps the
-                # un-floored LR had decayed to 7.5e-5 and the policy stopped
-                # moving (KL ~0.002, plateaued). Keep a usable minimum so
-                # learning never dies just because of the schedule.
+                # LR — LOCKED at 1e-4 (dec-058). The dec-039 budget change
+                # (5M->50M) silently re-anchored the anneal fraction and raised
+                # LR 1.0e-4 -> 2.7e-4 at update 2437; the first KL>1 in project
+                # history hit 66 updates later, escalating to 40% of updates
+                # blowing target_kl. The ONLY durable-improvement era (u385-1500,
+                # ante 3.46->4.41) ran at <=1e-4 with median KL ~0.005 — that is
+                # the known-good regime. Cap the schedule there.
                 if cfg.anneal_lr:
                     frac = 1.0 - self.global_step / cfg.total_timesteps
-                    new_lr = max(cfg.learning_rate * frac, 1.0e-4)
+                    new_lr = min(max(cfg.learning_rate * frac, 1.0e-4), 1.0e-4)
                     self.ppo.set_learning_rate(new_lr)
 
                 # Logging
@@ -1264,7 +1273,11 @@ class Trainer:
             # Self-imitation capture (Phase 1): accumulate this REAL step into
             # the episode trajectory; _reset_run_state flushes it to the demo
             # buffer iff the run wins / reaches a high ante. Pure logging.
-            if self.demo_buffer is not None:
+            # dec-058: stop capturing once the win is recorded — the endless-mode
+            # tail after ante 8 is LOSING play (the run eventually dies), and the
+            # audit found every "win demo" included it, so SIL was imitating
+            # post-win deaths as if they were part of winning.
+            if self.demo_buffer is not None and not env.win_recorded:
                 env.episode_traj.append((
                     state_vec.copy(), action_np.copy(), action_mask.copy(),
                     get_head_index(game_state_name),
@@ -2319,6 +2332,16 @@ async def async_main():
 
 
 def main():
+    # dec-058: cap torch threads. No cap existed anywhere, so PyTorch spun
+    # all-16-core thread pools (with spin-wait) for every tiny 1x850 forward —
+    # a constant ~5-core burn that starves the 3 game instances whenever any
+    # external CPU hog appears (the actual crawl mechanism). The PPO update on
+    # 2048x850 still takes only seconds on 2 threads.
+    try:
+        torch.set_num_threads(2)
+        torch.set_num_interop_threads(1)
+    except Exception:
+        pass  # interop threads can only be set once per process
     asyncio.run(async_main())
 
 
