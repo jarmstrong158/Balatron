@@ -174,10 +174,14 @@ class ActionExecutor:
             print(f"[SHOP] planner swap failed ({e})", flush=True)
             return None
 
-    # Reroll to assemble the build when the shop is barren (dec-034 Pillar 2):
-    # a build_value (antes of survivability gained) below this means the best
-    # shop joker barely advances the build — worth rerolling for a real piece.
-    PLANNER_REROLL_THRESHOLD = 0.12
+    # Reroll to assemble the build when the best shop joker barely advances it
+    # (dec-034 Pillar 2). dec-060 (save->spike): raised 0.12 -> 0.25 so the agent
+    # hunts for a REAL engine when the shop is merely MEDIOCRE, not just barren —
+    # spending surplus above the interest reserve on finding power instead of
+    # wasting it on weak jokers. The dec-057 audit found the agent buys junk and
+    # never builds the power to clear power-check bosses; this is the "don't waste
+    # money" half of save->spike (the boss spend-down below is the "spike").
+    PLANNER_REROLL_THRESHOLD = 0.25
 
     def _planner_reroll_ok(self, env, raw_state: dict, money: float) -> bool:
         """Is a planner-driven reroll safe right now? Only on genuine SURPLUS
@@ -201,6 +205,18 @@ class ActionExecutor:
             ante = 1
         if ante <= 5:
             floor = min(floor, 5)
+        # dec-060 (save->spike, THE SPIKE): before a HARD boss (dec-059
+        # boss-aware difficulty), spend the war chest down to find/buy the power
+        # to clear it — money is worthless if the run dies at this gate, so the
+        # interest reserve the agent saved IS for exactly this moment. Relax the
+        # floor so deep-ante shops before a Wall/Needle/Flint/etc. can reroll for
+        # engines instead of protecting a reserve for a next ante it won't reach.
+        try:
+            from environment.planner import upcoming_boss, boss_difficulty
+            if boss_difficulty(upcoming_boss(raw_state)) >= 1.5:
+                floor = min(floor, 10)
+        except Exception:
+            pass
         if money - reroll_cost < floor:        # only spend surplus above interest
             return False
         if getattr(env, "shop_rerolls", 0) >= 3:   # cap planner rerolls per shop

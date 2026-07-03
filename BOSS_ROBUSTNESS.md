@@ -51,8 +51,13 @@ read the upcoming boss — already in state — and bias the build).
 - [ ] **Suit-debuff bosses (Layer 2)** — if the upcoming boss debuffs suit S and
       the committed hand is a Flush built on S, penalize/pivot in
       `target_hand_type` (needs dominant-suit plumbing).
-- [ ] **Deck thinning / save→spike economy** — the other two dec-057 levers
-      (attack the realized/proj≈0.40 gap; value money as spike potential).
+- [x] **Save→spike economy v1 (dec-060)** — reroll-to-assemble threshold 0.12→0.25
+      (hunt engines when the shop is mediocre, not just barren, instead of
+      buying junk); and THE SPIKE: `_planner_reroll_ok` relaxes the interest
+      floor before a hard (dec-059) boss so the war chest is spent on power at
+      the gate it saved for.
+- [ ] **Deck thinning** — the last dec-057 lever (attack the realized/proj≈0.40
+      gap; deck-thinning consumable logic + planner objective).
 
 ## Verification
 
