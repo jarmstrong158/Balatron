@@ -7,6 +7,8 @@ An agent that plays [Balatro](https://www.playbalatro.com/) autonomously. It beg
 
 **Goal:** consistently beat White Stake (reliably clear Ante 8) the way a skilled human does (~85%). This is an **active research project**, and the README reflects an evolving architecture — see [DECISIONS.md](DECISIONS.md), `REVAMP.md`, and `SOLVER.md` for the running design log. The honest state: the agent is competent through the early antes and the work is currently focused on the real wall — *build strength at depth* (antes 5–8), where blind targets grow exponentially and only a complete, fast-scaling engine clears them.
 
+**🎬 Watch it win:** [full recording of a winning run](https://github.com/jarmstrong158/Balatron/releases/download/the-win/the_win.mp4) (73 MB mp4) — the agent playing end to end, from the first blind through the ante 8 boss.
+
 ---
 
 ## Table of Contents
