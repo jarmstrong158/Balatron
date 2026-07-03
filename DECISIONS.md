@@ -475,6 +475,22 @@ kill rates in `blind_results` (baselines: Wall 67%, Needle 63%, Eye 62%, Water
 61%). Remaining levers (Eye multi-hand builds, suit-debuff pivots, deck
 thinning, save→spike) tracked in `BOSS_ROBUSTNESS.md`.
 
+### Save→spike economy v1 — 07-03 (`dec-060`, the power-side companion to dec-059)
+dec-059 raises the *bar* before a hard boss, but the ceiling audit found >75% of
+deep arrivals lack the *power* to clear a 2× boss — raising the bar does nothing
+if the agent can't build past it. This adds the power side, via the existing
+*gated reroll* path (no risky new leave-shop logic): (1) `PLANNER_REROLL_THRESHOLD`
+0.12→0.25 — hunt for a real engine when the shop is merely *mediocre*, not just
+barren, so surplus above the interest reserve buys power-finding instead of junk
+jokers (the agent chronically buys weak jokers and never builds power); (2) **the
+spike** — `_planner_reroll_ok` relaxes the interest floor to $10 before a hard
+(dec-059 difficulty ≥1.5) boss, so the war chest is spent finding/buying power at
+the gate it saved for (money is worthless if the run dies there). Reward side
+needed no change — `_check_gold_hoarding` already only penalizes above the $25
+interest cap. Buys are affordability-gated only (not floor-gated), so the lever
+acts through reroll behavior. Verify via money@ante-N + proj-margin in
+`build_progression` and per-boss kill rates.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
