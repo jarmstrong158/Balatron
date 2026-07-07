@@ -122,6 +122,21 @@ class TrainConfig:
     # Parallel game instances (ports 12346..12346+N-1); env 0 records
     num_envs: int = 1
 
+    # ── Confidence-gated planner deferral (dec-061) — INFERENCE / EVAL ONLY ──
+    # Route EXISTING planner compute by the policy's per-decision confidence:
+    # on a LOW-confidence decision, defer that single choice to the dec-034 build
+    # planner; on a HIGH-confidence decision, use the fast policy sample (today).
+    # These are NOT forwarded to PPOConfig — the gate never touches training. The
+    # gate is additionally hard-gated behind eval_mode, so training rollout
+    # collection is byte-for-byte unchanged regardless of these values. Default
+    # OFF, and even ON the default threshold=0.0 gates nothing (provable superset
+    # of current behavior). See agent/confidence_gate.py.
+    gate_enabled: bool = False           # opt-in; OFF = play path unchanged
+    gate_signal: str = "entropy"         # "entropy" or "top1" (which confidence)
+    gate_threshold: float = 0.0          # defer when confidence < threshold;
+                                         # 0.0 gates nothing, 1.0 gates every
+                                         # real (multi-legal) choice.
+
     def to_ppo_config(self) -> PPOConfig:
         return PPOConfig(
             learning_rate=self.learning_rate,

@@ -266,7 +266,8 @@ class BalatronNetwork(nn.Module):
     def get_action_and_value(self, state: torch.Tensor, head_idx: int,
                              action_mask: torch.Tensor,
                              action: torch.Tensor = None,
-                             deterministic: bool = False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+                             deterministic: bool = False,
+                             return_confidence: bool = False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get action, log probability, entropy, and value.
 
         This is the main interface for PPO — combines policy sampling
@@ -279,12 +280,20 @@ class BalatronNetwork(nn.Module):
             action: optional pre-selected action for log_prob computation
                     shape depends on action representation
             deterministic: if True, use argmax instead of sampling
+            return_confidence: if True, ALSO return the action-TYPE distribution's
+                entropy and top-1 probability (the confidence-gate signal, dec-061).
+                Read off the distribution already computed here — no extra forward
+                pass. Default False keeps the exact 5-tuple training relies on, so
+                this flag is inert on the training path.
 
         Returns:
             action: selected action tensor
             log_prob: log probability of the action
             entropy: policy entropy
             value: state value estimate
+            prior_kl: annealing heuristic prior-KL term
+            (if return_confidence) type_entropy: entropy of the masked type dist
+            (if return_confidence) top1_prob: top-1 probability of the type dist
         """
         action_logits, value = self.forward(state, head_idx)
 
@@ -406,6 +415,14 @@ class BalatronNetwork(nn.Module):
         # (forced) or when the policy already matches the heuristic.
         prior_type_dist = torch.distributions.Categorical(logits=prior_logits[:, :14])
         prior_kl = torch.distributions.kl.kl_divergence(prior_type_dist, type_dist)
+
+        if return_confidence:
+            # Confidence-gate signal (dec-061): the action-TYPE distribution's
+            # entropy and top-1 probability, read off the dist already built
+            # above. INFERENCE/EVAL only — training keeps the 5-tuple return.
+            top1_prob = type_dist.probs.max(dim=-1).values
+            return (action, total_log_prob, total_entropy, value, prior_kl,
+                    type_entropy, top1_prob)
 
         return action, total_log_prob, total_entropy, value, prior_kl
 

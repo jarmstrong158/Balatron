@@ -509,6 +509,53 @@ python eval_report.py eval_A.jsonl eval_B.jsonl
 `eval_seeds.txt` is a versioned bank of 300 fixed seeds. A full 300-seed eval is
 a multi-hour run.
 
+### Confidence-gated planner deferral (inference/eval-only)
+
+The policy owns the action *type*, the [planner](#planner-build-search) owns
+which-joker in the shop, and heuristics own tactical card math — a **fixed**
+hierarchy. The confidence gate makes that hierarchy **dynamic at decision time**:
+at each decision it reads the policy's confidence off the action-type distribution
+it already computes (no extra forward pass), and when the policy is **uncertain**
+it routes *that single decision* to the existing planner instead of the fast
+policy sample; when **confident**, the policy sample stands (today's behavior).
+
+This **routes existing planner compute by confidence — it does not add a new
+planner and it does not change training.** It is strictly an inference/eval-time
+routing change.
+
+- **Confidence signal** (`--gate-signal`): `entropy` (default) = normalized
+  certainty `1 − H/log(n_legal)` of the masked type distribution, or `top1` = the
+  top-1 action-type probability. Both are in `[0,1]`, high = certain; a forced
+  (single-legal) decision scores 1.0.
+- **Threshold** (`--gate-threshold`): defer when `confidence < threshold`. Its
+  extremes bound today's behavior — `0.0` gates **nothing** (the default), `1.0`
+  gates every real (multi-legal) choice — so the feature is a provable *superset*
+  of current behavior.
+- **Opt-in** (`--gate`, default **off**): off ⇒ the play path is byte-for-byte
+  unchanged. Deferral only has an opinion in the shop (it reuses the planner via a
+  `buy_joker` action, which the planner then resolves); off-shop decisions abstain
+  and keep the policy sample.
+- **Training is never touched.** The gate is hard-gated behind `eval_mode`, which
+  the training rollout loop sets `False` — so planner deferral can never enter the
+  on-policy distribution PPO learns from (overriding actions during collection
+  would reintroduce off-policy contamination — deliberately avoided).
+
+Each eval run reports **how often the gate fired** (deferral rate = planner-call
+count) and the **confidence distribution**, printed as a `[GATE]` line and written
+to `<out>.gate.json`. Compare ON vs OFF at a threshold over the *same* seed bank
+and diff the advance rate:
+
+```powershell
+# OFF (baseline — identical to prior eval behavior):
+python evaluate.py --checkpoint CKPT.pt --seeds eval_seeds.txt --out logs/eval_off.jsonl
+# ON at a threshold (route low-confidence decisions to the planner):
+python evaluate.py --checkpoint CKPT.pt --seeds eval_seeds.txt --out logs/eval_on.jsonl \
+    --gate --gate-signal entropy --gate-threshold 0.35
+# Compare advance rate (paired on shared seeds); planner-call count is in
+# logs/eval_on.jsonl.gate.json (deferred / decisions):
+python eval_report.py logs/eval_off.jsonl logs/eval_on.jsonl --seeds eval_seeds.txt
+```
+
 ---
 
 ## Training Phases

@@ -223,6 +223,32 @@ class ActionExecutor:
             return False
         return True
 
+    def planner_recommended_action(self, raw_state: dict,
+                                   action_mask: np.ndarray) -> Optional[np.ndarray]:
+        """The build planner's preferred action for THIS state as a 14-dim tensor,
+        or None if the planner has no opinion here (confidence-gate deferral
+        target, dec-061 — INFERENCE/EVAL only, never called on the training path).
+
+        Pure REUSE of the dec-034 planner seam: the planner only has authority in
+        the SHOP (which-joker), so deferral returns a ``buy_joker`` action there
+        (when legal). Executing that routes the WHICH-joker choice through the
+        existing planner (``_planner_pick_joker`` open-slot / ``_planner_pick_swap``
+        full-slot / reroll-to-assemble) exactly as when the policy itself samples
+        buy_joker — no planning is reimplemented. Returns None on non-shop states,
+        without ``policy_authority`` (heuristic-drives-everything legacy), or when
+        buy_joker is illegal (no affordable buyable joker) — in those cases the
+        gate abstains and the policy's own sample stands."""
+        from environment.action_space import ACTION_BUY_JOKER
+        if not self.policy_authority:
+            return None
+        if raw_state.get("state", "") != "SHOP":
+            return None
+        if action_mask[ACTION_BUY_JOKER] <= 0:
+            return None
+        a = np.zeros(14, dtype=np.float32)
+        a[0] = float(ACTION_BUY_JOKER)  # planner picks the slot at execution time
+        return a
+
     def _encode_executed_action(self, api_method: str,
                                 api_params: Optional[dict],
                                 sampled_action: np.ndarray
