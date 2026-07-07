@@ -50,6 +50,7 @@ import torch
 
 from agent.network import BalatronNetwork, create_network, get_head_index
 from agent.ppo import PPOConfig, PPOTrainer
+from agent.confidence_gate import ConfidenceGate, gate_is_active
 from environment.game_state import GameStateManager, STATE_VECTOR_SIZE
 from environment.action_space import (
     build_action_mask, ActionDecoder, ACTION_HEAD_SIZE,
@@ -154,6 +155,16 @@ class Trainer:
         self.policy_authority = True
         self.action_executor = ActionExecutor(
             policy_authority=self.policy_authority)
+
+        # Confidence-gated planner deferral (dec-061) — INFERENCE / EVAL ONLY.
+        # Routes existing planner compute by the policy's per-decision confidence.
+        # Hard-gated behind self.eval_mode in _collect_rollout (see gate_is_active),
+        # so training rollout collection never activates it. Opt-in + default OFF.
+        self.gate = ConfidenceGate(
+            enabled=getattr(config, "gate_enabled", False),
+            signal=getattr(config, "gate_signal", "entropy"),
+            threshold=getattr(config, "gate_threshold", 0.0),
+        )
 
         # One session per parallel game instance; env 0 owns the real
         # win recorder, the rest get no-ops.
@@ -550,6 +561,13 @@ class Trainer:
             for env in self.sessions:
                 await env.game.disconnect()
         _out = self.eval_out_path or "logs/game_history.jsonl"
+        # dec-061: confidence-gate telemetry for THIS eval run — deferral rate
+        # (how often a decision was routed to the planner = planner-call count)
+        # and the confidence distribution. Written to <out>.gate.json so an
+        # ON/OFF comparison can attribute advance-rate changes. Only when the
+        # gate is enabled; OFF eval prints/writes nothing new.
+        if self.gate.enabled:
+            self.gate.dump(self.eval_out_path)
         print(f"[EVAL] done — {total} seeds played this run; outcomes in "
               f"{_out}. Run: python eval_report.py {_out}", flush=True)
 
@@ -867,7 +885,13 @@ class Trainer:
             # Get head index
             head_idx = get_head_index(game_state_name)
 
-            # Network forward pass
+            # Network forward pass.
+            # Confidence-gated planner deferral (dec-061) is LIVE only on the
+            # inference/eval path (eval_mode) and only when opted in — training
+            # rollout collection passes eval_mode=False so gate_active is False
+            # and this block is byte-for-byte unchanged there (the on-policy PPO
+            # distribution is never altered).
+            gate_active = gate_is_active(self.gate, self.eval_mode)
             with torch.no_grad():
                 state_t = torch.tensor(state_vec, dtype=torch.float32).unsqueeze(0)
                 mask_t = torch.tensor(action_mask, dtype=torch.float32).unsqueeze(0)
@@ -876,13 +900,41 @@ class Trainer:
                     state_t = state_t.cuda()
                     mask_t = mask_t.cuda()
 
-                action_t, log_prob_t, _, value_t, _ = self.network.get_action_and_value(
-                    state_t, head_idx, mask_t
-                )
+                if gate_active:
+                    (action_t, log_prob_t, _, value_t, _,
+                     conf_entropy_t, conf_top1_t) = self.network.get_action_and_value(
+                        state_t, head_idx, mask_t, return_confidence=True
+                    )
+                else:
+                    action_t, log_prob_t, _, value_t, _ = self.network.get_action_and_value(
+                        state_t, head_idx, mask_t
+                    )
 
             action_np = action_t[0].cpu().numpy()
             log_prob = log_prob_t[0].cpu().item()
             value = value_t[0].cpu().item()
+
+            # Confidence gate: on a LOW-confidence decision, route this single
+            # choice to the EXISTING build planner instead of the fast policy
+            # sample (dec-061). We swap the sampled action for a buy_joker action,
+            # which the planner (dec-034) then resolves (pick/swap/reroll) — no
+            # planning is reimplemented. High-confidence decisions keep the policy
+            # sample (the fast path). Inference/eval only (see gate_active).
+            if gate_active:
+                n_legal = int((action_mask[:14] > 0).sum())
+                conf = self.gate.confidence(
+                    entropy=float(conf_entropy_t[0].item()),
+                    top1=float(conf_top1_t[0].item()),
+                    n_legal=n_legal,
+                )
+                deferred = False
+                if self.gate.should_defer(conf):
+                    rec = self.action_executor.planner_recommended_action(
+                        raw_state, action_mask)
+                    if rec is not None:
+                        action_np = rec
+                        deferred = True
+                self.gate.record(conf, deferred)
 
             # Decode sampled action tensor to API call
             api_method, api_params = self.action_executor._action_to_api_call(

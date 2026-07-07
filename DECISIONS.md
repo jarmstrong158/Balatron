@@ -493,6 +493,44 @@ acts through reroll behavior. Verify via money@ante-N + proj-margin in
 
 ---
 
+### Confidence-gated planner deferral — 07-07 (`dec-061`, inference/eval-only routing)
+The policy, planner, and heuristics interact in a *fixed* hierarchy: the policy
+owns the action TYPE, the dec-034 build planner owns which-joker (in the shop),
+heuristics own tactical card math. This makes that hierarchy **dynamic at decision
+time, on the inference/eval path only**: at each decision we read the policy's
+confidence off the action-TYPE distribution it *already* computes (no extra
+forward pass) and, when it is **uncertain**, route that single decision to the
+existing planner instead of the fast policy sample; when it is **confident**, the
+policy sample stands (today's behavior). This **routes existing planner compute by
+confidence — it adds no new planner and does not change training.**
+
+- **Signal** (`gate_signal`): `top1` = the top-1 action-type probability, or
+  `entropy` = normalized certainty `1 − H/log(n_legal)` of the masked type dist.
+  Both in [0,1], high = certain. A forced (single-legal) decision is 1.0.
+- **Threshold** (`gate_threshold`): defer when `confidence < threshold`. The
+  extremes bound today's behavior — `0.0` gates *nothing* (the default), `1.0`
+  gates every real (multi-legal) choice — so the feature is a provable **superset**
+  of current behavior.
+- **Opt-in** (`gate_enabled`, default **OFF**): off ⇒ the play path is byte-for-byte
+  unchanged. Deferral reuses the planner via a `buy_joker` action (the planner then
+  picks/swaps/rerolls, dec-034); it only has an opinion in the shop, so off-shop
+  decisions abstain and keep the policy sample.
+- **TRAINING IS UNTOUCHED (deliberate):** the gate is hard-gated behind
+  `eval_mode` (`gate_is_active`), which training rollout collection sets False.
+  Overriding actions during collection would reintroduce off-policy contamination
+  into the on-policy distribution PPO learns from — so the gate never fires there.
+  The gate config is *not* forwarded to `PPOConfig`.
+- **Measurement:** `run_eval` writes `<out>.gate.json` (deferral rate = planner-call
+  count, confidence distribution) and prints a `[GATE]` summary. Compare ON vs OFF
+  at a threshold by running `evaluate.py` twice (with/without `--gate`) over the
+  same seed bank and diffing advance rate via `eval_report.py` (§ README).
+- Files: `agent/confidence_gate.py` (gate + telemetry), `agent/network.py`
+  (`return_confidence` flag), `training/action_executor.py`
+  (`planner_recommended_action`), the `_collect_rollout` seam, and `evaluate.py`
+  flags. Tests: `tests/test_confidence_gate.py`.
+
+---
+
 ## Gotchas & Hard-Won Lessons
 
 ### 1. The `won` flag means "reached the ante-8 boss," NOT "beat it"  *(critical)*

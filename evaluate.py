@@ -51,6 +51,17 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="0 = use all seeds")
     ap.add_argument("--out", default=None,
                     help="results file (default logs/eval_<checkpoint>.jsonl)")
+    # Confidence-gated planner deferral (dec-061) — INFERENCE/EVAL ONLY. Off by
+    # default so this reproduces prior eval behavior exactly. Turn on to route
+    # LOW-confidence decisions to the existing planner; compare the two runs with
+    # eval_report.py (advance rate) and the <out>.gate.json (planner-call count).
+    ap.add_argument("--gate", action="store_true",
+                    help="enable confidence-gated planner deferral (eval only)")
+    ap.add_argument("--gate-signal", default="entropy", choices=["entropy", "top1"],
+                    help="confidence signal: 'entropy' or 'top1' (default entropy)")
+    ap.add_argument("--gate-threshold", type=float, default=0.0,
+                    help="defer when confidence < threshold; 0.0 gates nothing "
+                         "(reproduces gate-off), 1.0 gates every real choice")
     args = ap.parse_args()
 
     from training.config import TrainConfig
@@ -81,6 +92,13 @@ def main():
     cfg.curriculum_enabled = False
     cfg.record_wins = False
     cfg.device = "cpu"
+    # dec-061 confidence-gated planner deferral (inference/eval only)
+    cfg.gate_enabled = args.gate
+    cfg.gate_signal = args.gate_signal
+    cfg.gate_threshold = args.gate_threshold
+    if args.gate:
+        print(f"[EVAL] confidence gate ON: signal={args.gate_signal} "
+              f"threshold={args.gate_threshold}", flush=True)
 
     trainer = Trainer(cfg, checkpoint_path=args.checkpoint)
     trainer.eval_out_path = out_path
