@@ -49,6 +49,9 @@ REGIMES = [
      "R stepped ~6x: episode-tracker stats-isolation fix (N=3 had been "
      "under-counting per-episode reward). Gameplay was unchanged (ante/WR flat) "
      "— so compare R only WITHIN a regime, never across this line."),
+    (3749, "dec-058 remeasure (LR fixed)",
+     "LR lock verified via dec-061; pre-boundary data ran ~1/3 of time at "
+     "damaged 2.7e-4 LR"),
 ]
 
 UPDATE_RE = re.compile(
