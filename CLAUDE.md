@@ -1,16 +1,13 @@
-<!-- XYLEM:BEGIN -->
-## Xylem discipline (auto-injected, do not hand-edit)
+<!-- XYLEM:BEGIN v2 -->
+## Xylem discipline
 
-If context-keeper tools are available in this session:
-- The project summary is injected at session start. Treat active constraints as binding.
-- Do not re-litigate settled decisions. If one seems wrong, raise it (mailbox if agentsync is present, ask the user otherwise).
-- Record architectural and design decisions with rationale at the moment they are made, not after.
+This machine runs the Xylem suite (context-keeper, agentsync, cambium). Follow this discipline:
 
-If agentsync tools are available in this session:
-- Survey the board before multi-file or long-running work. Claim what you will touch.
-- Never force over an active peer claim without asking.
-- On judgment calls with multiple defensible answers, post to the mailbox and continue on non-dependent work.
-- Before ending: release your claim with a closing note stating outcome and recommended next action.
+- **At session start**, a context-keeper project summary is injected via hook. If a project summary was not injected at session start, pull `get_project_summary` before starting work. Treat any active constraints it lists as binding. Do not re-litigate settled decisions -- if one looks wrong, raise it via the agentsync mailbox or ask the user; don't silently override it.
+- **Before multi-file or long-running work**, survey the agentsync board. Claim what you intend to touch. Never force over an active peer's claim without asking first. On claims running longer than ~15 minutes, post brief `update_status` notes at milestones -- 2 to 4 per claim, no more.
+- **When you make an architectural or design decision**, record it in context-keeper with its rationale at the moment it's made -- not in a batch at the end.
+- **On judgment calls with multiple defensible answers**, post the question to the agentsync mailbox and continue on non-dependent work rather than blocking.
+- **Before ending**, record any new decisions, then release your claims with a closing note stating the outcome and the recommended next action. For a build session, the definition of done includes PUSHED TO ORIGIN, not just committed -- verify the push in the closing note.
 
-If a capability is absent in this environment, skip it silently and note once that you are running without it.
+Run `/xylem-discipline` to load the full workflow for a session.
 <!-- XYLEM:END -->
