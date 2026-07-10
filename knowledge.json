@@ -732,6 +732,43 @@
           "balatron"
         ]
       }
+    },
+    {
+      "id": "k-2c48878b",
+      "type": "memory",
+      "kind": "constraint",
+      "content": "Every time you record a dec-NNN in Context Keeper, mirror it into DECISIONS.md in the SAME commit: add a `### Title \u00e2\u20ac\u201d MM-DD (\\`dec-NNN\\`)` section (2-5 lines, matching the existing prose style) under \"Architecture & Design Decisions\", just before the \"## Gotchas & Hard-Won Lessons\" header. DECISIONS.md and .context/ must stay in sync.",
+      "why": "DECISIONS.md is the human-readable design log the README points readers to, but it is maintained separately from the Context Keeper database. It silently drifted 13 decisions / 4 days out of date (stuck at dec-034 while dec-035..047 were only in .context/), so anyone reading the repo's advertised log got a stale picture.",
+      "tags": [
+        "docs",
+        "process",
+        "decisions-log",
+        "mirror",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "con-016"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.405049+00:00",
+      "updated_at": "2026-07-10T16:55:23.511625+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 0,
+        "endorsements": [
+          {
+            "by": "jonny-desktop",
+            "at": "2026-07-10T16:55:08.897390+00:00",
+            "note": "Universal engineering hygiene: keep the machine-readable decision store and the human-readable decision log in lockstep by mirroring each decision in the same commit. Project-agnostic."
+          }
+        ],
+        "projects": [
+          "balatron"
+        ]
+      }
     }
   ]
 }
