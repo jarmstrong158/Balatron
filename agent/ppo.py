@@ -847,8 +847,18 @@ class PPOTrainer:
             os.fsync(f.fileno())
         os.replace(tmp, path)
 
-    def load_checkpoint(self, path: str):
-        """Load network and optimizer state."""
+    def load_checkpoint(self, path: str, lr_override: Optional[float] = None):
+        """Load network and optimizer state.
+
+        dec-058 follow-up: the optimizer ``state_dict`` carries the LR that was
+        live when the checkpoint was saved (a legacy checkpoint can hold the
+        dec-039 damaged 2.7e-4). ``load_state_dict`` restores it verbatim, so
+        every recycle silently re-seeds the stale LR. dec-058 relied on a
+        separate, ``anneal_lr``-gated ``set_learning_rate`` in ``run()`` to undo
+        it — a band-aid far from where the LR re-enters. ``lr_override`` closes
+        that window: the lock is re-asserted here, atomically with the load, so
+        no caller or code path can carry a stale LR out of a checkpoint.
+        """
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         try:
             self.network.load_state_dict(checkpoint["network_state_dict"])
@@ -898,6 +908,11 @@ class PPOTrainer:
         # dec-058: restore value-norm stats (identity defaults for old checkpoints)
         self.ret_mean = float(checkpoint.get("ret_mean", 0.0))
         self.ret_std = float(checkpoint.get("ret_std", 1.0))
+        # dec-058 follow-up: re-assert the LR lock AFTER the optimizer state is
+        # loaded (both the normal and shape-migration paths reach here), so the
+        # stale checkpoint LR can never survive a recycle.
+        if lr_override is not None:
+            self.set_learning_rate(lr_override)
 
     def get_stats(self) -> dict:
         """Get trainer statistics."""

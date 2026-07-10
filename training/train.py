@@ -190,7 +190,13 @@ class Trainer:
 
         # Load checkpoint if provided
         if checkpoint_path:
-            self.ppo.load_checkpoint(checkpoint_path)
+            # dec-058 follow-up: lock the LR to 1e-4 AT LOAD TIME. The optimizer
+            # state_dict carries the LR from when it was saved (a legacy .pt can
+            # hold the dec-039 damaged 2.7e-4); passing lr_override re-asserts
+            # the lock atomically with the load, so the reset can no longer slip
+            # through the window before run()'s startup lock fires.
+            lr_lock = 1.0e-4 if config.anneal_lr else None
+            self.ppo.load_checkpoint(checkpoint_path, lr_override=lr_lock)
             self.global_step = self.ppo.total_steps
             self.num_updates = self.ppo.total_updates
             print(f"Loaded checkpoint: {checkpoint_path}")
