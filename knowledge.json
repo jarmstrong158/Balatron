@@ -1,3 +1,731 @@
 {
-  "items": []
+  "items": [
+    {
+      "id": "k-b1307a13",
+      "type": "memory",
+      "kind": "decision",
+      "content": "Adopted the BC-kickstart path to real policy learning: (a) store EXECUTED actions with current-policy log-probs (31c527a), (b) BC auxiliary loss imitating heuristic OVERRIDES only, bc_coef annealed 0.5->0 over 200 updates, anchored + checkpoint-persisted (52836ec). Authority-lifting sequenced AFTER distillation. VERIFIED: first live update BC 3.794@0.50(11%), policy loss up ~30x; weight-delta 208->212 vs pre-BC shows policy heads moving ~2x faster (play 0.35->0.82%, shop 0.58->1.08%) while value head settles and entropy declines 2.70->2.60. IMPORTANT CORRECTION (d3c9379): the 'KL pinned at 0.0000' observation was partly a METRICS BUG - approx_kl fed the target_kl early-stop but was never accumulated into the printed metrics dict, so the update line showed 0.0 since the beginning. First clip-fraction readout (CF 0.150, healthy clipping) exposed the contradiction. Real KL was likely healthy through the BC era; the original frozen-era diagnosis still stands on the weight-delta evidence (which measured actual weights, not the broken display). Update line now prints true KL at 6 decimals + CF (73be3ce, d3c9379).",
+      "why": "User proposed supervised-then-RL; this maps to the classic BC-kickstart recipe (AlphaGo-style). The heuristic layer is a free teacher generating unlimited (state, action) pairs, and the executed-action fix had already built the data pipeline. A single annealed auxiliary loss avoids the hard supervised->RL handoff cliff; imitating ONLY overridden steps (bc_flag) avoids self-imitation sharpening. Distillation effect verified: teacher action log-prob -3.39 -> -0.01 under BC-heavy updates.",
+      "tags": [
+        "behavior-cloning",
+        "ppo",
+        "training",
+        "policy-authority",
+        "kickstart",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-004"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-f8e4dbf2",
+      "type": "memory",
+      "kind": "decision",
+      "content": "Multi-instance training DEPLOYED at N=3 (9250eac, 2026-06-11), VERDICT: KEEP. Measured rates: N=1 196 steps/min, N=2 309 (+58%), N=3 433 (+40% over N=2; 2.2x single, 74% scaling efficiency). Load at N=3: CPU 51%/16 cores, RAM 21.1GB/31 - both rollback triggers (rate gain <15%, CPU >85%) cleared with wide margin; headroom exists for N=4 if ever needed (diminishing returns expected). Components: per-env RolloutBuffers + per-env GAE + concatenated minibatching (9982cea); GameStateManager per-port; EnvSession refactor with env_id-threaded transitions, env-keyed EpisodeTracker, port-owner-PID-scoped kills, NullRecorder for env>0, --num-envs CLI (6151355); supervisor multi-port with per-port debounce (38459ed+12f0c42; lesson: blanket string replaces can invalidate later block replaces, grep-verify transformed loops). Single scaling knob: NUM_ENVS in supervise.py. At 433 steps/min: ~620k steps/day, an update every ~5 min, win signals ~2.2x faster than single-env.",
+      "why": "Vectorized environments are the standard PPO answer; our envs are just game clients instead of fast simulators. One brain, many bodies: games hold no learnable state, so there is NO merge at save time \u00e2\u20ac\u201d the convergence happens every update when all envs' transitions are consumed by one gradient step, and the checkpoint is the single network's weights exactly as before. asyncio interleaving is nearly free since the trainer spends most wall-clock awaiting the game.",
+      "tags": [
+        "multi-instance",
+        "vectorized-envs",
+        "ppo",
+        "throughput",
+        "architecture",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-005"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-26276969",
+      "type": "memory",
+      "kind": "decision",
+      "content": "The long-run \"Balatro slows down\" is an orphaned-launcher process leak, not a game or trainer-memory leak. Fixed with a supervisor reaper (reap_orphan_launchers) that runs every 30s and kills balatrobot serve launchers with no live Balatro.exe descendant.",
+      "why": "Process audit found 140 orphan processes (70 balatrobot.exe + python wrappers, ~3GB RSS) accumulating ~1 per ~10min over 11.7h. The live tree is uvx.exe -> python(balatrobot serve) -> python(serve) -> Balatro.exe. On restart the code kills the port-owner game plus the tracked uvx Popen handle, but uvx has already exited after bootstrapping so the middle python launcher is reparented and survives every restart. The pile-up thrashes the 16-core scheduler and pages the trainer out, producing the 1/n FPS collapse. A supervisor-side reaper is the right home: it has the multi-port view, runs every 30s, and is port-agnostic so it is safe with N parallel games.",
+      "tags": [
+        "performance",
+        "process-leak",
+        "supervisor",
+        "crash-recovery",
+        "slowdown",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-006"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-005887c3",
+      "type": "memory",
+      "kind": "decision",
+      "content": "Trainer per-update FPS decays over its multi-hour lifetime (root cause open). Mitigated by a supervisor auto-recycle that does a clean full-stack restart when FPS sits below an ABSOLUTE floor (40) for 3 consecutive updates, once the trainer is >30min old.",
+      "why": "A full-stack restart reliably resets FPS, so the remedy is proven even though the cause is not. The supervisor (owns stack lifecycle, runs every 30s) parses the newest trainer log's recent FPS values and recycles via kill_trainer + kill_strays. THRESHOLD DESIGN went through two wrong attempts before landing on absolute-floor-with-sustain: (1) fixed floor 30 [d52efac] \u00e2\u20ac\u201d fine in hindsight but I wrongly thought it too lenient; (2) peak-relative 0.40*peak [0e43966] \u00e2\u20ac\u201d WRONG and caused a ~30-min full-stack-teardown LOOP that the user saw as 'all of balatron crashed'. The bug: the fresh FPS is a first-update BURST (~1800-2060) that settles to a healthy ~250 within 30min, so '250 < 40% of 1817' recycled a perfectly fast trainer, repeatedly. The burst peak is NOT a sustainable baseline, so relative-to-peak is meaningless. CORRECT design [08e9026]: absolute floor FPS<40 that must hold for FPS_RECYCLE_SUSTAIN=3 consecutive updates. Genuine degradation runs the rate to ~15-40 over hours (cadence ~40-70min), so an absolute floor catches it at the right time; the burst->250 settle never touches 40 (no early trip); sustained-breach ignores one-off deep-run dips (a single long ante-8 boss update). min-age 30min is a redundant guard.",
+      "tags": [
+        "performance",
+        "slowdown",
+        "supervisor",
+        "trainer",
+        "auto-recycle",
+        "1-over-n",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-007"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-c2523e0b",
+      "type": "memory",
+      "kind": "decision",
+      "content": "Added a 16-feature SHOP_CONTEXT block to the observation (STATE_VECTOR_SIZE 817->833) so the policy makes INFORMED shop buys under Path A. The trained policy is preserved automatically \u00e2\u20ac\u201d ppo.load_checkpoint zero-pads a grown state vector, no migration script needed.",
+      "why": "Surface the computed signals the heuristic used, so the policy's shop judgment is informed (and can learn to disagree): per-shop-joker relative marginal value (_estimate_joker_value / build power), build power (log), coverage flags (chip/mult/xmult/econ/scaling/retrigger), slot/reroll/economy pressure, has-scoring-joker, ante, #positive-shop-jokers. Keep the MATH computed (rules) but feed its RESULTS into the observation \u00e2\u20ac\u201d the same principle as the hand-eval block. Populated during SHOP only (zero otherwise), mirroring hand-eval's play-only gating.",
+      "tags": [
+        "observation",
+        "shop",
+        "state-vector",
+        "checkpoint-migration",
+        "real-rl",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-011"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-36e19409",
+      "type": "memory",
+      "kind": "decision",
+      "content": "CORRECTION: the \"entropy collapse\" at update ~333 (Ent 2.6\u00e2\u2020\u20190.24) was NOT a policy event \u00e2\u20ac\u201d it was a measurement fix. The target_used/card_used gating in network.py removed ~2.9 nats of phantom non-learnable entropy from unused heads. The TRUE policy entropy has been ~0.24 the whole time; the prior 2.6 reading was an artifact.",
+      "why": "The trajectory is decisive: Ent was 2.5-2.7 (near-maximal) for updates 207-330, then dropped to ~0.21 in a single step at update 333, and has sat at 0.21-0.25 since. The drop of ~2.4-2.9 nats \u00e2\u2030\u02c6 ln(19)\u00e2\u2030\u02c62.94. network.py mtime is 2026-06-13 07:25:34, falling exactly between the update-330 restart (06:48 log) and the update-338 restart (07:30 log) \u00e2\u20ac\u201d and network.py:313-323 carries the fix and a comment: 'Folding [unused heads] into the totals unconditionally pinned total_entropy at a fixed ~2.9 floor (the entropy flat ~2.6, never converging symptom)... Gate it off... (audit 06-13 CRITICAL).' So the old code added the unused TARGET head's constant uniform ln(NUM_TARGETS)\u00e2\u2030\u02c62.9-nat term (and 12 card Bernoullis) to every step's entropy regardless of whether those heads were sampled. The gating fix zeroed that phantom term, revealing the honest type-head entropy ~0.24 that was there all along.",
+      "tags": [
+        "rl",
+        "entropy",
+        "measurement-artifact",
+        "network",
+        "ppo",
+        "balatron",
+        "correction",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-014"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-e76a3089",
+      "type": "memory",
+      "kind": "decision",
+      "content": "ROOT CAUSE of the recurring \"Balatron is always slow after I'm away 7-8h\": external RAM starvation, NOT internal FPS decay. steamwebhelper.exe leaks to 13-14GB over hours \u00e2\u2020\u2019 ~94% system RAM \u00e2\u2020\u2019 Windows pages Balatron out \u00e2\u2020\u2019 trainer crawls to ~12 steps/min. Reclaiming the one leaked process dropped RAM 95.4%\u00e2\u2020\u201938.6%. Rebuilt supervise.py to detect crawls fast, cascade kills, enforce singleton, and reclaim the external hog.",
+      "why": "Direct measurement found the real cause. Top RAM consumer was steamwebhelper.exe at 13.1GB (one process; normal <1GB) with system RAM at 94%; Balatron's entire footprint was only ~3.9GB (3 games + trainer + ffmpeg) \u00e2\u20ac\u201d it was the VICTIM. Killing the single leaked steamwebhelper dropped system RAM from 95.4% to 38.6% (~19GB freed). The '1/n FPS decay' the prior fixes chased was the symptom of progressive paging as RAM filled. Evidence of detector failure: supervisor.log showed a trainer CHURNING with 'newest checkpoint 363 min old' caught only after 150 min, and the live trainer was at update 393 while the newest checkpoint (392) was 502 min old \u00e2\u20ac\u201d one update took ~8.4h (~12 steps/min) yet slipped EVERY detector (heartbeat still ticked so not FROZEN; 12/min was above the 10/min STALL floor; CHURN waited 150 min; cumulative-FPS read 191 so FPS-floor never fired; trainer <3h so age cap never fired). Also found non-cascading kills (kill_trainer killed only Select-First-1 pid, leaving duplicate trainers and orphan launchers to accumulate until RAM exhausted) and duplicate supervisors each spawning a trainer.",
+      "tags": [
+        "supervisor",
+        "memory-leak",
+        "steam",
+        "infrastructure",
+        "balatron",
+        "root-cause",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-016"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 6,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-1838a2d2",
+      "type": "memory",
+      "kind": "decision",
+      "content": "Memory-guardian trigger lowered 90%->72% and made crawl-aware; AND escalated to closing the WHOLE Steam client (not just restarting steamwebhelper). The games crawl to ~30 steps/min at ~75-83% RAM (Steam leak) \u00e2\u20ac\u201d below the old 90% trigger \u00e2\u20ac\u201d so the guardian never fired and the supervisor futilely recycled the trainer for hours. Now it reclaims before the crawl zone, reclaims-before-recycling on a crawl, and fully shuts Steam down so the helper can't respawn and re-leak.",
+      "why": "Decisive test: reclaiming steamwebhelper dropped RAM 75%->53.5% and step rate jumped 30->406 steps/min instantly. So the games are memory-sensitive enough to crawl in the 75-83% RAM band, but the guardian's 90% trigger never reached. Two compounding gaps: (1) the trigger sat above the crawl-onset zone; (2) the supervisor's crawl detection recycled the trainer \u00e2\u20ac\u201d the WRONG remediation for an external-RAM crawl, since a fresh trainer faces the same pressure and crawls again (and at 30 steps/min a rollout needs ~3h but the 11min crawl-recycle kills it first, so it can never checkpoint past 528 \u00e2\u20ac\u201d an infinite loop). Fix: MEM_CRITICAL_PCT 90->72 (reclaim the hog before the crawl zone) AND in the CRAWL branch reclaim_external_hog() first, skipping the recycle if it freed memory.",
+      "tags": [
+        "supervisor",
+        "memory-leak",
+        "steam",
+        "infrastructure",
+        "balatron",
+        "tuning",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-018"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-0dde1c8c",
+      "type": "memory",
+      "kind": "decision",
+      "content": "Policy plateaued at the heuristic ceiling (~ante 4) for 112 updates. Confirmed via newly-logged explained_variance that the value function is FINE (EV~0.7), NOT the bottleneck \u00e2\u20ac\u201d ruling out the long-deferred 'stage 2' value-fn/shared-trunk surgery. Two real causes: LR had annealed to 7.5e-5 (fixed: total_timesteps 1.5M->5M + LR floor 1e-4, restoring LR to 2.3e-4) and the policy needed more exploration room (prior_coef still annealing). VALIDATED (06-17): the fix worked \u00e2\u20ac\u201d post-restore the plateau loosened, ante trend turned RISING (significance-aware: drift exceeds run-to-run noise) and KL roughly doubled. So the lever was LR + exploration, NOT the value function. Live progress is tracked on the dashboard, not here (transient).",
+      "why": "Confirm before structural surgery (after burning a fix on a disproven reward hypothesis earlier this session). explained_variance wasn't logged, so we added it. First read EV=0.69 \u00e2\u20ac\u201d value fn explains 69% of return variance, moderate-decent, NOT the 0/negative of a broken value head; the high VL is mostly a SCALE artifact (large returns R~22, gamma=0.995), not poor fit. That rules out decoupling the value head / cutting vf_coef. Separately, LR had decayed via anneal_lr toward 0 (and a hard training-stop at the old 1.5M total_timesteps, ~14h out); fixed by total_timesteps 1.5M->5M (restores LR to 2.3e-4) + LR floor 1e-4.",
+      "tags": [
+        "rl",
+        "plateau",
+        "value-function",
+        "learning-rate",
+        "ppo",
+        "balatron",
+        "hypothesis-disproven",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-019"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-13ddfd15",
+      "type": "memory",
+      "kind": "decision",
+      "content": "Self-imitation learning (SIL): Phase 1 (capture, behavior-neutral) AND Phase 2 (replay demos through an imitation loss) both now BUILT + committed. Phase 2 is OFF by default (sil_coef=0.0); activate by setting sil_coef>0. Replays saved winning/high-ante runs so the policy reinforces its own rare successes instead of forgetting them.",
+      "why": "Self-imitation reuses machinery that already works: the BC loss (ppo.py bc_loss = -(bc_flags\u00c2\u00b7bc_log_probs)/bc_count) already maximizes the policy's log-prob of flagged good actions \u00e2\u20ac\u201d SIL just feeds it from a persistent buffer of past wins instead of in-rollout heuristic overrides. Split into phases so capture (pure data logging, behavior-neutral) deploys immediately and safely alongside the live entropy experiment, while the policy-touching SIL loss waits for the entropy verdict. Capture hooks at proven seams: append real steps at the store_transition call; flush in _reset_run_state (the universal run-finished hook, called on GAME_OVER + crash + abandon) keeping only runs that won OR reached ante>=demo_min_ante(6); discard the rest. DemoBuffer persists to npz because the supervisor recycles the trainer every ~20-30 min \u00e2\u20ac\u201d without disk persistence every captured win is lost on restart (root reason we have 74 wins and zero usable trajectories). ALL envs feed it (capture is just data, unlike the single-window video recorder which is env-0-only).",
+      "tags": [
+        "self-imitation",
+        "SIL",
+        "demo-buffer",
+        "behavior-cloning",
+        "real-rl",
+        "plateau",
+        "exploration",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-022"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-3d15177c",
+      "type": "memory",
+      "kind": "decision",
+      "content": "Hardened all persistent writes to be crash-safe (atomic temp+fsync+os.replace) and added demo-buffer dim-migration + corrupt-checkpoint fallback. From a two-agent project audit; fixes data-loss/wedge risks on the paths the supervisor hard-kills into. Committed 14eca8e. Behavior-neutral.",
+      "why": "Atomic write pattern (write to path+'.tmp', flush, os.fsync, os.replace) makes every persisted file always either old-complete or new-complete \u00e2\u20ac\u201d os.replace is atomic on same-volume NTFS. Applied to ppo.save_checkpoint, demo_buffer.save, and episode_tracker JSON (new _atomic_json helper). Demo _load now zero-pads/truncates state columns on a dim change (mirrors the proven ppo.load_checkpoint migration) and never overwrites a possibly-good on-disk file on a transient read error. supervise.newest_checkpoint validates via zipfile.is_zipfile (torch .pt IS a zip \u00e2\u20ac\u201d verified \u00e2\u20ac\u201d so no torch import needed in the supervisor) and falls back to next-newest so one corrupt file can't boot-loop. demo_save_every 3->1 + save() in train.py run() finally so captures survive the frequent recycle. CRITICAL CATCH during impl: ppo.py did not import os, so save_checkpoint would have NameError'd on os.fsync the first save \u00e2\u20ac\u201d added the import (verified hasattr).",
+      "tags": [
+        "reliability",
+        "crash-safety",
+        "atomic-writes",
+        "checkpoint",
+        "demo-buffer",
+        "data-integrity",
+        "audit",
+        "ops",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-025"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 6,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-b084453e",
+      "type": "memory",
+      "kind": "decision",
+      "content": "Built state-injection CURRICULUM (plan A step 2, dec-030): harvest ante-4/5 partial-build states (BalatroBot save endpoint) and start an annealed fraction of rollouts from them (load), so wins become frequent and advantages become real where engines matter. Verified the save/load endpoints work first. Committed 777ab9f.",
+      "why": "Curriculum attacks the wall at its source: if you start rollouts from ante-4/5 partial-build states, wins jump from 0.5% to 10-30%, the engine-stacking regime becomes dense, and advantages become real \u00e2\u20ac\u201d giving the (now decoupled, un-freezable) policy something to learn from. DE-RISKED FIRST (derisk_saveload.py): stopped the trainer, called BalatroBot save then load on a live game over the API \u00e2\u20ac\u201d save wrote an 8.8KB .jkr, load restored the run, both success=True. So state-injection is feasible (the endpoints exist and work; the trainer just never used them). Build: (a) harvest \u00e2\u20ac\u201d when a FRESH run reaches ante 4/5 with >=1 xmult, execute_action('save', {path}) to seeds/ (FIFO-capped at seed_capacity=200), hooked at the build-progression ante boundary; (b) load-on-reset \u00e2\u20ac\u201d at the MENU run-start seam (train.py ~1828), with annealed prob _curriculum_prob() (0.4 at U0 -> 0 over curriculum_anneal_updates=800), execute_action('load', {seed}) instead of 'start', fallback to fresh start on failure; (c) EnvSession.from_curriculum tags loaded runs so they aren't re-harvested. Self-bootstraps: library empty -> fresh runs harvest -> loads engage. Anneals to 0 so training FINISHES on full self-play (avoids the policy only knowing seeded states).",
+      "tags": [
+        "curriculum",
+        "state-injection",
+        "plateau",
+        "credit-assignment",
+        "balatrobot",
+        "save-load",
+        "real-rl",
+        "plan-A",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-030"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-35828620",
+      "type": "memory",
+      "kind": "decision",
+      "content": "Reward now DIFFERENTIATES xmult-engine growth from additive (dec-032, commit a46e934). Two surgical changes: (1) _check_scaling_growth pays xmult-scaler growth 3x the additive rate (REWARD_XMULT_GROWTH_PREMIUM=3.0) \u00e2\u20ac\u201d the dense, non-rarity-gated causal signal for depth; (2) _check_xmult_acquisition phase floor lifted 0.3\u00e2\u2020\u20190.7 so the first/second xmult bought early (antes 1-2) isn't half-paid for timing. Pairs with the encoder (dec-031) + curriculum (dec-030) as the missing third leg.",
+      "why": "This is DIFFERENTIATION, not a global magnitude knob (those have all nulled). The audit's precise finding: the dense, creditable signal (engine growth, every firing hand) didn't distinguish multiplicative from additive. Multiplicative compounding is THE mechanism that breaks Balatro's exponential ante wall (dec-026 data: ante-7+ runs avg 1.36 xmult vs 0.71 at ante 3-4), so rewarding xmult growth 3x makes the per-step reward the value function already credits well (EV ~0.71) favor the causal mechanism of depth \u00e2\u20ac\u201d converting the '0.5%-rare terminal payoff' problem into a dense one. The phase-floor lift (0.3->0.7) fixes the audit's other finding that early xmult ACQUISITION was suppressed exactly when the foundation engine is laid (Stabilize phase antes 1-2 had multiplier 0.39-0.55). Both are potential/delta-based and bounded, and survival reward still dominates the return \u00e2\u20ac\u201d so a dead run forfeits the big ante rewards (guards against degenerate xmult-hoarding at the expense of survival). This is the missing third leg alongside the encoder (better PERCEPTION of synergy) and curriculum (deep-regime EXPOSURE): perception + exposure + a reward that actually CREDITS stacking.",
+      "tags": [
+        "reward-shaping",
+        "xmult-stacking",
+        "credit-assignment",
+        "plateau",
+        "differentiation",
+        "real-rl",
+        "dense-reward",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-032"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-fecc77a6",
+      "type": "memory",
+      "kind": "decision",
+      "content": "dec-041: Wire the committed hand (planner.target_hand_type) into the live discard selector (find_best_discard) with a 1.4x tie-breaking bias, so the agent digs for the archetype it levels instead of always digging for Pair. Committed e6f19b5.",
+      "why": "We chose to ship it now rather than 'let dec-040 bake' because it is INDEPENDENT of dec-040's data (a separate deterministic live-play path, not a data-dependent recalibration), it is directly verifiable from logs (does the agent now play its committed hand) without needing win-rate attribution, and attribution is a fine-tuning luxury that does not apply at a 0.5% plateau. Implementation re-weights only the SELECTION among existing discard candidates (1.4x boost to the strategy that advances the committed hand: flush draws for Flush, straight_draw for Straight, keep_pairs for the pair family) \u00e2\u20ac\u201d the EV math is untouched, so a dramatically stronger off-build draw still wins and blinds are not bricked. The play side follows for free because estimate_score already reads live planet levels, so once the discard makes the committed hand makeable, the greedy level-aware find_best_hands plays it.",
+      "tags": [
+        "balatron",
+        "tactical",
+        "discard",
+        "leveling",
+        "realization-gap",
+        "dec-041",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-041"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-8606ea76",
+      "type": "memory",
+      "kind": "decision",
+      "content": "dec-047: Built strategy bets #4 (reward targets xmult VALUE not COUNT \u00e2\u20ac\u201d dropped the count-based stack premium) and #5 (depth-graded loss to break the safe-ante-5-farm local optimum). Added eval_report --seeds filter + README eval section. VALIDATED the eval harness end-to-end with a live 3-seed run. Pushed to GitHub (5c5f3e9..d4e8391). Committed 3e1494f + d4e8391.",
+      "why": "#4 and #5 are TRAINING-time reward changes (they shape learning; a frozen checkpoint's play is unaffected), so they're validated by training-then-eval vs a baseline, NOT an instant frozen A/B. #4: REWARD_XMULT_STACK_BONUS 1.0->0 (it rewarded the 2nd/3rd engine = COUNT, the eval-validated wrong target per dec-043; value stays rewarded via the growth premium, first engine via the bootstrap) \u00e2\u20ac\u201d de-dups the 4 overlapping xmult channels to value+bootstrap. #5: the loss is now graded by shortfall from ante 8 (shallow death much worse, near-win ~neutral) and the progress credit made convex, steepening the gradient toward depth (the reward audit showed mid-game shaping ~+45 out-earned the flat -5 loss). eval_report gained a --seeds filter so eval analysis isolates the run's games from training rows. HARNESS VALIDATION: ran evaluate.py over 3 fixed seeds across 3 envs against checkpoint update002472 (training paused, game servers left up) \u00e2\u20ac\u201d it connected, forced the seeds, played full runs via the real play path, completed cleanly, and wrote exactly seeds WHKHHRLC/HTQUCLJL/VLUMIZNO tagged in game_history with outcomes. The run-loop is now validated.",
+      "tags": [
+        "balatron",
+        "reward",
+        "xmult",
+        "depth-gradient",
+        "eval-harness",
+        "dec-047",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-047"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-ac8fa407",
+      "type": "memory",
+      "kind": "decision",
+      "content": "dec-057: 4-agent plateau audit VERDICT \u00e2\u20ac\u201d the plateau is an ARCHITECTURE ceiling, not a learning failure, AND the optimizer is actively damaging the policy. (1) Policy-only win ceiling ~2.5%; at 0.7% the agent has extracted ~half; its levers (play/discard timing, shop tempo) are outcome-inert (tempo r^2<0.008). (2) Top lever: boss-aware planner (~5x alone; ~11-12% win reachable inside the current hybrid). (3) The policy DID learn once (u385-1500, ante 3.46->4.41) until dec-034 crashed it; since then optimizer damage: dec-039's 5M->50M budget change silently raised LR 1e-4->2.7e-4 (KL blowups began 66 updates later; 40% of updates now blow target KL, spikes to 5.5M), dec-054's ret_mean/ret_std are NOT persisted in checkpoints (every 90-min recycle resets the value scale; ~70-80% of every session re-learns it), ratio bombs (override transitions stored at log-prob -30 -> e^25 ratios -> unbounded pg loss hijacks minibatches), KL early-stop fires only post-epoch (4 destructive steps land anyway, precisely on win rollouts). (4) Experience is thin: 41.5% single-choice transitions (blind head 100% dead), mask prior pre-decides 57% of steps, return is ~92% shaping, wins = 1 transition per ~9 updates. (5) Throughput EXONERATED: ~395 steps/min healthy; crawls are external-pressure game deaths, self-resolved; dec-049..056 exonerated. (6) MEASURED: dec-053 Needle fix WORKED (realized/proj 0.42->0.58); Mouth fix did not visibly. No fixes shipped yet \u00e2\u20ac\u201d plan below.",
+      "why": "Convergent, quantitative verdict across independent agents. CEILING (agent 4, 51,834 blinds + 5,000 games, multiplicative per-blind model reproduces P(win)=0.57% vs 0.70% observed): flipping ALL close fails (margin>=0.85) with a PERFECT play policy caps at 2.6%; boss-aware planner alone -> 3.6%; combined with tactics -> ~11.7%. Boss blinds sit 15-35 points below non-boss siblings at every deep ante (ante 8: small 0.92, big 0.79, boss 0.39); planner.py:65 hardcodes boss=2.0 and never reads boss identity. Deep-boss clear plateaus ~65% regardless of power; realized/projected median 0.40. The Wall: >75% of deep arrivals lack the power for a 2x boss (needs proj margin >=5x at realized 0.4). Tempo (the network's lever): money@ante4 vs reach-ante-6 r=0.075, n_xmult r~0 \u00e2\u20ac\u201d outcome-inert. LEARNING DYNAMICS (agent 1, 2,866 updates parsed): the only durable improvement era u385->1500 ran at LR<=1e-4, median KL 0.005; dec-034 (06-24) crashed ante 4.2->3.75; dec-039 (06-28) raised LR to 2.7e-4 (frac re-anchored to 50M) and first-ever KL>1 hit 66 updates later. value_norm ret stats reset every recycle (identical VL~14/EV~0.3 transient at EVERY session start; EV still craters to ~0.05 on win rollouts \u00e2\u20ac\u201d the dec-054 fix has not been operative). EXPERIENCE (agent 2): per 2048-step update ~850 zero-information forced steps + ~700 mask-prior-predetermined + ~500 open (only ~150-200 build decisions); mask biases are 1855:1 on cards; entropy collapse 0.47->0.21 largely inherited; SIL corpus is fresh (124 wins/25,667 transitions) but includes post-win endless death tails and is ~saturated (policy already at 0.82 on demo actions). THROUGHPUT (agent 3): live-measured 395 steps/min, update takes seconds; crawls = external contention killing game instances (orphan-reap counts track crawl eras exactly); no torch.set_num_threads anywhere (PyTorch spins 16 cores on 1x850 forwards).",
+      "tags": [
+        "balatron",
+        "deep-audit",
+        "plateau",
+        "ceiling",
+        "optimizer",
+        "planner",
+        "boss-aware",
+        "dec-057",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-057"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-707cc9dc",
+      "type": "memory",
+      "kind": "decision",
+      "content": "dec-058: Shipped Tier-0 optimizer hygiene from the dec-057 plateau audit \u00e2\u20ac\u201d six fixes that stop active training damage: persist value-norm ret stats in checkpoints (dec-054 was never operative across recycles), LR locked at 1e-4 (dec-039 had silently raised it to 2.7e-4), ratio-bomb guard (|log_ratio|>5 excluded from policy loss + KL), per-minibatch KL stop before gradient application, 0*inf NaN guard on the prior term, torch.set_num_threads(2). Bonus: demo capture truncates at win-detection. Committed 3ac9371.",
+      "why": "All six fixes are small and surgical. (1) save/load_checkpoint now carry ret_mean/ret_std (backward-compatible .get defaults 0/1) \u00e2\u20ac\u201d value_norm finally accumulates across recycles. (2) The anneal is capped: new_lr = min(max(lr*frac, 1e-4), 1e-4), and set_learning_rate(1e-4) is applied at run() start because the loaded optimizer state carries the old 2.6e-4. (3) Steps with |log_ratio|>5 are storage artifacts, not policy drift (a genuine PPO update never moves ~5 nats): they contribute zero policy gradient and are EXCLUDED from approx_kl, making it a true drift measure again (epoch-1/batch-1 KL ~0 by construction, so training always proceeds; the old mean-KL included bomb steps at ~142 nats each, which would have made any per-batch stop fire permanently). (4) A minibatch whose sane-KL > 1.5x target_kl applies NO gradient and stops the whole update (SB3 semantics) \u00e2\u20ac\u201d the epoch-mean check retained as backstop. (5) prior term is torch.zeros when _prior_coef_now==0 (0.0*inf=NaN would poison the gradient; logs showed 'Pr inf@0.00'). (6) torch.set_num_threads(2)+set_num_interop_threads(1) in main(), try/except guarded. Bonus: episode_traj stops appending once env.win_recorded \u00e2\u20ac\u201d SIL demos no longer include the post-win endless-mode death tail. 113 tests pass incl. a new ret-stats save/load roundtrip test.",
+      "tags": [
+        "balatron",
+        "optimizer",
+        "ppo",
+        "lr",
+        "ratio-bomb",
+        "kl-stop",
+        "value-norm",
+        "dec-058",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-058"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-92cc3634",
+      "type": "memory",
+      "kind": "decision",
+      "content": "LR lock moved to checkpoint-load time. load_checkpoint gains an lr_override param that re-asserts the LR right after optimizer.load_state_dict; train.py passes 1e-4 at the load site. Kills the dec-039 damaged-LR (2.7e-4) resurrection on recycle.",
+      "why": "Repro confirmed the mechanism: PPOTrainer.load_checkpoint restores the optimizer state_dict, which carries the LR live at save time \u00e2\u20ac\u201d save at 2.7e-4, load into a fresh trainer, get 2.7e-4 back. dec-058 only counteracted this with a SEPARATE set_learning_rate in run(), gated on cfg.anneal_lr \u00e2\u20ac\u201d a band-aid far from where the stale LR re-enters, dependent on timing and on the flag staying True. Re-asserting the lock inside load_checkpoint (both normal and shape-migration paths) applies it atomically with the load, so no recycle path or future caller can carry a stale LR forward.",
+      "tags": [
+        "training",
+        "optimizer",
+        "learning-rate",
+        "checkpoint",
+        "recycle",
+        "dec-058",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-061"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.404049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-315f6fb6",
+      "type": "memory",
+      "kind": "constraint",
+      "content": "Keep BALATROBOT_GAMESPEED at 8. Do NOT raise above 8. Speed history: 100 -> 16 -> 8 -> 4 (06-11 crash wave) -> back to 8 (06-11, c8ffc58). The 8->4 drop was based on the theory that the nil-race crashes were animation-speed-bound; 4x crashing at the SAME cadence disproved it. The real cause was double-fired transitions (mod endpoints bypass the game's controller locks - see con-003), fixed by the next_round lock guard + the trainer's transition-action debounce. Lesson: speed was the wrong lever for that crash class; don't reach for it again unless crashes demonstrably scale with speed. Speed lives in TWO synced places: supervise.py start_server env AND start_balatro.bat (trainer crash recovery) - both git-tracked.",
+      "why": "Faster game speed seems like an obvious way to speed up rollout collection (the real wall-clock bottleneck, since the net is tiny), but in practice higher GAMESPEED destabilizes Balatro/BalatroBot \u00e2\u20ac\u201d crashes and stalls that cost more time and progress than the speed gains. Stability at 8 beats churn at higher speeds.",
+      "tags": [
+        "training",
+        "gamespeed",
+        "stability",
+        "balatrobot",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "con-006"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.405049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-db2d0f46",
+      "type": "memory",
+      "kind": "constraint",
+      "content": "Every retry loop in the trainer's state machine must have (a) a consecutive-failure counter, (b) escalation to _restart_balatro at a bound, and (c) a log line per failure \u00e2\u20ac\u201d never a silent except:pass retry. Counters can't catch a freeze that stops the loop \u00e2\u20ac\u201d backstopped by the heartbeat (trainer writes \"<unix_time> <global_step>\" to logs/heartbeat per stored step). The supervisor enforces FOUR health layers: (1) existence \u00e2\u20ac\u201d process gone -> relaunch (~30s); (2) liveness \u00e2\u20ac\u201d heartbeat >5 min stale = FROZEN -> kill + rebuild; (3) rate floor \u00e2\u20ac\u201d <10 steps/min over a 40-min window = hard crawl -> kill + rebuild. CALIBRATION LESSON: the floor must stay LOW \u00e2\u20ac\u201d healthy deep runs (ante 5-6 boss fights, long scoring animations) legitimately run ~13-20 steps/min; the first deployment's 25/min floor killed a healthy deep run 24 min after going live. A fixed rate floor cannot distinguish deep play from churn; (4) checkpoint cadence \u00e2\u20ac\u201d trainer up 150+ min with newest checkpoint older than 150 min = CHURNING (wedge/restart cycles hold 15-20 steps/min, above any safe floor, while updates crawl at ~190 min/checkpoint vs 70-90 normal) -> kill + rebuild; anchored to when the supervisor first saw the trainer so inherited old checkpoints can't insta-kill. RESTART HYGIENE: _restart_balatro must kill BOTH Balatro.exe and balatrobot.exe (one zombie wrapper leaked per restart; 38 in one night; 0b7402f).",
+      "why": "Silent retry loops produce invisible wedges: the log freezes, no stuck-detector covers the state, and the game visibly spams whatever the retried action animates. The MENU branch retried `start` with except:pass for 25+ minutes after WIN #36 before a human noticed \u00e2\u20ac\u201d the second silent-retry wedge of this kind (booster-pack picks were the first).",
+      "tags": [
+        "robustness",
+        "state-machine",
+        "wedge",
+        "balatrobot",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "con-010"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.405049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-1e9429e8",
+      "type": "memory",
+      "kind": "constraint",
+      "content": "supervise.py invariants (do not regress): (1) recycles must CASCADE \u00e2\u20ac\u201d kill ALL trainers + ALL games + ALL orphan launchers, never a single Select-First-1 pid. (2) Crawl detection uses heartbeat steps/min over a short window (\u00e2\u2030\u00a412min, floor ~80), NEVER the trainer log's cumulative FPS (a misleading lifetime average). (3) The supervisor is a SINGLETON \u00e2\u20ac\u201d kill rival supervise.py on startup. (4) Process matching uses cmdline TOKENS, not substring-in-joined-string (a `python -c` blob contains the literals as substrings and would cause spurious duplicate-trainer recycles). (5) The memory guardian reclaims the external hog (steamwebhelper>4GB) when system RAM is critical; do not disable without re-confirming the Steam leak is gone.",
+      "why": "The recurring \"Balatron slow after 7-8h\" was misdiagnosed 3 times as internal FPS decay; the real cause was steamwebhelper leaking to 13GB \u00e2\u2020\u2019 94% RAM \u00e2\u2020\u2019 paging. Detection that waited 150min/3h, single-pid kills that let duplicates/orphans accumulate until RAM exhausted, and duplicate supervisors each spawning a trainer were all contributing failure modes. Substring process matching would make the supervisor recycle a healthy stack whenever a diagnostic `python -c` runs.",
+      "tags": [
+        "supervisor",
+        "infrastructure",
+        "memory",
+        "balatron",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "con-012"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.405049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 6,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    },
+    {
+      "id": "k-4897a705",
+      "type": "memory",
+      "kind": "constraint",
+      "content": "Whenever a metric's accounting or computation changes (its LEVEL shifts for a non-gameplay reason), append a regime boundary to dashboard.py REGIMES = (update_no, short_label, caveat). The dashboard draws a dashed marker on the per-update charts there and lists the caveat in the Metric-trust panel; the rolling mean restarts at each boundary. Never read a metric trend across a regime boundary.",
+      "why": "This project has caught four display metrics 'lying' (KL/CF read 0, R was a cumulative mean, R under-counted ~6x under N=3, entropy carried a ~ln(19) artifact). A trend read across a methodology change is meaningless and has repeatedly fooled interpretation (e.g. the U435 R step looked like a breakthrough but was the stats-isolation fix). Logging boundaries keeps the charts self-documenting and the markers current.",
+      "tags": [
+        "dashboard",
+        "metrics",
+        "observability",
+        "balatron",
+        "gotcha",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "balatron",
+      "source": {
+        "system": "context-keeper",
+        "ref": "con-014"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T16:51:00.405049+00:00",
+      "updated_at": "2026-07-10T16:54:03.075457+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 3,
+        "endorsements": [],
+        "projects": [
+          "balatron"
+        ]
+      }
+    }
+  ]
 }
