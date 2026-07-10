@@ -37,6 +37,7 @@ import json
 import glob
 import os
 import random
+import signal
 import string
 import subprocess
 import time
@@ -101,6 +102,15 @@ def _build_composition(joker_cards: list) -> tuple:
                 or s.get("xmult_scaling") or s.get("chip_scaling")):
             ns += 1
     return nx, ns, len(joker_cards)
+
+
+# Wall-clock safety-checkpoint interval (seconds). The supervisor's earliest
+# recycle after a fresh start is GRACE_AFTER_START_S (5min) + RATE_WINDOW_S
+# (12min) ≈ 17min on the rate floor; this must comfortably beat that so a slow
+# run commits at least one checkpoint per recycle window. 8min gives ~2 saves
+# inside the smallest window while staying well clear of a healthy run's fast
+# milestone cadence (so it's a no-op when things are going well).
+SAFETY_CHECKPOINT_S = 480
 
 
 # ============================================================
@@ -204,6 +214,14 @@ class Trainer:
 
         # Ensure checkpoint directory exists
         os.makedirs(config.checkpoint_dir, exist_ok=True)
+
+        # Checkpoint bookkeeping for the wall-clock SAFETY net + graceful
+        # shutdown save (see run()). _last_ckpt_update/_last_ckpt_time are
+        # refreshed by _save_checkpoint(); _stop_requested is set by the signal
+        # handlers so the update loop can break and save on the way out.
+        self._last_ckpt_update = self.num_updates
+        self._last_ckpt_time = time.time()
+        self._stop_requested = False
 
     def _touch_heartbeat(self):
         """Update logs/heartbeat so the supervisor can tell a frozen or
@@ -476,6 +494,26 @@ class Trainer:
         print(f"Connected to {len(self.sessions)} BalatroBot instance(s) "
               f"(ports {', '.join(str(e.port) for e in self.sessions)})")
 
+        # Graceful-shutdown handlers: on a catchable stop signal, flag the loop
+        # to break and checkpoint on the way out (via the finally below). NOTE:
+        # the supervisor's recycle hard-kills the trainer (kill_pids -> psutil
+        # p.kill() = Windows TerminateProcess, uncatchable), so THESE handlers
+        # do NOT fire on a recycle — they cover manual Ctrl-C / Ctrl-Break and
+        # any future graceful stop. The wall-clock SAFETY checkpoint inside the
+        # loop is what actually survives a recycle.
+        def _request_stop(signum, _frame):
+            self._stop_requested = True
+            print(f"\n[SHUTDOWN] signal {signum} received — will checkpoint "
+                  f"and exit after the current rollout", flush=True)
+        for _signame in ("SIGINT", "SIGTERM", "SIGBREAK"):
+            _sig = getattr(signal, _signame, None)
+            if _sig is None:
+                continue
+            try:
+                signal.signal(_sig, _request_stop)
+            except (ValueError, OSError):
+                pass  # unsupported on this platform / not in main thread
+
         try:
             # dec-058: apply the LR lock IMMEDIATELY — the loaded checkpoint's
             # optimizer state carries the old (2.6e-4) LR, and the anneal block
@@ -484,6 +522,13 @@ class Trainer:
                 self.ppo.set_learning_rate(1.0e-4)
 
             while self.global_step < cfg.total_timesteps:
+                # Graceful stop requested (catchable signal) — break to the
+                # finally, which commits a checkpoint before exiting.
+                if self._stop_requested:
+                    print("[SHUTDOWN] stop requested — leaving training loop",
+                          flush=True)
+                    break
+
                 # Collect one rollout across all envs in parallel. Each
                 # env task plays until the COMBINED buffer total reaches
                 # rollout_steps (natural load balancing — faster envs
@@ -514,8 +559,30 @@ class Trainer:
                 if self.num_updates % cfg.log_interval == 0:
                     self._log_update(metrics)
 
-                # Checkpoint
+                # Checkpoint (milestone cadence — --checkpoint-interval, unchanged)
                 if self.num_updates % cfg.checkpoint_interval == 0:
+                    self._save_checkpoint()
+                # LIVELOCK BREAKER (wall-clock safety net): the supervisor
+                # hard-kills the trainer on recycle (uncatchable TerminateProcess
+                # — see the signal note above), so the teardown save below never
+                # runs on a recycle. With --checkpoint-interval 2, a slow run
+                # (INVALID_STATE desync, deep boss fights) gets recycled BEFORE
+                # it completes 2 updates, so every relaunch reloads the SAME
+                # checkpoint and never advances — a livelock. Force an untagged,
+                # supervisor-loadable (balatron_phase{p}_update*.pt) checkpoint
+                # once real progress has accrued and it's been too long since the
+                # last save on disk. This does NOT change --checkpoint-interval:
+                # the milestone cadence is untouched; this is an orthogonal
+                # time-based safety trigger. Gated on num_updates progress so a
+                # genuinely wedged trainer (0 updates) still saves nothing and is
+                # correctly caught by the supervisor's freeze/churn detectors.
+                elif (self.num_updates > self._last_ckpt_update
+                        and time.time() - self._last_ckpt_time
+                        >= SAFETY_CHECKPOINT_S):
+                    print(f"  [SAFETY-CKPT] {self.num_updates - self._last_ckpt_update} "
+                          f"update(s) uncommitted, "
+                          f"{time.time() - self._last_ckpt_time:.0f}s since last "
+                          f"save — checkpointing to survive recycle", flush=True)
                     self._save_checkpoint()
 
                 # Check recording file size every 5 updates (~10k steps)
@@ -528,8 +595,18 @@ class Trainer:
             print(f"\nTraining error: {e}")
             raise
         finally:
-            # Final checkpoint
-            self._save_checkpoint(tag="final")
+            # Teardown checkpoint. Save UNTAGGED (balatron_phase{p}_update*.pt)
+            # so the supervisor's newest_checkpoint() glob actually loads it on
+            # relaunch — a "final"-tagged file is never matched by that glob, so
+            # the old tag-only save was silently unresumable. Only meaningful on
+            # a GRACEFUL exit (normal completion / caught signal); a hard-kill
+            # recycle never reaches this — the wall-clock safety net above is the
+            # recycle-safe path.
+            if self.num_updates > self._last_ckpt_update:
+                self._save_checkpoint()
+            else:
+                # No new progress to commit; keep a tagged marker for humans.
+                self._save_checkpoint(tag="final")
             # Persist the demo buffer so captures below the save-every
             # threshold aren't lost on this (frequent) recycle. Atomic save.
             if self.demo_buffer is not None:
@@ -2288,6 +2365,11 @@ class Trainer:
             json.dump(meta, f, indent=2, default=str)
 
         print(f"  Checkpoint saved: {path}")
+        # Refresh the safety-net bookkeeping on EVERY save (milestone, safety,
+        # or teardown) so the wall-clock net measures time since the real last
+        # save. A tagged save still counts as progress committed to disk.
+        self._last_ckpt_update = self.num_updates
+        self._last_ckpt_time = time.time()
         self._prune_checkpoints(keep=15)
 
     def _prune_checkpoints(self, keep: int = 15):

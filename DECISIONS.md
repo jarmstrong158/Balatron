@@ -550,6 +550,25 @@ confidence — it adds no new planner and does not change training.**
   (`planner_recommended_action`), the `_collect_rollout` seam, and `evaluate.py`
   flags. Tests: `tests/test_confidence_gate.py`.
 
+### Checkpoint-crawl livelock breaker — 07-10 (`dec-063`)
+With `--checkpoint-interval 2`, a slow run (INVALID_STATE desync + deep boss
+fights, ~36 steps/min under the 80/min rate floor) is recycled *before* it
+completes 2 updates, so it never writes a new `update*.pt` and every relaunch
+reloads the SAME checkpoint (stuck at `update003748`) — a livelock. The
+supervisor recycles via `kill_pids -> psutil p.kill()` = Windows
+`TerminateProcess`, which is **uncatchable**, so a signal-handler teardown save
+can never fire on a recycle. Fix (train.py only): a **wall-clock SAFETY
+checkpoint** in the update loop saves an untagged `update*.pt` once ≥1 update has
+accrued and ≥`SAFETY_CHECKPOINT_S` (480s) since the last save — needs no signal,
+survives the hard kill, and is gated on `num_updates` progress so a genuinely
+wedged trainer still saves nothing (freeze/churn detectors stay authoritative).
+It does NOT change `--checkpoint-interval` (milestone cadence untouched — an
+orthogonal time trigger). Also: `newest_checkpoint()` only globs
+`balatron_phase1_update*.pt`, so the old `finally` save with `tag="final"` was
+silently unresumable — the teardown save is now untagged. Added graceful
+SIGINT/SIGTERM/SIGBREAK handlers for the manual-stop / future-graceful path.
+Tests: `tests/test_checkpoint_teardown.py`.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
