@@ -768,6 +768,10 @@
         "projects": [
           "balatron"
         ]
+      },
+      "promotion": {
+        "pr": "https://github.com/jarmstrong158/knowledge/pull/1",
+        "at": "2026-07-10T16:55:43.594032+00:00"
       }
     }
   ]
