@@ -37,6 +37,7 @@ import json
 import glob
 import os
 import random
+import re
 import signal
 import string
 import subprocess
@@ -102,6 +103,24 @@ def _build_composition(joker_cards: list) -> tuple:
                 or s.get("xmult_scaling") or s.get("chip_scaling")):
             ns += 1
     return nx, ns, len(joker_cards)
+
+
+def _parse_required_states(err: str) -> set:
+    """Pull the accepted states out of a BalatroBot INVALID_STATE error message,
+    e.g. "Method 'play' requires one of these states: SELECTING_HAND" ->
+    {"SELECTING_HAND"}. Returns an empty set if the message can't be parsed, so
+    callers fall back to the plain retry (never abort on a parse miss)."""
+    marker = "states:"
+    idx = err.find(marker)
+    if idx < 0:
+        return set()
+    tail = err[idx + len(marker):]
+    # State tokens are UPPER_SNAKE; stop at the first non-state character run.
+    out = set()
+    for tok in re.split(r"[^A-Z_]+", tail):
+        if tok:
+            out.add(tok)
+    return out
 
 
 # Wall-clock safety-checkpoint interval (seconds). The supervisor's earliest
@@ -1253,7 +1272,34 @@ class Trainer:
                     break  # success
                 except Exception as exc:
                     exc_str = str(exc)
-                    if ("buttons" in exc_str or "INVALID_STATE" in exc_str) and _attempt < max_retries - 1:
+                    if "INVALID_STATE" in exc_str and _attempt < max_retries - 1:
+                        # The action was decoded from the state snapshot taken at
+                        # the TOP of this loop iteration, but the game can leave
+                        # that state before the send lands (an animation/blind/run
+                        # transition completing, an auto-action in the poll loop).
+                        # Re-read the LIVE state once: if the game is no longer in
+                        # a state this method accepts, retrying the same action is
+                        # futile — it just burns RPCs + backoff and spams the game
+                        # (the dominant INVALID_STATE class: play/select fired into
+                        # SHOP/transient). Abort now and let the next iteration
+                        # re-derive an action from fresh state. Only keep retrying
+                        # when the live state DOES accept the method (a true UI
+                        # timing blip that a short wait clears).
+                        required = _parse_required_states(exc_str)
+                        try:
+                            live = (await env.game.fetch_gamestate()).get("state", "")
+                        except Exception:
+                            live = ""
+                        if required and live and live not in required:
+                            action_succeeded = False
+                            print(f"[STATE-GUARD] {api_method} aborted: game in "
+                                  f"{live}, needs {sorted(required)} (stale "
+                                  f"decision) — re-deriving from fresh state",
+                                  flush=True)
+                            break
+                        await asyncio.sleep(0.3 * (_attempt + 1))
+                        continue
+                    if "buttons" in exc_str and _attempt < max_retries - 1:
                         # UI buttons not ready yet — wait and retry
                         await asyncio.sleep(0.3 * (_attempt + 1))
                         continue

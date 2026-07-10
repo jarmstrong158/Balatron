@@ -569,6 +569,27 @@ silently unresumable — the teardown save is now untagged. Added graceful
 SIGINT/SIGTERM/SIGBREAK handlers for the manual-stop / future-graceful path.
 Tests: `tests/test_checkpoint_teardown.py`.
 
+### INVALID_STATE desync — abort futile retries — 07-10 (`dec-064`)
+~24 INVALID_STATE rejections/session (e.g. `play` fired while in SHOP, `select`
+while in SELECTING_HAND) waste RPCs + backoff. Root cause is **structural**: the
+action is decoded from the state snapshot taken at the TOP of the
+`_collect_rollout` iteration, but the game can leave that state before the send
+lands (an animation / blind / run transition completing, or an auto-action
+inside `_get_actionable_state`'s poll loop). The retry loop had treated
+INVALID_STATE like a transient "buttons not ready" blip and retried the same
+stale action 3× into a state the game had already left. Fix (contained to the
+retry loop): on INVALID_STATE, parse the accepted states out of the error
+message (`_parse_required_states`) and re-read the LIVE state once — if the game
+is no longer in a state the method accepts, **abort immediately** (1 send + 1
+read) and let the next iteration re-derive from fresh state; only keep retrying
+when the live state DOES accept the method (a true timing blip). Failure-path
+only, so no cost on the common success path; no buffer/settle change
+(`action_succeeded=False` is the pre-existing terminal path). This CUTS the
+per-desync cost but does not eliminate the desyncs — the full structural fix
+(decode the action from the fetch that immediately precedes the send, which
+touches the con-007 settle/store chain) is a recommended follow-up, left out of
+this live-run change. Tests: `tests/test_state_guard.py`.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
