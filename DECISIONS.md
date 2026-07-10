@@ -491,6 +491,27 @@ interest cap. Buys are affordability-gated only (not floor-gated), so the lever
 acts through reroll behavior. Verify via money@ante-N + proj-margin in
 `build_progression` and per-boss kill rates.
 
+### LR lock at checkpoint-load time — 07-09 (`dec-061`, the dec-058 follow-up)
+dec-058 was supposed to lock LR at 1e-4 permanently, but an audit found it still
+resetting to the dec-039 damaged **2.7e-4** on trainer recycle (updates 625 and
+2465; ~1/3 of training ran damaged, KL to ~7e7, EV cratered). **Root cause:**
+`PPOTrainer.load_checkpoint` restores the optimizer `state_dict`, which carries
+the LR that was live at save time — repro'd directly (save at 2.7e-4 → load →
+2.7e-4 back). dec-058 only counteracted this with a *separate*,
+`anneal_lr`-gated `set_learning_rate` inside `run()`: a band-aid far from where
+the stale LR re-enters, dependent on timing and on the flag staying True. **Fix
+(minimal, co-located):** `load_checkpoint` gains an `lr_override` param and
+re-asserts the LR right after `optimizer.load_state_dict` (covers both the
+normal and shape-migration load paths); `train.py` passes `1e-4` at the load
+site. The lock is now applied *atomically with the load*, so no recycle path or
+future caller (eval, resume) can carry a stale LR forward. The schedule itself
+and dec-059/060 are untouched; the `run()` locks remain as redundant
+belt-and-suspenders. Regression pinned in `tests/test_lr_recycle_lock.py` (one
+test documents the old resurrection, two prove the override holds through single
+and double recycles). **Lesson:** a locked hyperparameter must be re-asserted
+*after* `optimizer.load_state_dict` — the optimizer state carries it verbatim;
+never trust a later, separately-gated setter to undo it.
+
 ---
 
 ### Confidence-gated planner deferral — 07-07 (`dec-061`, inference/eval-only routing)
