@@ -491,7 +491,13 @@ interest cap. Buys are affordability-gated only (not floor-gated), so the lever
 acts through reroll behavior. Verify via money@ante-N + proj-margin in
 `build_progression` and per-boss kill rates.
 
-### LR lock at checkpoint-load time — 07-09 (`dec-061`, the dec-058 follow-up)
+### LR lock at checkpoint-load time — 07-09 (dec-058 follow-up)
+<!-- Numbering note: this fix belongs to dec-058 and has NO separate dec-NNN. It
+briefly carried a `dec-061` tag that collided with the 07-07 confidence gate, which
+owns dec-061 across all code (agent/confidence_gate.py, network.py, config.py,
+train.py, action_executor.py). context-keeper filed THIS LR-lock change under the id
+dec-061 too (a machine-store artifact, id immutable) — but the canonical dec-061 is
+the confidence gate; this LR-lock is a dec-058 follow-up. -->
 dec-058 was supposed to lock LR at 1e-4 permanently, but an audit found it still
 resetting to the dec-039 damaged **2.7e-4** on trainer recycle (updates 625 and
 2465; ~1/3 of training ran damaged, KL to ~7e7, EV cratered). **Root cause:**
