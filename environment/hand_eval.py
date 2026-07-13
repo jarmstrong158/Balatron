@@ -5462,11 +5462,17 @@ def evaluate_pack_spectral(pack_cards: list[dict], hand_cards: list[dict],
         elif key == "c_cryptid":
             score = 3.0  # copy 1 selected card twice
         elif key == "c_talisman":
-            score = 3.0  # gold seal on 1 selected card
+            score = 3.0  # gold seal on 1 selected card (+$3 when scored)
         elif key == "c_trance":
-            score = 2.5  # blue seal on 1 selected card
+            # BLUE seal: creates a Planet card every round the card is HELD at
+            # end of round = continuous free leveling of the committed hand — the
+            # dec-037 "leveling is a missing lever" fix, in seal form. Was badly
+            # under-valued at 2.5; a held blue seal out-levels most single buys.
+            score = 4.5  # blue seal on 1 selected card
         elif key == "c_medium":
-            score = 2.0  # purple seal on 1 selected card
+            # PURPLE seal: creates a Tarot when the card is DISCARDED = a steady
+            # deck-sculpting / enhancement engine. Under-valued at 2.0.
+            score = 3.5  # purple seal on 1 selected card
         elif key == "c_immolate":
             score = 2.0  # destroy 5 random hand cards, +$20
         elif key in ("c_sigil", "c_ouija"):
@@ -5486,6 +5492,60 @@ def evaluate_pack_spectral(pack_cards: list[dict], hand_cards: list[dict],
     if best is None:
         return None
     return (best[1], best[2])
+
+
+# Value of adding a playing card to the deck, by its seal / enhancement /
+# edition. Standard packs are the shop's main SEAL source; the old code picked
+# index 0 ("just pick first"), so the agent grabbed vanilla dilution and passed
+# over blue/purple-seal cards. Seals lead because they TAILOR the deck (dec-037
+# leveling lever): BLUE = free planet/round held (leveling), PURPLE = tarot/
+# discard (sculpting), RED = retrigger, GOLD = money. A pickup below
+# STANDARD_PICKUP_MIN is pure dilution — skip it rather than add a dead card.
+STANDARD_SEAL_VALUE = {"BLUE": 5.0, "PURPLE": 4.0, "RED": 4.0, "GOLD": 3.0}
+STANDARD_ENHANCE_VALUE = {
+    "GLASS": 4.0, "STEEL": 3.5, "WILD": 3.0, "LUCKY": 2.0, "MULT": 2.0,
+    "GOLD": 2.0, "BONUS": 1.5, "STONE": 1.0,
+}
+STANDARD_EDITION_VALUE = {"POLYCHROME": 4.0, "HOLOGRAPHIC": 3.0, "HOLO": 3.0,
+                          "FOIL": 2.5}
+STANDARD_PICKUP_MIN = 2.0
+
+
+def score_playing_card_pickup(card: dict, jokers: list[dict],
+                              gamestate: dict) -> float:
+    """Value of adding this playing card to the deck (seal + enhancement +
+    edition + a small high-rank consistency bonus). WILD is worth more when the
+    build wants a flush (any-suit card improves flush consistency)."""
+    score = 0.0
+    score += STANDARD_SEAL_VALUE.get(card_seal(card), 0.0)
+    enh = (card_enhancement(card) or "").upper()
+    if enh == "WILD":
+        wanted = _get_joker_suit_synergies(jokers) if jokers else set()
+        score += 3.5 if wanted else 2.0
+    else:
+        score += STANDARD_ENHANCE_VALUE.get(enh, 0.0)
+    score += STANDARD_EDITION_VALUE.get((card_edition(card) or "").upper(), 0.0)
+    if card_rank(card) in ("Ace", "King", "Queen"):
+        score += 0.5   # high cards aid straight/flush consistency
+    return score
+
+
+def evaluate_pack_standard(pack_cards: list[dict], hand_cards: list[dict],
+                           jokers: list[dict], gamestate: dict
+                           ) -> Optional[tuple[int, list[int]]]:
+    """Pick the best card to add from a Standard pack, or None to skip when the
+    best option is vanilla dilution. Returns (pick_index, []) — deck adds take
+    no hand targets."""
+    if not pack_cards:
+        return None
+    best_idx, best_score = -1, STANDARD_PICKUP_MIN
+    for idx, c in enumerate(pack_cards):
+        s = score_playing_card_pickup(c, jokers, gamestate)
+        if s > best_score:
+            best_score, best_idx = s, idx
+    if best_idx < 0:
+        return None
+    return (best_idx, [])
 
 
 def compute_tarot_value(tarot_key: str, jokers: list[dict],

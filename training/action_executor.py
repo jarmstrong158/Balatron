@@ -789,9 +789,17 @@ class ActionExecutor:
                           flush=True)
                     return "buy", {"card": best_joker_idx}
 
-            # Block standard packs
+            # Standard packs are the shop's main SEAL/enhancement source (blue
+            # seal = free planet/round = leveling; purple = tarot/discard =
+            # sculpting). Formerly hard-blocked, so the agent could not tailor
+            # its deck from the shop. Allow when FREE (Standard Tag) or from clear
+            # surplus, so a speculative pack can never drain the interest economy
+            # — a scoring joker already won via the REDIRECT above, and the NN's
+            # buy-timing head still gates WHEN to open the pack. dec-065.
             if "standard" in pack_key:
-                return "gamestate", None
+                STANDARD_PACK_RESERVE = 20     # keep the interest reserve intact
+                if not is_free and (money - cost) < STANDARD_PACK_RESERVE:
+                    return "gamestate", None
 
             return "buy", {"pack": p_idx}
 

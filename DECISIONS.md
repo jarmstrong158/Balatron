@@ -598,6 +598,63 @@ this live-run change. Tests: `tests/test_state_guard.py`.
 
 ---
 
+### Non-scoring joker valuation + seal acquisition — 07-12 (`dec-065`)
+**The blind spot.** A raw-log audit of shop behavior found **71% of planner
+rerolls (223/314) fired on a hard `d-surv=0.00`**. Root cause: the survivability
+estimator (`_estimate_joker_scoring_for_type`) returns `(0,0,×1)` for any joker
+without a `score_effect` field, so **62/150 jokers (41%)** — all 21 economy, 11
+card-creation, utility, even the 2 hand-upgrade jokers — moved `build_survivability`
+by *exactly* 0.00. The planner rerolled past 41% of the pool and acquired
+economy/utility only by accident. (Compounding cause: `build_survivability` is a
+fractional-ante on a log10 scale vs exponential targets, so even some
+`score_effect` jokers — Bull, Walkie Talkie — round to 0.00.)
+
+**Frame (dec-038).** Money is NOT the binding constraint (agent dies with
+$13–49; the multiplicative product is). So the fix is **rankability + tempo, not
+hoarding** — every economy/prior term is capped BELOW a real engine.
+
+Four bounded levers in `planner.py`, all feeding the existing survivability curve
+so they inherit its bounds:
+- **#3 economy (A-model)** — `_economic_survivability_bonus`: expected $/round
+  over the spend-horizon → future joker buys → generic-engine survivability,
+  **discounted by P(survive to spend) ≈ (base_surv − cur)**. A dying build gets
+  ~0 economy credit (can't be lured off buying power); a healthy build's *first*
+  strong economy joker clears the reroll bar. `ECON_SURV_CAP=0.26` is coupled
+  just above the 0.25 `PLANNER_REROLL_THRESHOLD` on purpose. A 2nd economy joker
+  reads ~0 (engine-hunt resumes). Knobs: `ECON_YIELD`, `SURV_PER_ENGINE=0.20`,
+  `TYPICAL_JOKER_COST=5`, `ECON_SPEND_HORIZON=3`. **Scaling economy** (Rocket:
+  $1/round +$2 per boss defeated) projects the ramp — `current (base + inc·bosses
+  beaten, or live _scaled_value) + inc·horizon/2` — instead of the flat
+  `money_per_round`, which alone left Rocket *below* the reroll bar; combined with
+  the reach discount this values Rocket exactly when you'd buy it (early, while
+  ahead of the curve), not late when marginal.
+- **#4 tier prior (C)** — `_prior_survivability_bonus`: tiny tier-weight nudge
+  (cap 0.08) so scoreless utility (8 Ball, etc.) is *rankable* but never stops an
+  engine hunt.
+- **#1 hand-upgrade** — Space/Burnt add committed-hand levels/ante through the
+  existing `_level_committed_hand` projection (exact).
+- **#2 boss-nullifier** — Chicot collapses the dec-059 boss multiplier to 1.0
+  (exact).
+
+**Seals** (user: blue/purple seals tailor the deck and are underused — they were
+the shop's main seal source, hard-blocked):
+- Raised blue (Trance 2.5→4.5, = free planet/round = leveling, dec-037 lever) and
+  purple (Medium 2.0→3.5) spectral seal values in `evaluate_pack_spectral`.
+- Added `evaluate_pack_standard` (`hand_eval.py`) — pick the best sealed/enhanced
+  card, **skip pure dilution**; wired into `train.py`'s ENHANCED branch
+  (was "pick index 0"). con-005/con-010-compliant skip within the bounded pack loop.
+- Guard-unblocked standard-pack *buying* in `action_executor.py`: allowed when
+  FREE or from clear surplus (`money − cost ≥ $20`), so it can't drain interest;
+  a scoring joker still wins via the existing REDIRECT.
+
+Verified: strong econ 0.26, weak econ <0.25, dying-build econ ~0, 2nd econ ~0,
+real engine > econ on dying builds; standard pack picks blue-seal over Glass and
+skips vanilla. Tests: `tests/test_economy_valuation.py` (13 new); 159 pass.
+**Follow-up:** A/B that the war chest grows AND deep rerolls land engines (not
+burn cash); validate standard-pack buying at scale.
+
+---
+
 ## Gotchas & Hard-Won Lessons
 
 ### 1. The `won` flag means "reached the ante-8 boss," NOT "beat it"  *(critical)*

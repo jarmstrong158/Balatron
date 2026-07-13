@@ -63,6 +63,7 @@ from environment.hand_eval import (
     plan_optimal_action, compute_optimal_joker_order,
     plan_consumable_use, optimize_play_order,
     evaluate_pack_tarot, evaluate_pack_spectral, pick_best_planet,
+    evaluate_pack_standard,
 )
 from recorder import RunRecorder
 from demo_buffer import DemoBuffer
@@ -2035,8 +2036,24 @@ class Trainer:
                             continue
 
                 elif card_set == "ENHANCED":
-                    # Standard/Buffoon packs with playing cards — just pick first
-                    pass  # fall through to generic pick logic below
+                    # Standard pack: pick the best SEALED/enhanced card (blue seal
+                    # = free planet/round = leveling; purple = tarot/discard =
+                    # sculpting) instead of blindly picking index 0. Skip cleanly
+                    # when the pack is only vanilla dilution (con-005: a genuinely
+                    # not-worth-it pick skips immediately, no fall-through reject).
+                    hand_cards_std = raw.get("hand", {}).get("cards", [])
+                    jokers_std = raw.get("jokers", {}).get("cards", [])
+                    std_result = evaluate_pack_standard(
+                        pack_cards, hand_cards_std, jokers_std, raw)
+                    if std_result is None:
+                        try:
+                            await env.game.execute_action("pack", {"skip": True})
+                        except Exception:
+                            pass
+                        await asyncio.sleep(cfg.api_poll_delay)
+                        continue
+                    pick_idx = std_result[0]
+                    # fall through to generic pick logic below
 
                 # Build ordered list of cards to try. For each card, determine
                 # whether it needs targets based on its key. The Lua side uses
