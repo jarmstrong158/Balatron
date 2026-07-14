@@ -1,22 +1,26 @@
 """Winning-trend miner (dec-066).
 
 Mines logs/build_progression.jsonl for the build features that CAUSALLY predict
-reaching the ante-8 boss. The key design choice — the one that separates signal
-from survivorship — is that every rate is CONDITIONED ON REACHING the ante it is
-measured at. Comparing runs that all reached ante N and asking which went on to
-reach ante 8 controls for luck: both groups got equally deep, so a feature that
-still separates them is a causal candidate, not a correlate of survival.
+getting DEEP. Two design choices make it trustworthy on a <1%-win agent:
 
-Outputs:
-  1. A human-readable report of reach-8 survival curves per feature, per ante.
-  2. logs/trend_calibration.json — the empirical P(reach 8 | margin at ante N)
-     curve, so the planner's margin->survivability mapping can be recalibrated
-     against real outcomes (the dec-038 REALIZATION_FACTOR, but as a full curve).
+  1. Continuous outcome (default): the yardstick is MEAN MAX-ANTE REACHED, not
+     "did it win." Wins are ~10-15/day — far too rare to stratify. Depth-reached
+     is available on every single run, so the signal is readable today and tightens
+     hourly. (A binary reach-N rate is still reported alongside, bar configurable.)
 
-Read-only. Safe to run anytime; use it to VALIDATE that a change actually moved
-the causal features before waiting ~150 updates for mean-ante to budge.
+  2. Survivorship control: every stat is CONDITIONED ON REACHING the ante it is
+     measured at. Comparing runs that all reached ante N and asking who went
+     deeper controls for luck — a feature that still separates equally-deep runs
+     is causal, not a correlate of survival.
 
-Usage:  python -m tools.analyze_winning_trends [--reach 8] [--min-run-ante 2]
+Full-history features (margin / n_xmult / n_scaling) exist on every record.
+Categorical features (n_economy / n_mult / n_retrigger, added dec-066) are
+field-gated so pre-dec-066 records can't pollute their buckets as "0".
+
+Emits logs/trend_calibration.json (empirical margin -> mean-depth + reach curve).
+Read-only; run anytime to validate that a change moved the causal features.
+
+Usage:  python -m tools.analyze_winning_trends [--reach 6] [--antes 4,5]
 """
 import argparse
 import collections
@@ -64,48 +68,74 @@ def _snap_at(run, ante):
     return got[-1] if got else None
 
 
-def stratified_reach_rate(runs, ante, feature, buckets, reach):
-    """Among runs that reached `ante`, P(reach `reach`) per feature bucket."""
-    present = [r for r in runs if _snap_at(r, ante) is not None and _max_ante(r) >= ante]
-    out = []
+def depth_stats(runs, ante, feature, buckets, reach_bar, require_field=False):
+    """Conditioned on reaching `ante`: per feature bucket, (n, mean max-ante,
+    reach-`reach_bar` %). require_field drops runs whose ante-N snapshot never
+    logged `feature` (keeps pre-dec-066 records out of categorical buckets)."""
+    base = []
+    for r in runs:
+        s = _snap_at(r, ante)
+        if s is None or _max_ante(r) < ante:
+            continue
+        if require_field and feature not in s:
+            continue
+        base.append(r)
+    rows = []
     for label, pred in buckets:
-        grp = [r for r in present if pred(_snap_at(r, ante).get(feature))]
-        rate = (100.0 * sum(1 for r in grp if _max_ante(r) >= reach) / len(grp)
-                if grp else float("nan"))
-        out.append((label, len(grp), rate))
-    return len(present), out
+        grp = [r for r in base if pred(_snap_at(r, ante).get(feature))]
+        if grp:
+            mm = sum(_max_ante(r) for r in grp) / len(grp)
+            rr = 100.0 * sum(1 for r in grp if _max_ante(r) >= reach_bar) / len(grp)
+            rows.append((label, len(grp), mm, rr))
+        else:
+            rows.append((label, 0, float("nan"), float("nan")))
+    return len(base), rows
 
 
-def _bar(rate):
-    return "#" * int(rate / 2) if rate == rate else ""
-
-
-def print_curve(title, runs, feature, buckets, antes, reach):
-    print(f"\n=== {title} ===")
+def print_feature(name, runs, feature, buckets, antes, reach_bar, require_field=False):
+    print(f"\n=== mean MAX-ANTE (and reach-{reach_bar}%) by {name} ===")
     for ante in antes:
-        n, rows = stratified_reach_rate(runs, ante, feature, buckets, reach)
-        print(f"  at ante {ante} (n={n}):")
-        for label, cnt, rate in rows:
-            print(f"    {label:12s} n={cnt:6d}  reach-{reach}: {rate:5.1f}%  {_bar(rate)}")
+        n, rows = depth_stats(runs, ante, feature, buckets, reach_bar, require_field)
+        if n == 0:
+            continue
+        print(f"  at ante {ante} (n={n} reached it):")
+        for label, cnt, mm, rr in rows:
+            if cnt == 0:
+                print(f"    {label:11s} n=0")
+            else:
+                bar = "#" * int((mm - 3.5) / 0.1) if mm == mm and mm > 3.5 else ""
+                print(f"    {label:11s} n={cnt:5d}  mean-ante {mm:4.2f}  reach-{reach_bar} {rr:4.1f}%  {bar}")
 
 
-def spread(runs, ante, feature, buckets, reach):
-    """Max-min reach-rate across buckets at an ante = crude effect size."""
-    _n, rows = stratified_reach_rate(runs, ante, feature, buckets, reach)
-    rates = [r for _l, _c, r in rows if r == r]
-    return (max(rates) - min(rates)) if len(rates) >= 2 else 0.0
+EFFECT_MIN_N = 30   # ignore buckets thinner than this in the effect-size ranking
+                    # — a lone lucky run (n=1) must not dominate the spread.
+
+
+def depth_spread(runs, ante, feature, buckets, reach_bar, require_field=False):
+    """Effect size = spread in MEAN MAX-ANTE across buckets with n>=EFFECT_MIN_N
+    at an ante (thin buckets excluded so a single lucky run can't distort it)."""
+    _n, rows = depth_stats(runs, ante, feature, buckets, reach_bar, require_field)
+    mm = [m for _l, c, m, _r in rows if c >= EFFECT_MIN_N and m == m]
+    return (max(mm) - min(mm)) if len(mm) >= 2 else 0.0
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--reach", type=int, default=8, help="success = reached this ante")
+    ap.add_argument("--reach", type=int, default=6,
+                    help="secondary binary bar reported alongside mean-ante (default 6)")
+    ap.add_argument("--antes", default="4,5",
+                    help="comma list of measurement checkpoints (default 4,5)")
     ap.add_argument("--min-run-ante", type=int, default=2)
     ap.add_argument("--bp", default=str(BP_PATH))
     args = ap.parse_args()
+    antes = tuple(int(a) for a in args.antes.split(","))
+    reach = args.reach
 
     runs = reconstruct_runs(Path(args.bp), args.min_run_ante)
-    reach = args.reach
-    print(f"reconstructed runs: {len(runs)}  |  reach-{reach} success bar")
+    have_cat = [r for r in runs if any("n_economy" in x for x in r)]
+    print(f"reconstructed runs: {len(runs):,}  (with dec-066 categorical fields: "
+          f"{len(have_cat):,})")
+    print(f"outcome = mean max-ante reached  |  secondary bar = reach-{reach}")
 
     xb = [("0 xmult", lambda v: (v or 0) == 0),
           ("1 xmult", lambda v: (v or 0) == 1),
@@ -117,63 +147,60 @@ def main():
     sb = [("0 scal", lambda v: (v or 0) == 0),
           ("1 scal", lambda v: (v or 0) == 1),
           ("2+ scal", lambda v: (v or 0) >= 2)]
-    # categorical features (present only in dec-066+ records) — NaN-safe: a bucket
-    # with 0 rows just prints n=0. Auto-detected below.
     eb = [("0 econ", lambda v: (v or 0) == 0),
           ("1 econ", lambda v: (v or 0) == 1),
           ("2+ econ", lambda v: (v or 0) >= 2)]
+    lb = [("0 mult", lambda v: (v or 0) == 0),
+          ("1 mult", lambda v: (v or 0) == 1),
+          ("2+ mult", lambda v: (v or 0) >= 2)]
     rb = [("0 retrig", lambda v: (v or 0) == 0),
           ("1+ retrig", lambda v: (v or 0) >= 1)]
 
-    antes = (3, 4, 5, 6)
-    print_curve("REACH-8 by MARGIN at ante (product/target — the causal spine)",
-                runs, "margin", mb, antes, reach)
-    print_curve("REACH-8 by n_xmult at ante", runs, "n_xmult", xb, antes, reach)
-    print_curve("REACH-8 by n_scaling at ante (expected: NO signal)",
-                runs, "n_scaling", sb, (4, 5), reach)
+    # full-history features (present on every record)
+    print_feature("margin (power/target — causal spine)", runs, "margin", mb, antes, reach)
+    print_feature("n_xmult", runs, "n_xmult", xb, antes, reach)
+    print_feature("n_scaling (expected: no signal)", runs, "n_scaling", sb, antes, reach)
 
-    have_cat = any("n_economy" in x for r in runs for x in r)
+    # dec-066 categorical features — field-gated to the slice that logs them
+    cat_feats = [("n_economy", eb), ("n_mult", lb), ("n_retrigger", rb)]
     if have_cat:
-        print_curve("REACH-8 by n_economy at ante (dec-066 field)",
-                    runs, "n_economy", eb, antes, reach)
-        print_curve("REACH-8 by n_retrigger at ante (dec-066 field)",
-                    runs, "n_retrigger", rb, antes, reach)
+        for name, b in cat_feats:
+            print_feature(f"{name} (dec-066 slice)", runs, name, b, antes, reach,
+                          require_field=True)
     else:
-        print("\n[categorical fields n_economy/n_mult/n_retrigger not yet in the "
-              "log — they start logging after the dec-066 deploy; re-run once "
-              "records accumulate.]")
+        print("\n[no dec-066 categorical records yet — re-run once they accumulate]")
 
     # "never acquired an xmult engine" — deep vs shallow (clean, uncensored)
     def never_xmult(run):
         return all((x.get("n_xmult") or 0) == 0 for x in run)
-    deep = [r for r in runs if _max_ante(r) >= reach]
+    deep = [r for r in runs if _max_ante(r) >= 8]
     shallow = [r for r in runs if 4 <= _max_ante(r) <= 6]
     if deep and shallow:
         dn = 100.0 * sum(never_xmult(r) for r in deep) / len(deep)
         sn = 100.0 * sum(never_xmult(r) for r in shallow) / len(shallow)
-        print(f"\n=== NEVER got an xmult engine ===")
-        print(f"  deep (reached {reach}, n={len(deep)}):   {dn:4.1f}%")
+        print(f"\n=== never got an xmult engine ===")
+        print(f"  deep (reached 8, n={len(deep)}):   {dn:4.1f}%")
         print(f"  shallow (died 4-6, n={len(shallow)}):  {sn:4.1f}%")
 
-    # effect-size ranking — which feature discriminates hardest at ante 5/6
-    print("\n=== FEATURE EFFECT SIZE (reach-rate spread across buckets) ===")
-    feats = [("margin", mb), ("n_xmult", xb), ("n_scaling", sb)]
+    # effect-size ranking (spread in mean max-ante across buckets)
+    print("\n=== FEATURE EFFECT SIZE (spread in mean max-ante across buckets) ===")
+    feats = [("margin", mb, False), ("n_xmult", xb, False), ("n_scaling", sb, False)]
     if have_cat:
-        feats += [("n_economy", eb), ("n_retrigger", rb)]
-    ranked = []
-    for name, b in feats:
-        sp = max(spread(runs, 5, name, b, reach), spread(runs, 6, name, b, reach))
-        ranked.append((sp, name))
+        feats += [(n, b, True) for n, b in cat_feats]
+    ranked = [(max(depth_spread(runs, a, n, b, reach, req) for a in antes), n)
+              for n, b, req in feats]
     for sp, name in sorted(ranked, reverse=True):
-        print(f"  {name:12s} max spread (ante 5/6): {sp:5.1f} pts")
+        print(f"  {name:12s} max mean-ante spread: {sp:.2f} antes")
 
-    # emit the margin survival curve as a calibration table for the planner
-    calib = {"reach": reach, "runs": len(runs), "margin_reach_rate": {}}
+    # calibration table: empirical margin -> mean-depth + reach curve
+    calib = {"reach_bar": reach, "runs": len(runs), "margin_depth": {}}
     for ante in antes:
-        _n, rows = stratified_reach_rate(runs, ante, "margin", mb, reach)
-        calib["margin_reach_rate"][ante] = {
-            label: {"n": cnt, "rate_pct": None if rate != rate else round(rate, 2)}
-            for label, cnt, rate in rows}
+        _n, rows = depth_stats(runs, ante, "margin", mb, reach)
+        calib["margin_depth"][ante] = {
+            label: {"n": cnt,
+                    "mean_ante": None if mm != mm else round(mm, 3),
+                    "reach_pct": None if rr != rr else round(rr, 2)}
+            for label, cnt, mm, rr in rows}
     os.makedirs(CALIB_OUT.parent, exist_ok=True)
     CALIB_OUT.write_text(json.dumps(calib, indent=2))
     print(f"\nwrote calibration table -> {CALIB_OUT}")
