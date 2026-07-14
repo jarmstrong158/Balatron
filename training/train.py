@@ -106,6 +106,31 @@ def _build_composition(joker_cards: list) -> tuple:
     return nx, ns, len(joker_cards)
 
 
+def _joker_category_counts(joker_cards: list) -> dict:
+    """Categorical joker composition for the build-progression trend miner
+    (dec-066): economy / flat-mult / retrigger counts. Lets the offline
+    contrastive analyzer test ALL the candidate groupings, not just xmult /
+    scaling — so we can confirm which categories actually predict reach-8
+    (the audit found xmult + margin causal, raw scaling NOT) instead of
+    guessing. Logging only; never gates behavior."""
+    n_econ = n_mult = n_retrig = 0
+    for c in joker_cards:
+        name = c.get("label") or ""
+        s = JOKERS.get(name)
+        if not s:
+            continue
+        is_xmult = bool(s.get("xmult") or s.get("xmult_scaling")
+                        or s.get("scaling_type") == "xmult")
+        if s.get("economy"):
+            n_econ += 1
+        se = s.get("score_effect") or []
+        if not is_xmult and (s.get("mult_value") or "mult" in se):
+            n_mult += 1
+        if s.get("retrigger_effect") or s.get("mass_retrigger"):
+            n_retrig += 1
+    return {"n_economy": n_econ, "n_mult": n_mult, "n_retrigger": n_retrig}
+
+
 def _parse_required_states(err: str) -> set:
     """Pull the accepted states out of a BalatroBot INVALID_STATE error message,
     e.g. "Method 'play' requires one of these states: SELECTING_HAND" ->
@@ -1396,6 +1421,9 @@ class Trainer:
                         "n_jokers": nj, "env": env.env_id,
                         "step": self.global_step,
                     }
+                    # dec-066: categorical composition (economy/mult/retrigger)
+                    # so the winning-trend miner can test every grouping. Logging.
+                    record.update(_joker_category_counts(jcards))
                     # dec-037 depth-death instrumentation: log the FULL picture at
                     # each ante boundary so deep deaths (economy vs LEVELING vs
                     # composition) are diagnosable and the evaluator is validatable.

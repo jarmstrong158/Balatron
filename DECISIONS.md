@@ -655,6 +655,48 @@ burn cash); validate standard-pack buying at scale.
 
 ---
 
+### Winning-trend miner + margin potential — 07-13 (`dec-066`)
+**The idea (user):** log every win, mine decision trends across runs, reward the
+common trends — grouped by joker type (economy / scaling / mult / retrigger).
+
+**The trap:** "most common in winners" ≠ "causes winning" — that's survivorship
+bias, and dec-038 already hit it (economy *correlated* with depth but wasn't
+causal). Fix: **contrastive, conditioned on reaching each ante** — compare runs
+that all reached ante N and ask which reached ante 8. Same depth on both sides
+controls for luck.
+
+**Built `tools/analyze_winning_trends.py`** (reconstructs runs from
+`build_progression.jsonl`, splits on ante drop; 89,002 runs). Result on
+reach-8 rate, effect-size spread at ante 5/6:
+
+| feature | spread | verdict |
+|---|---|---|
+| **margin** (power/target) | **14.6 pts** | dominant causal spine (ante 6: 4.1→18.7% across buckets) |
+| n_xmult | 6.4 pts | real but weaker |
+| n_scaling | 0.9 pts | **noise** — the "count scaling jokers" instinct fails |
+
+Plus: **36.5%** of runs that died at ante 4–6 *never acquired an xmult engine*, vs
+**4.8%** of deep runs. Emits `logs/trend_calibration.json` (empirical
+margin→reach-8 curve) — turns the one-off dec-038 audit into a continuous validator.
+
+**Two supporting changes:**
+- **Enriched `build_progression` logging** with `n_economy / n_mult / n_retrigger`
+  (train.py `_joker_category_counts`) so the miner can test *every* grouping the
+  idea proposed — currently only `n_xmult/n_scaling` existed. Logging only.
+- **Product-margin potential** in `reward.py` (`REWARD_MARGIN_POTENTIAL_COEF`,
+  **OFF by default**): the reward shapes the xmult *proxy* (dec-032/043) but never
+  margin, the actual causal signal. Potential-based (Φ=coef·min(margin,cap),
+  paid on delta, con-008) so it telescopes to a bounded boundary term and can't
+  recreate the dec-057 "value head calibrated to shaping" failure. Ships
+  byte-neutral (scorer only runs when coef>0); flip on as its **own** A/B *after*
+  dec-065 can be read cleanly — enabling it now would confound that experiment.
+
+Tests: `tests/test_margin_potential.py` (4); 164 pass. Deploys on the next
+supervisor recycle (measurement + off-by-default reward → no forced interruption
+of the dec-065 run).
+
+---
+
 ## Gotchas & Hard-Won Lessons
 
 ### 1. The `won` flag means "reached the ante-8 boss," NOT "beat it"  *(critical)*

@@ -67,6 +67,22 @@ REWARD_SCALING_GROWTH = 0.05     # Per log-unit of scaling value growth
 # Joker build diversity
 REWARD_DIVERSITY_PER_CATEGORY = 0.02  # Per core category represented (chip/mult/xmult/econ)
 REWARD_SCALING_BONUS = 0.01           # Extra for having at least one scaling joker
+
+# ── Product-margin potential (dec-066) — OFF by default ──────────────────────
+# The winning-trend miner (tools/analyze_winning_trends.py) found MARGIN
+# (board power / boss target) is the single strongest CAUSAL predictor of
+# reaching ante 8, conditioned on reaching each ante: at ante 6, reach-8 climbs
+# 4.1%→18.7% across margin buckets (14.6-pt spread) vs 6.4 for n_xmult and 0.9
+# (noise) for n_scaling. The reward already shapes the xmult PROXY (dec-032/043)
+# but never margin itself. This adds a POTENTIAL-based term Φ(s)=coef·min(margin,
+# cap): potential-based shaping telescopes to a bounded boundary term, so unlike
+# flat shaping it can't recreate the dec-057 "value head calibrated to shaping,
+# not winning" failure (con-008: a potential DELTA, paid on change only). Left at
+# 0.0 so it ships byte-neutral; flip on as its OWN clean A/B (enabling it mid-run
+# would confound the in-flight dec-065 experiment). estimate_score_for_hand_type
+# is only computed when the coef is > 0, so OFF costs nothing.
+REWARD_MARGIN_POTENTIAL_COEF = 0.0    # A/B knob; try ~0.05–0.1 when validating
+REWARD_MARGIN_POTENTIAL_CAP = 4.0     # margin past 4 doesn't further raise reach-8
 REWARD_RETRIGGER_BONUS = 0.01         # Extra for having at least one retrigger joker
 
 # Sell penalty — penalize selling jokers that contribute significantly to scoring
@@ -204,6 +220,7 @@ class RewardCalculator:
         # keeps the incentive without the runaway accrual.
         self._prev_diversity_potential = 0.0
         self._prev_interest_potential = 0.0
+        self._prev_margin_potential = 0.0   # dec-066 (off unless coef > 0)
 
     def step(self, prev_state: Optional[dict], new_state: dict,
              action: Optional[str] = None,
@@ -229,6 +246,10 @@ class RewardCalculator:
         """
         if prev_state is None:
             self._sync_state(new_state, scaling_values, joker_contributions)
+            if REWARD_MARGIN_POTENTIAL_COEF > 0.0:
+                # seed the potential from the run's start so the first delta is
+                # measured from the true baseline, not from 0.
+                self._prev_margin_potential = self._margin_potential(new_state)
             return 0.0
 
         reward = 0.0
@@ -267,6 +288,13 @@ class RewardCalculator:
         # Joker build diversity
         reward += self._check_joker_diversity(new_state)
 
+        # Product-margin potential (dec-066) — the causal spine; OFF unless the
+        # coef is set. Potential DELTA only (con-008): paid on margin change.
+        if REWARD_MARGIN_POTENTIAL_COEF > 0.0:
+            phi = self._margin_potential(new_state)
+            reward += phi - self._prev_margin_potential
+            self._prev_margin_potential = phi
+
         # Sell penalty — penalize selling high-contribution jokers
         if action == "sell":
             reward += self._check_sell_penalty(prev_state, new_state)
@@ -281,6 +309,23 @@ class RewardCalculator:
         self._sync_state(new_state, scaling_values, joker_contributions)
         self._run_reward += reward
         return reward
+
+    def _margin_potential(self, state: dict) -> float:
+        """Φ(s) = coef · min(margin, cap), margin = RAW board power / boss target
+        — the same unbiased yardstick the build_progression log records (no
+        REALIZATION_FACTOR). Only invoked when the coef is > 0, so it's free when
+        the term is off. Returns the prior potential on any failure (zero delta)."""
+        try:
+            from environment.planner import ante_target, HANDS_PER_BLIND
+            from environment.hand_eval import estimate_score_for_hand_type
+            jcards = state.get("jokers", {}).get("cards", [])
+            ante = int(state.get("ante_num", state.get("ante", 1)) or 1)
+            power = estimate_score_for_hand_type(jcards, state) * HANDS_PER_BLIND
+            tgt = ante_target(ante, "boss")
+            margin = power / max(float(tgt), 1.0)
+            return REWARD_MARGIN_POTENTIAL_COEF * min(margin, REWARD_MARGIN_POTENTIAL_CAP)
+        except Exception:
+            return self._prev_margin_potential
 
     def get_run_reward(self) -> float:
         """Get total accumulated reward for the current run."""
