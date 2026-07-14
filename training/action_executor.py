@@ -131,6 +131,25 @@ class ActionExecutor:
                   flush=True)
             return default_idx
 
+    # dec-068: how far PAST the upcoming ante the score-only build must already
+    # project before near-term power counts as REDUNDANT (bank interest instead).
+    # 1.0 = clears the immediate ante with a full ante of headroom.
+    AHEAD_BUFFER = 1.0
+
+    def _already_clearing(self, jokers_raw: list, raw_state: dict) -> bool:
+        """True when the build's SCORE-ONLY survivability already projects
+        comfortably past the upcoming ante — near-term scoring power is then
+        redundant and the money is better banked (interest now / spike later,
+        dec-060). Uses _score_survivability, NOT build_survivability, so the
+        dec-065 economy/prior bonuses can't inflate the 'am I clearing?' check."""
+        try:
+            from environment.planner import _score_survivability
+            surv = _score_survivability(jokers_raw, raw_state)
+            cur = int(raw_state.get("ante_num", raw_state.get("ante", 1)) or 1)
+            return (surv - cur) >= self.AHEAD_BUFFER
+        except Exception:
+            return False
+
     def _planner_pick_swap(self, jokers_raw: list, raw_state: dict, money: float):
         """Pillar 2 full-slot planning (dec-034): slots are full, so evaluate
         sell-one + buy-one SWAPS by resulting build survivability and return
@@ -584,12 +603,27 @@ class ActionExecutor:
                             pick_val = _bval(pick_card, jokers_raw, raw_state) if pick_card else 0.0
                         except Exception:
                             pick_val = 1.0  # on error, just buy
-                        if (pick_val < self.PLANNER_REROLL_THRESHOLD
-                                and self._planner_reroll_ok(env, raw_state, money)):
-                            env.shop_rerolls = env.shop_rerolls + 1
-                            print(f"[SHOP] PLANNER reroll (barren shop, best "
-                                  f"d-surv={pick_val:.2f}, open slot)", flush=True)
-                            return "reroll", None
+                        if pick_val < self.PLANNER_REROLL_THRESHOLD:
+                            # dec-068: the best pick barely advances the build. If
+                            # we ALREADY clear the upcoming ante comfortably, near-
+                            # term power is redundant — HOLD and bank interest
+                            # rather than buy it (and don't reroll, which also
+                            # burns money). Exempt MUST_BUY engines (Blueprint/
+                            # Brainstorm). When we're NOT ahead, keep the dec-060
+                            # behaviour: reroll to hunt a real engine.
+                            pick_must_buy = bool(
+                                pick_name and pick_name in MUST_BUY_JOKERS)
+                            if (not pick_must_buy
+                                    and self._already_clearing(jokers_raw, raw_state)):
+                                print(f"[SHOP] SAVE: already clearing + marginal "
+                                      f"joker (d-surv={pick_val:.2f}) — banking "
+                                      f"interest, not buying", flush=True)
+                                return "gamestate", None
+                            if self._planner_reroll_ok(env, raw_state, money):
+                                env.shop_rerolls = env.shop_rerolls + 1
+                                print(f"[SHOP] PLANNER reroll (barren shop, best "
+                                      f"d-surv={pick_val:.2f}, open slot)", flush=True)
+                                return "reroll", None
                     tag = "PLANNER" if pick_idx != target_idx else "NN=planner"
                     print(f"[SHOP] {tag} buy: {pick_name or joker_key} "
                           f"(slot {pick_idx}, NN wanted {target_idx})", flush=True)

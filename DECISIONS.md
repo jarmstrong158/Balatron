@@ -726,6 +726,30 @@ day, and do KL (≤~0.05) / EV (~0.7) hold. Tests: `tests/test_margin_potential.
 
 ---
 
+### Don't overbuild — save when already clearing — 07-14 (`dec-068`)
+User watched the agent buy scoring/extra jokers *while already hitting the score
+to clear the next ante* — spending money that should compound as interest (and
+feed the dec-060 spike). The buy path had a hole: when the planner's best pick had
+`d-surv < 0.25`, it rerolled *if* reroll was allowed, but otherwise **fell through
+and bought the marginal joker anyway** — no "already clearing → hold" path.
+
+Fix (`action_executor.py`): new `_already_clearing()` — true when
+`_score_survivability − ante ≥ AHEAD_BUFFER(=1.0)` (build clears the immediate
+ante with a full ante of headroom; uses **score-only** survivability so the
+dec-065 economy/prior bonuses can't inflate the check). In the open-slot buy
+block, when the pick is marginal (`d-surv < 0.25`) **and** we're already clearing
+**and** it isn't a MUST_BUY engine → `return "gamestate"` (hold, bank interest)
+instead of buying. Real engines (`d-surv ≥ 0.25`) and Blueprint/Brainstorm still
+buy; when *not* ahead, the dec-060 reroll-to-hunt is unchanged. d-surv already
+separates redundant near-term power (low when ahead) from deep engines (high even
+when ahead), so this suppresses exactly the wasteful buys. Consistent with the
+architecture (reroll already overrides the NN's buy; PPO records the executed
+skip, so the policy distills toward saving). Buffer/threshold are untuned first
+guesses — watch mean max-ante (shouldn't drop from under-buying) and end-of-ante
+money (should rise). Tests: `tests/test_save_when_ahead.py` (3); 167 pass.
+
+---
+
 ## Gotchas & Hard-Won Lessons
 
 ### 1. The `won` flag means "reached the ante-8 boss," NOT "beat it"  *(critical)*
