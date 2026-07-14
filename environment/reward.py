@@ -81,7 +81,15 @@ REWARD_SCALING_BONUS = 0.01           # Extra for having at least one scaling jo
 # 0.0 so it ships byte-neutral; flip on as its OWN clean A/B (enabling it mid-run
 # would confound the in-flight dec-065 experiment). estimate_score_for_hand_type
 # is only computed when the coef is > 0, so OFF costs nothing.
-REWARD_MARGIN_POTENTIAL_COEF = 0.0    # A/B knob; try ~0.05–0.1 when validating
+REWARD_MARGIN_POTENTIAL_COEF = 0.1    # dec-067: A/B ACTIVE. Margin is the one
+                                      # durable causal lever the miner found
+                                      # (0.44-ante spread; everything else washed
+                                      # out with data). Flipped on despite dec-065
+                                      # lacking a clean win-read because at
+                                      # ~10-15 wins/day that read is a week+ away —
+                                      # the depth-metric miner attributes via the
+                                      # margin distribution instead. Revert to 0.0
+                                      # if KL/EV or mean-depth degrade.
 REWARD_MARGIN_POTENTIAL_CAP = 4.0     # margin past 4 doesn't further raise reach-8
 REWARD_RETRIGGER_BONUS = 0.01         # Extra for having at least one retrigger joker
 

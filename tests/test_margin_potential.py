@@ -13,8 +13,10 @@ def _state(chips, mult, ante=4):
             "round": {"hands_left": 4}, "money": 10, "blinds": {}}
 
 
-def test_off_by_default_ships_neutral():
-    assert R.REWARD_MARGIN_POTENTIAL_COEF == 0.0
+def test_margin_ab_active():
+    # dec-067: the margin A/B is now ON. Coef must be > 0 (the term is live) and
+    # bounded (a small shaping nudge, not a win-dwarfing reward).
+    assert 0.0 < R.REWARD_MARGIN_POTENTIAL_COEF <= 0.2
 
 
 def test_margin_potential_bounded_and_monotonic(monkeypatch):
@@ -48,6 +50,7 @@ def test_potential_is_a_delta_not_repaid(monkeypatch):
 
 def test_disabled_path_never_computes_margin(monkeypatch):
     """With coef 0, the step path must not touch the margin potential (stays 0)."""
+    monkeypatch.setattr(R, "REWARD_MARGIN_POTENTIAL_COEF", 0.0)
     rc = R.RewardCalculator()
     s = _state(200, 40)
     rc.step(None, s)

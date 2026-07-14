@@ -708,6 +708,24 @@ of dec-065's first-econ-then-taper.
 
 ---
 
+### Margin potential A/B turned ON — 07-14 (`dec-067`)
+Flipped `REWARD_MARGIN_POTENTIAL_COEF` **0.0 → 0.1** (live). The dec-066 miner's
+one durable finding is that **margin is the causal spine** (0.44-ante mean-depth
+spread, monotonic, holds across policies and as the slice tripled to 3.5k runs);
+every joker-category grouping washed out — the `n_economy=1` "sweet spot"
+regressed to ~flat with more data. The reward shapes the xmult *proxy* but never
+margin, so this fills the real gap. Potential-based (Φ=coef·min(margin,4), paid on
+delta) → telescopes to a bounded term, can't recreate the dec-057 blowup;
+per-step deltas stay in-band with the existing shaping (SCALING_GROWTH 0.05,
+DIVERSITY 0.02). **Flipped despite dec-065 lacking a clean win-read** — at ~10–15
+wins/day that read is a week+ away, and the miner attributes via the *depth*
+distribution (dense, every run), not wins. **Revert = coef→0.0** if KL/EV or
+mean max-ante degrade. Watch: does the margin distribution shift up over the next
+day, and do KL (≤~0.05) / EV (~0.7) hold. Tests: `tests/test_margin_potential.py`
+(4); 164 pass.
+
+---
+
 ## Gotchas & Hard-Won Lessons
 
 ### 1. The `won` flag means "reached the ante-8 boss," NOT "beat it"  *(critical)*
