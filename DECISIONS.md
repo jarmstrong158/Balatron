@@ -695,6 +695,17 @@ Tests: `tests/test_margin_potential.py` (4); 164 pass. Deploys on the next
 supervisor recycle (measurement + off-by-default reward → no forced interruption
 of the dec-065 run).
 
+**Follow-up (`5d6767d`): miner defaults to CONTINUOUS depth, not win-rate.**
+Wins are ~10–15/day — far too rare to stratify (only 35 reach-8 / 13 real wins in
+the first 1.8k-run categorical slice). The tool's primary outcome is now **mean
+max-ante reached** (every run informs it; readable today, tightens hourly), with a
+configurable binary reach-N as a secondary column. Categorical features are
+field-gated (pre-dec-066 records can't count as `0`); the effect-size ranking
+ignores buckets < 30 so a lone lucky run can't distort it. On the current-policy
+slice this **cross-validates margin** (still monotonic on a different policy's
+data) and shows **`n_economy=1` is the sweet spot** — an independent confirmation
+of dec-065's first-econ-then-taper.
+
 ---
 
 ## Gotchas & Hard-Won Lessons
