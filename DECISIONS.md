@@ -750,6 +750,32 @@ money (should rise). Tests: `tests/test_save_when_ahead.py` (3); 167 pass.
 
 ---
 
+### Log play↔build alignment + synergy for the miner — 07-15 (`dec-069`)
+User asked whether the "win-log" analysis captures **WHEN** decisions happen (not
+just what), hand levels, hand-play frequency, and play↔joker synergy. Audit's
+answer: the **policy already sees all of it** — the state encodes per-hand levels +
+**13 play-frequency slots** + a per-joker synergy value + `most_played_hand_type`,
+and **SIL replays full winning trajectories**, so timing/sequencing *is* learned.
+But the offline **miner** (`build_progression`) was a coarse per-ante snapshot that
+couldn't test those hypotheses. Added (train.py `_committed_hand_signals`, logging
+only): `ht_level`, `play_share` (committed hand's share of plays), `most_played`,
+`committed_is_played` (1 if the committed hand *is* the most-played — the
+sharpest "playing what you built for" signal), `n_synergy` (jokers whose trigger
+rewards the committed hand). Now the depth-conditioned miner can check whether
+play-consistency / synergy predict depth the way margin does. Tests: 167 pass.
+
+**On making the miner "active":** yes — the right form is a **self-tuning
+calibration loop**, not a live reward model. The miner periodically emits
+`trend_calibration.json` (empirical margin→depth curve); the planner reads it to
+replace dec-038's fixed `REALIZATION_FACTOR` scalar with the real outcome curve.
+A live *learned win-predictor* would mostly duplicate the PPO critic (skip it).
+Key guardrail: only make **validated causal** features (margin) active — auto-
+targeting "whatever current winners do" creates a self-reinforcing loop that
+amplifies the policy's present biases. Deferred so it doesn't confound the live
+dec-065/067/068 A/Bs.
+
+---
+
 ## Gotchas & Hard-Won Lessons
 
 ### 1. The `won` flag means "reached the ante-8 boss," NOT "beat it"  *(critical)*

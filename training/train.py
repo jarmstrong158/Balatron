@@ -63,7 +63,7 @@ from environment.hand_eval import (
     plan_optimal_action, compute_optimal_joker_order,
     plan_consumable_use, optimize_play_order,
     evaluate_pack_tarot, evaluate_pack_spectral, pick_best_planet,
-    evaluate_pack_standard,
+    evaluate_pack_standard, _hand_contains,
 )
 from recorder import RunRecorder
 from demo_buffer import DemoBuffer
@@ -129,6 +129,46 @@ def _joker_category_counts(joker_cards: list) -> dict:
         if s.get("retrigger_effect") or s.get("mass_retrigger"):
             n_retrig += 1
     return {"n_economy": n_econ, "n_mult": n_mult, "n_retrigger": n_retrig}
+
+
+def _committed_hand_signals(ht: str, hands: dict, joker_cards: list) -> dict:
+    """dec-069: play-vs-build alignment + committed-hand leveling + joker synergy
+    for the trend miner. Tests the hypotheses that WHEN/consistency matter: is the
+    committed hand actually the one PLAYED (build<->play alignment), how leveled is
+    it (leveling pace), and how many jokers reward it (synergy). Logging only."""
+    total = 0
+    ht_played = 0
+    most_played = ""
+    most_n = -1
+    for name, info in hands.items():
+        if not isinstance(info, dict):
+            continue
+        p = info.get("played", 0) or 0
+        total += p
+        if name == ht:
+            ht_played = p
+        if p > most_n:
+            most_n, most_played = p, name
+    play_share = round(ht_played / total, 3) if total else 0.0
+    ht_level = int(hands.get(ht, {}).get("level", 1) or 1)
+    # jokers that reward the committed hand type (schema triggers; owned jokers
+    # key into JOKERS by display label, matching _build_composition).
+    n_syn = 0
+    for c in joker_cards:
+        s = JOKERS.get(c.get("label") or "")
+        if not s:
+            continue
+        trig = s.get("triggers") or []
+        if "any_hand_played" in trig:
+            n_syn += 1
+        elif "specific_hand_type" in trig:
+            th = s.get("trigger_hand_type", "")
+            if th and (ht == th or _hand_contains(ht, th)):
+                n_syn += 1
+    return {"ht_level": ht_level, "play_share": play_share,
+            "most_played": most_played,
+            "committed_is_played": int(total > 0 and most_played == ht),
+            "n_synergy": n_syn}
 
 
 def _parse_required_states(err: str) -> set:
@@ -1458,6 +1498,9 @@ class Trainer:
                             "target": round(float(tgt), 0),
                             "margin": round(float(power) / max(float(tgt), 1.0), 3),
                         })
+                        # dec-069: play<->build alignment + leveling + synergy
+                        record.update(_committed_hand_signals(
+                            ht, raw_state.get("hands", {}), jcards))
                         env.last_proj_power = float(power)  # dec-049: for realized-vs-projected
                     except Exception:
                         pass  # diagnostics are best-effort; never block the log
