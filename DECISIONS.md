@@ -776,6 +776,23 @@ dec-065/067/068 A/Bs.
 
 ---
 
+### Play-frequency-weighted score projection — the ante wall fix — 07-16 (`dec-070`)
+`estimate_score_for_hand_type` (hand_eval.py) took the **best** score among hand
+types played at least once. One lucky Straight Flush at ante 2 then pinned the
+projection forever to a hand the bot never repeated — which is why
+`realized_vs_proj` sat at **~0.30 at every ante**: the estimate described a
+ceiling the bot couldn't reach. Now every hand type is scored and **averaged
+weighted by its share of actual plays** (`0.05 + 0.95 * play_share`), so the
+projection tracks what the bot *typically* does. The floor is **not a new
+parameter** — `pick_best_planet` already uses the identical form for the same
+job (hand_eval.py ~3658); reusing it keeps the two frequency-weighting sites
+consistent and settles the open question from the prior session. Tradeoff: a
+weighted average is strictly lower than a max, so **all** projections drop —
+dashboard.py gets a regime boundary at step **4369** so `realized_vs_proj` isn't
+read across the discontinuity. Tests: 167 pass.
+
+---
+
 ## Gotchas & Hard-Won Lessons
 
 ### 1. The `won` flag means "reached the ante-8 boss," NOT "beat it"  *(critical)*

@@ -3409,11 +3409,13 @@ def _get_dominant_suit(jokers: list[dict]) -> Optional[str]:
 
 
 def estimate_score_for_hand_type(jokers: list[dict], gamestate: dict) -> float:
-    """Estimate realistic scoring power based on most-played hand types.
+    """Estimate realistic scoring power, weighted by hand-type play frequency.
 
     Uses actual API chips/mult (planet levels included) + joker effects.
-    Estimates based on hand types the bot ACTUALLY plays (from play counts),
-    not theoretical best. Falls back to common types for early game.
+    Scores every hand type, then averages them weighted by each type's share of
+    the bot's plays (with a small floor so unplayed types stay reachable), so a
+    one-off lucky high-tier hand can't pin the estimate. Falls back to Pair for
+    the early game, before any play history exists.
 
     Args:
         jokers: owned joker dicts from the API
@@ -3514,11 +3516,19 @@ def estimate_score_for_hand_type(jokers: list[dict], gamestate: dict) -> float:
     # Sort by score
     scored_types.sort(key=lambda x: x[1], reverse=True)
 
-    # If we have play history, use the best score among frequently-played types
-    # (at least 1 play = the bot has achieved this hand type before)
-    played_scores = [s for _, s, p in scored_types if p >= 1]
-    if played_scores:
-        return played_scores[0]  # best score among types we've actually played
+    # If we have play history, average the per-type scores WEIGHTED BY how often
+    # the bot actually plays each type. Taking the best score among types played
+    # at least once (the pre-dec-070 rule) let a single lucky Straight Flush at
+    # ante 2 pin the projection to a hand the bot never repeats — realized/
+    # projected sat at ~0.30 at every ante. The floor mirrors pick_best_planet:
+    # it keeps unplayed types reachable (a type the bot is about to learn still
+    # moves the estimate) without letting them dominate, since high-tier scores
+    # dwarf a Pair's by ~10x.
+    total_played = sum(p for _, _, p in scored_types)
+    if total_played > 0:
+        weights = [0.05 + 0.95 * (p / total_played) for _, _, p in scored_types]
+        return (sum(s * w for (_, s, _), w in zip(scored_types, weights))
+                / sum(weights))
 
     # Early game / no history — use Pair as the realistic baseline
     # (the most common hand type for any deck)

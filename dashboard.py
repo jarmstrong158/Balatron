@@ -52,6 +52,9 @@ REGIMES = [
     (3749, "dec-058 remeasure (LR fixed)",
      "LR lock verified via dec-061; pre-boundary data ran ~1/3 of time at "
      "damaged 2.7e-4 LR"),
+    (4369, "play-frequency-weighted projection (dec-070)",
+     "projected scores now weighted by play frequency; expect realized_vs_proj "
+     "to move toward 1.0"),
 ]
 
 UPDATE_RE = re.compile(
