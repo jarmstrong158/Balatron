@@ -695,27 +695,6 @@ class ActionExecutor:
                 if self.policy_authority:
                     swap = self._planner_pick_swap(jokers_raw, raw_state, money)
                     if swap is None:
-                        # dec-075 ESCAPE HATCH. Slots are full and no 1-for-1 swap
-                        # improves the build — and this used to SILENTLY NO-OP.
-                        # It is the modal state in which the agent dies: slots run
-                        # 4.74-4.94/5 full by ante 4-5 (the modal death antes),
-                        # 48.7% of ante-4 builds own ZERO xmult, and 36.6% of
-                        # ante-4-6 deaths never acquired one. The
-                        # reroll-to-hunt-an-engine block lives in the OPEN-slot
-                        # branch above, so it was unreachable exactly here: the
-                        # build froze at 5 flat jokers with no way out (4,960
-                        # zero-effect shop steps + 605 forced random pack-buys in
-                        # a single log). Reroll to refresh the shop so an
-                        # improving swap CAN appear. Guards are unchanged:
-                        # _planner_reroll_ok still enforces the interest floor,
-                        # the per-shop cap and keep-enough-to-buy, and the dec-068
-                        # save-gate still wins when we're already clearing.
-                        if (not self._already_clearing(jokers_raw, raw_state)
-                                and self._planner_reroll_ok(env, raw_state, money)):
-                            env.shop_rerolls = env.shop_rerolls + 1
-                            print("[SHOP] PLANNER reroll (full slots, no improving "
-                                  "swap - hunting an engine)", flush=True)
-                            return "reroll", None
                         return "gamestate", None  # no swap improves the build
                     sell_idx, buy_idx = swap
                     sell_nm = jokers_raw[sell_idx].get("label", "?")
