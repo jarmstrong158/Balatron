@@ -55,6 +55,14 @@ REGIMES = [
     (4369, "play-frequency-weighted projection (dec-070)",
      "projected scores now weighted by play frequency; expect realized_vs_proj "
      "to move toward 1.0"),
+    (4417, "split projection floor (dec-070 fix)",
+     "U4369-4416 ran dec-070's first cut, which floored EACH of the 12 hand "
+     "types at 0.05 — that handed the unplayed high-tier hands ~39% of the "
+     "weight and left projections ~3.5x inflated, so realized_vs_proj barely "
+     "moved off its pre-dec-070 ~0.30. The floor is now split across the types "
+     "(0.05/12 each). realized_vs_proj steps AGAIN here: that 48-update stretch "
+     "is its own regime, matching neither the pre-dec-070 nor the post-fix "
+     "accounting — don't read across either boundary."),
 ]
 
 UPDATE_RE = re.compile(
