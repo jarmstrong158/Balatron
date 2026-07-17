@@ -839,6 +839,48 @@ Tests: `tests/test_consumable_targets.py` (4); 176 pass.
 
 ---
 
+### Revert the margin reward — null by construction — 07-17 (`dec-073`)
+A 6-agent deep audit killed dec-067. **`REWARD_MARGIN_POTENTIAL_COEF` 0.1 → 0.0.**
+Two independent fatal reasons: (1) **PBRS is policy-invariant** (Ng et al.) — a
+potential term telescopes to a bounded boundary value and **cannot change the
+optimal policy at ANY coefficient**; its only benefit is faster value learning, and
+EV is already 0.70–0.83, so there was nothing to accelerate. **The A/B was null
+before it started.** (2) The lever is small anyway: stratifying 69,894 runs
+(survivorship-controlled) shows a *perfect* margin-maximizing policy reaches only
+**1.3% win from ante 4 / 2.8% from ante 5** — ~2×, against a needed ~10–20×.
+dec-066/067 elevated margin to "the causal spine" **without ever asking "if maxed,
+what's the win rate?"** — the question this project has never asked before pulling
+a lever. Also: dec-032/033 had *already closed* the reward category ("reward
+shaping can't manufacture shop RNG/affordability") and dec-057 said stop tuning
+PPO strategy; dec-067 reopened both. The reward is **exonerated**: it's already a
+faithful depth surrogate (`R = 11.15·ante − 14.62`, **corr 0.977**; two terms =
+97% of mass), correctly ranked. Machinery kept (free at 0); if margin is ever to
+matter it must be a **policy-visible observation** (currently computable in
+**0.000%** of states) or a planner input — never shaping.
+
+### Unblock ALL measurement — `eval_session.py` — 07-17 (`dec-074`)
+**Zero held-out evals have ever completed.** No `logs/eval_*.jsonl` exists;
+`eval_baseline.out` died mid-run on 06-30. So **every A/B since dec-045 has been an
+eyeball on a confounded live trainer** with 3–8 concurrent uncontrolled changes —
+which is how dec-059 (dec-057's predicted ~5× top lever) could be **nulled by its
+own named metric** (The Wall: 66% vs a 67% baseline) without anyone noticing, and
+how ~40 decisions produced **+0.27 mean ante**.
+
+The cause was **operational, not a code bug**: `evaluate.py` needs the game servers
+to itself ("pause training first"), but the supervisor's existence layer (con-010)
+**relaunches the trainer within ~30s and steals the ports back** — exactly how the
+06-30 attempt died (INVALID_STATE on next_round/play). `supervise.py:642` already
+had the right primitive: `SUPERVISOR_STOP` exits cleanly and **leaves the games up**.
+`eval_session.py` sequences it: touch stop-file → kill trainer → run the resumable
+eval → **`finally:`** remove stop-file + relaunch supervisor (training returns on
+Ctrl-C/crash/failure). The harness was always well-designed — `eval_report.py`
+already does Wilson-CI conditional-advance curves and **paired seed-matched A/B**,
+and already knew win-rate is unmeasurable at 0.5% ("a 500-game sample expects ~2.5
+wins"). It only ever needed to be *runnable*. **Cost: an eval pauses training for
+hours — accepted; an unmeasured trainer only manufactures unvalidated changes.**
+
+---
+
 ## Gotchas & Hard-Won Lessons
 
 ### 1. The `won` flag means "reached the ante-8 boss," NOT "beat it"  *(critical)*

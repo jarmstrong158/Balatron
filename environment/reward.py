@@ -81,15 +81,28 @@ REWARD_SCALING_BONUS = 0.01           # Extra for having at least one scaling jo
 # 0.0 so it ships byte-neutral; flip on as its OWN clean A/B (enabling it mid-run
 # would confound the in-flight dec-065 experiment). estimate_score_for_hand_type
 # is only computed when the coef is > 0, so OFF costs nothing.
-REWARD_MARGIN_POTENTIAL_COEF = 0.1    # dec-067: A/B ACTIVE. Margin is the one
-                                      # durable causal lever the miner found
-                                      # (0.44-ante spread; everything else washed
-                                      # out with data). Flipped on despite dec-065
-                                      # lacking a clean win-read because at
-                                      # ~10-15 wins/day that read is a week+ away —
-                                      # the depth-metric miner attributes via the
-                                      # margin distribution instead. Revert to 0.0
-                                      # if KL/EV or mean-depth degrade.
+REWARD_MARGIN_POTENTIAL_COEF = 0.0    # dec-073: REVERTED (was 0.1, dec-067).
+                                      # Two independent reasons, both fatal:
+                                      # (1) NULL BY CONSTRUCTION — this is
+                                      # potential-based shaping, which is
+                                      # policy-invariant (Ng et al. 1999): it
+                                      # telescopes to a bounded boundary term and
+                                      # CANNOT change the optimal policy at ANY
+                                      # coefficient. It only accelerates value
+                                      # learning, and EV is already 0.70-0.83, so
+                                      # there is nothing left to accelerate.
+                                      # (2) The lever is small anyway: maxing
+                                      # margin only ~doubles the win rate (from
+                                      # ante 4: 0.76% -> 1.33%); it cannot reach
+                                      # the 10x we need. dec-066/067 elevated
+                                      # margin to "the causal spine" without ever
+                                      # asking "if maxed, what's the win rate?"
+                                      # Also: dec-032/033 had already CLOSED the
+                                      # reward-shaping category ("reward shaping
+                                      # can't manufacture shop RNG/affordability")
+                                      # and dec-057 said stop tuning PPO strategy.
+                                      # Keep the machinery (tested, free when 0);
+                                      # do not re-enable without a completed eval.
 REWARD_MARGIN_POTENTIAL_CAP = 4.0     # margin past 4 doesn't further raise reach-8
 REWARD_RETRIGGER_BONUS = 0.01         # Extra for having at least one retrigger joker
 

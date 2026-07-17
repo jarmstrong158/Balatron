@@ -13,10 +13,12 @@ def _state(chips, mult, ante=4):
             "round": {"hands_left": 4}, "money": 10, "blinds": {}}
 
 
-def test_margin_ab_active():
-    # dec-067: the margin A/B is now ON. Coef must be > 0 (the term is live) and
-    # bounded (a small shaping nudge, not a win-dwarfing reward).
-    assert 0.0 < R.REWARD_MARGIN_POTENTIAL_COEF <= 0.2
+def test_margin_ab_reverted_off():
+    # dec-073: REVERTED to 0.0. This term is potential-based => policy-invariant
+    # (Ng et al.) => it cannot change the optimal policy at any coefficient, so
+    # it was null by construction. The machinery stays (free at 0); do not
+    # re-enable without a COMPLETED held-out eval to measure it.
+    assert R.REWARD_MARGIN_POTENTIAL_COEF == 0.0
 
 
 def test_margin_potential_bounded_and_monotonic(monkeypatch):
