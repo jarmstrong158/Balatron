@@ -127,11 +127,19 @@ def main():
     if args.out:
         cmd += ["--out", args.out]
 
+    # THE reason evals have always died (gotcha 6): with stdout redirected to a
+    # file, Windows Python encodes as cp1252 and the first non-ASCII log line
+    # (e.g. "[SHOP] REDIRECT pack buy → joker buy") raises UnicodeEncodeError and
+    # kills the process. supervise.py already fixes this for the TRAINER
+    # (supervise.py:567 `env = dict(os.environ, PYTHONUTF8="1")`) — evaluate.py
+    # never got the same treatment, so every eval crashed on its first redirect.
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+
     rc = 1
     try:
         stop_stack()
         print(f"[EVAL-SESSION] running: {' '.join(cmd)}", flush=True)
-        rc = subprocess.call(cmd, cwd=REPO)
+        rc = subprocess.call(cmd, cwd=REPO, env=env)
         print(f"[EVAL-SESSION] evaluate.py exited rc={rc}", flush=True)
     except KeyboardInterrupt:
         print("[EVAL-SESSION] interrupted.", flush=True)
