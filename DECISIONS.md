@@ -879,6 +879,25 @@ and already knew win-rate is unmeasurable at 0.5% ("a 500-game sample expects ~2
 wins"). It only ever needed to be *runnable*. **Cost: an eval pauses training for
 hours — accepted; an unmeasured trainer only manufactures unvalidated changes.**
 
+**THE ACTUAL ROOT CAUSE (`88d60b4`) — it was a missing env var, not the game.**
+Running `eval_session.py` reproduced the real failure in ~40 seconds:
+```
+print(f"[SHOP] REDIRECT pack buy → joker buy: ...")     # U+2192
+UnicodeEncodeError: 'charmap' codec can't encode character '→'
+```
+With stdout redirected to a file — which **every** eval is, being a multi-hour
+background job — Windows Python encodes **cp1252** and the first non-ASCII log
+line **kills the process**. Every eval died on its first shop redirect. Not
+desyncs (the 06-30 `INVALID_STATE` tail was incidental), not difficulty, not the
+runtime. **The project had already written the rule down — gotcha 6: "always
+launch with `PYTHONUTF8=1`" — and `supervise.py:567` already applies it to the
+TRAINER, which is why the trainer survives the identical print.** `evaluate.py`
+never got it across dec-045/046/055. Fix: `PYTHONUTF8=1` +
+`PYTHONIOENCODING=utf-8` on the eval subprocess. **Verified:** the eval now runs
+past the crash and is writing `logs/eval_balatron_phase1_update004434.jsonl` —
+the first eval artifact in the project's history. *Three decisions built a harness
+that a one-line env var kept from ever running once.*
+
 ---
 
 ## Gotchas & Hard-Won Lessons
