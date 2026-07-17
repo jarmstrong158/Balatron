@@ -811,6 +811,34 @@ reachability this deliberately keeps. Tests: **172 pass** (5 new in
 
 ---
 
+### Consumable-slot clog — never fire a targeted consumable bare — 07-17 (`dec-072`)
+Chasing why leveling is slow (dec-069 found **committed-hand level ≥4 by ante 4 →
+33% reach-6 vs ~22%**, yet only **9.3%** of runs get there). Planet *supply* was
+fine (315 planet buys + 863 celestial opens per log), so acquisition wasn't the
+bottleneck — but **144 of ~215 consumable-use attempts were FAILING**, all
+targeted tarots/spectrals fired with no `cards` list. The *same* cards failed over
+and over (**Trance 30×, Death 22×, Strength 20×**) — proof they were **stuck in a
+slot**, not transient. With only 2 consumable slots, unusable tarots clog them so
+planets can't be held → **leveling stalls**. This is the `[WARN] INVALID_STATE`
+line that had been written off as benign timing noise all session.
+
+Root cause: `action_executor.py`'s `action_type==8` branch fell through to a bare
+`use{consumable}` for *any* consumable. `plan_consumable_use` (hand_eval) already
+computes each card's correct targets and is called from two *other* paths — the
+policy path just never consulted it. Fix: `CONSUMABLE_NEEDS_TARGET` in hand_eval
+(single source of truth, contents match the observed failures exactly); if the
+picked consumable needs targets and none were supplied, ask the planner, else
+**no-op** rather than fire a guaranteed reject — con-005's lesson applied to the
+consumable path. Untargeted consumables (planets) unchanged.
+
+Partly an **own-goal from dec-065**, which raised Trance's (blue seal) pick value:
+the agent grabbed it more and could never use it, actively defeating dec-065's
+leveling intent. Watch: consumable-use failures should collapse from 144, and the
+level-4-by-ante-4 rate should rise from 9.3%.
+Tests: `tests/test_consumable_targets.py` (4); 176 pass.
+
+---
+
 ## Gotchas & Hard-Won Lessons
 
 ### 1. The `won` flag means "reached the ante-8 boss," NOT "beat it"  *(critical)*

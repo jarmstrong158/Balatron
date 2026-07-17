@@ -4898,6 +4898,23 @@ def _find_death_targets(hand_cards: list[dict],
     return (left_idx, copy_source)
 
 
+# Consumables that REQUIRE hand-card targets. The API rejects these outright
+# ("requires card selection and can only be used in SELECTING_HAND state") if
+# fired without a `cards` list, and the card then sits in a consumable slot being
+# retried forever — clogging the 2 slots so planets can't be held (dec-072).
+# Single source of truth; train.py's pack path keeps its own copy for pack picks.
+CONSUMABLE_NEEDS_TARGET = {
+    # Tarots that enhance/modify specific hand cards
+    "c_magician", "c_empress", "c_heirophant", "c_lovers", "c_chariot",
+    "c_justice", "c_hanged_man", "c_death", "c_tower", "c_star",
+    "c_moon", "c_sun", "c_world", "c_devil", "c_strength",
+    # Spectrals that need hand targets
+    "c_aura", "c_sigil", "c_ouija", "c_immolate",
+    "c_medium", "c_talisman", "c_deja_vu", "c_trance",
+    "c_familiar", "c_grim", "c_incantation", "c_cryptid",
+}
+
+
 def plan_consumable_use(gamestate: dict) -> Optional[dict]:
     """Decide whether and how to use a held consumable.
 

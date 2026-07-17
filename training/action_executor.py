@@ -975,7 +975,24 @@ class ActionExecutor:
                 ]
                 if target_cards:
                     return "use", {"consumable": c_idx, "cards": target_cards}
-            return "use", {"consumable": c_idx}
+            # dec-072: this used to FALL THROUGH and fire a bare
+            # use{consumable} for ANY consumable. For a TARGETED one (Death,
+            # Strength, Trance, ...) the API rejects it outright, and the card
+            # then sits in a slot getting retried forever (Trance 30x, Death 22x
+            # in one log) — clogging the 2 consumable slots so planets can't be
+            # held, which stalls LEVELING (the lever that predicts depth). Same
+            # class as con-005: never fall through into a guaranteed reject.
+            from environment.hand_eval import CONSUMABLE_NEEDS_TARGET
+            c_key = consumables[c_idx].get("key", "") if c_idx < len(consumables) else ""
+            if c_key in CONSUMABLE_NEEDS_TARGET:
+                # The policy picked a targeted consumable but supplied no targets
+                # (wrong state, or it selected no cards). Ask the planner, which
+                # knows each card's proper target count/choice.
+                planned = plan_consumable_use(raw_state)
+                if planned and planned.get("cards"):
+                    return "use", planned
+                return "gamestate", None      # can't resolve targets -> no-op
+            return "use", {"consumable": c_idx}   # untargeted (planets, etc.)
 
         # Select blind
         if action_type == 9:
