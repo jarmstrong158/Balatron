@@ -900,7 +900,18 @@ that a one-line env var kept from ever running once.*
 
 ---
 
-### The build escape hatch — 07-17 (`dec-075`) — *first change shipped with a baseline*
+### The build escape hatch — 07-17 (`dec-075`) — *first change shipped with a baseline; MEASURED NULL → REVERTED*
+> **RESULT (paired A/B, checkpoint 004434, same 300 seeds):** null-to-slightly-negative.
+> reach≥4 66.3%→64.3%, reach≥5 45.5%→40.9% (CIs overlap); paired McNemar @ ante-6
+> gate **33 better vs 38 worse, P=46% → inconclusive**. WIN 6→1 (Poisson noise).
+> **REVERTED** (`c152cd7`) — it didn't help a frozen policy, and "it'll help once
+> trained" is the unfalsifiable reasoning the audit indicted. The executor half
+> fired **0 times** (untested); the mask half is real con-011 correctness but needs
+> the prior-KL guidance channel restored (annealed to 0) to avoid random rerolls —
+> a future *measured* experiment, not a bare veto removal. **The value here was the
+> process: for the first time a change was measured and shown not to work before it
+> could accrete as another unvalidated resident.** Original writeup below.
+
 **The baseline** (`eval_balatron_phase1_update004434.jsonl`, 300 held-out seeds —
 the project's first completed eval):
 ```
