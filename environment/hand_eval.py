@@ -3520,13 +3520,20 @@ def estimate_score_for_hand_type(jokers: list[dict], gamestate: dict) -> float:
     # the bot actually plays each type. Taking the best score among types played
     # at least once (the pre-dec-070 rule) let a single lucky Straight Flush at
     # ante 2 pin the projection to a hand the bot never repeats — realized/
-    # projected sat at ~0.30 at every ante. The floor mirrors pick_best_planet:
-    # it keeps unplayed types reachable (a type the bot is about to learn still
-    # moves the estimate) without letting them dominate, since high-tier scores
-    # dwarf a Pair's by ~10x.
+    # projected sat at ~0.30 at every ante.
+    #
+    # The floor keeps every type reachable (a type the bot is about to learn
+    # still moves the estimate), but unlike pick_best_planet's per-candidate
+    # 0.05 it is split ACROSS the types: this is an absolute magnitude, not a
+    # ranking, so a per-type floor would hand the 12 unplayed types ~39% of the
+    # weight while their scores run 10-60x a Pair's — re-inflating the estimate
+    # to ~3.5x realized and undoing the fix. Split, the floor costs ~5% total.
+    FLOOR_MASS = 0.05
     total_played = sum(p for _, _, p in scored_types)
     if total_played > 0:
-        weights = [0.05 + 0.95 * (p / total_played) for _, _, p in scored_types]
+        floor_each = FLOOR_MASS / len(scored_types)
+        weights = [floor_each + (1.0 - FLOOR_MASS) * (p / total_played)
+                   for _, _, p in scored_types]
         return (sum(s * w for (_, s, _), w in zip(scored_types, weights))
                 / sum(weights))
 

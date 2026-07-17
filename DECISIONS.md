@@ -783,13 +783,31 @@ projection forever to a hand the bot never repeated — which is why
 `realized_vs_proj` sat at **~0.30 at every ante**: the estimate described a
 ceiling the bot couldn't reach. Now every hand type is scored and **averaged
 weighted by its share of actual plays** (`0.05 + 0.95 * play_share`), so the
-projection tracks what the bot *typically* does. The floor is **not a new
-parameter** — `pick_best_planet` already uses the identical form for the same
-job (hand_eval.py ~3658); reusing it keeps the two frequency-weighting sites
-consistent and settles the open question from the prior session. Tradeoff: a
-weighted average is strictly lower than a max, so **all** projections drop —
-dashboard.py gets a regime boundary at step **4369** so `realized_vs_proj` isn't
-read across the discontinuity. Tests: 167 pass.
+projection tracks what the bot *typically* does.
+
+**The floor is split across the types (`0.05/12` each), not `0.05` per type** —
+this entry originally specified reusing `pick_best_planet`'s per-candidate form
+verbatim as "not a new parameter." Measuring it rejected that. `pick_best_planet`
+floors a **gain** consumed by an `argmax`, where the floor can't move the winner
+much; this function returns an **absolute magnitude** compared against blind
+requirements, so floor mass leaks straight into the number. At `0.05` each, the
+12 unplayed types take **39% of the weight** — and they're the 1136–3360 point
+hands (Straight Flush..Flush Five) the bot never scores, vs a Pair's 56. That
+floor becomes the *new* dominant error: modelled realized/proj moves only
+**0.18 → 0.28** (target 1.0), and the clean pure-Pair case *regresses* from a
+correct 56 to 391 (**1.0 → 0.14**). Split, the floor costs ~5% total: realized/
+proj **→ 0.75**, pure-Pair holds at 99 vs a true 56, and every type keeps nonzero
+weight so a hand the bot is about to learn still moves the estimate. **Lesson: a
+constant tuned for a ranking doesn't transfer to a magnitude without
+re-measuring.**
+
+Tradeoffs: a weighted average is strictly lower than a max, so **all**
+projections drop — dashboard.py gets a regime boundary at step **4369** so
+`realized_vs_proj` isn't read across the discontinuity. The split floor is still
+~1.8x over a true pure-Pair score (99 vs 56); zero floor would be exact but
+would make a type contribute nothing until first played, which is the
+reachability this deliberately keeps. Tests: **172 pass** (5 new in
+`tests/test_score_projection.py` lock in the one-lucky-Straight-Flush case).
 
 ---
 
