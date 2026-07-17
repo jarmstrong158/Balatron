@@ -900,6 +900,46 @@ that a one-line env var kept from ever running once.*
 
 ---
 
+### The build escape hatch — 07-17 (`dec-075`) — *first change shipped with a baseline*
+**The baseline** (`eval_balatron_phase1_update004434.jsonl`, 300 held-out seeds —
+the project's first completed eval):
+```
+reach>=2 85.1% | >=3 86.3% | >=4 66.3% [59.6,72.5] | >=5 45.5% [37.3,54.0]
+WIN 2.00% [0.92,4.29]
+```
+Advance is 85–86% through ante 3, then falls off at **ante 4 (66.3%) and 5
+(45.5%)** — exactly where power stops out-scaling the target (2.15× vs 2.50×, then
+1.66× vs 2.20×).
+
+**The hole.** 48.7% of ante-4 builds own **zero xmult**; 36.6% of ante-4–6 deaths
+never acquired one — not because xmult is unavailable, but because **both**
+acquisition routes were closed:
+1. **`action_executor`** — the reroll-to-hunt-an-engine block sits inside the
+   `if joker_count < joker_limit` branch, so at **full slots** a non-improving swap
+   **silently no-op'd**. Slots run **4.74–4.94/5 full by ante 4–5** — the modal
+   death antes. The build froze at 5 flat jokers with no way out (**4,960
+   zero-effect shop steps + 605 forced random pack-buys** per log).
+2. **`action_space`** — the mask **hard-zeroed a legal `ACTION_REROLL`** on
+   heuristic grounds ("don't reroll past a buyable joker"), making it **illegal in
+   96.3% of shops**. `legal = mask > 0` cannot distinguish a heuristic veto from
+   real illegality — a **con-011 violation**. Now legality-only; opinions ride the
+   bias value. Measured A/B: every veto **0.0 → 0.3**, while genuine
+   unaffordability still returns **0.0**.
+
+**Bonus find:** `any_buyable_joker` is **overloaded** — dec-016 sets it for
+*planets* (to keep BUY reachable), which silently vetoed reroll too. **An
+affordable planet blocked engine-hunting.** Bias values are inert (prior annealed
+to 0), so 0.0→0.3 captures the whole functional effect.
+
+Guards unchanged: `_planner_reroll_ok` (interest floor / per-shop cap /
+keep-buy-money) and dec-068's save-gate still apply, so this cannot drain the
+economy. Tests: `tests/test_escape_hatch.py` (7); 183 pass.
+**Caveat:** the paired eval mostly measures the *executor* half — the policy has
+never explored reroll, so a frozen policy won't choose it; the mask half needs
+training. Trust ante 4 (n=202) and ante 5 (n=134); ignore the deep rows (n=11–22).
+
+---
+
 ## Gotchas & Hard-Won Lessons
 
 ### 1. The `won` flag means "reached the ante-8 boss," NOT "beat it"  *(critical)*
