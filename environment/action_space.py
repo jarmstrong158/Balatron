@@ -1015,13 +1015,22 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             money_after_reroll = money - reroll_cost
 
             if money < reroll_cost or money_after_reroll < min_joker_cost:
+                # LEGALITY: genuinely cannot afford it. The only valid 0.0 here.
                 mask[ACTION_REROLL] = 0.0
             elif any_buyable_joker:
-                # Something worth buying exists — don't reroll past it
-                mask[ACTION_REROLL] = 0.0
+                # dec-075 / con-011: was 0.0 ("don't reroll past it") — a
+                # HEURISTIC veto that made a LEGAL action illegal. The network
+                # reads `legal = mask > 0` and cannot tell a heuristic veto from
+                # real illegality, so this forbade rerolling in 96.3% of shops —
+                # structurally preventing the agent from spinning for an xmult
+                # engine, the lever absent in 36.6% of ante-4-6 deaths. Opinions
+                # ride the bias VALUE (prior-KL only, con-011), never 0.0.
+                mask[ACTION_REROLL] = 0.3   # prefer the buy, but rerolling is LEGAL
             elif not has_joker_slot and not needs_upgrade:
-                # Slots full and we don't need an upgrade — stop wasting money
-                mask[ACTION_REROLL] = 0.0
+                # dec-075 / con-011: was 0.0. Same reasoning — an economy opinion,
+                # not a legality fact. The executor still caps rerolls per shop and
+                # enforces the interest floor, so this cannot drain the economy.
+                mask[ACTION_REROLL] = 0.3
             else:
                 # Nothing buyable — allow reroll but keep it mild
                 interest_floor = 25
@@ -1031,7 +1040,11 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                     if surplus > 10:
                         mask[ACTION_REROLL] = 0.5  # very mild, looking for swap
                     else:
-                        mask[ACTION_REROLL] = 0.0
+                        # dec-075 / con-011: was 0.0 — an economy opinion, not
+                        # legality. Full slots + thin surplus is exactly the
+                        # ante-4-5 death state where the build must still be able
+                        # to hunt an engine; the executor's guards do the gating.
+                        mask[ACTION_REROLL] = 0.2
                 elif surplus <= 0:
                     # No surplus — penalize hard
                     mask[ACTION_REROLL] = 0.3
