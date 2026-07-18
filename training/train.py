@@ -1737,6 +1737,55 @@ class Trainer:
                     env.cur_hands_left = int(_hl if _hl is not None else -1)
                     env.cur_discards_left = int(_dl if _dl is not None else -1)
                     env.cur_blind_ante = int(raw.get("ante_num", 1) or 1)
+                    # dec-076: BLIND-START REPLAY SNAPSHOT. The current survivability
+                    # leaf has AUC 0.527 overall / 0.63-0.68 at antes 3-8 for
+                    # predicting whether a blind is beaten — barely better than a
+                    # coin flip, yet every build decision (d-surv, reroll threshold,
+                    # save-gate) is ranked by it. A distributional estimator ("given
+                    # THIS deck and THESE jokers, P(cumulative score >= the EXACT
+                    # target)") could do far better, but validating one offline
+                    # requires replaying real blinds — which needs the deck state
+                    # nobody logged. Capture it here, once per blind, cheaply
+                    # (rank/suit/enhancement counts, not the full card list).
+                    try:
+                        _deck = raw.get("cards", {}).get("cards", []) or []
+                        _rank_c, _suit_c, _enh_c, _seal_c = {}, {}, {}, {}
+                        for _c in _deck:
+                            _v = _c.get("value", {}) or {}
+                            _m = _c.get("modifier", {}) or {}
+                            if not isinstance(_m, dict):
+                                _m = {}
+                            _rank_c[_v.get("rank", "?")] = _rank_c.get(_v.get("rank", "?"), 0) + 1
+                            _suit_c[_v.get("suit", "?")] = _suit_c.get(_v.get("suit", "?"), 0) + 1
+                            _e = _m.get("enhancement", "") or ""
+                            if _e:
+                                _enh_c[_e] = _enh_c.get(_e, 0) + 1
+                            _s = _m.get("seal", "") or ""
+                            if _s:
+                                _seal_c[_s] = _seal_c.get(_s, 0) + 1
+                        _hands = raw.get("hands", {}) or {}
+                        env.cur_blind_state = {
+                            "deck_n": len(_deck),
+                            "ranks": _rank_c, "suits": _suit_c,
+                            "enhancements": _enh_c, "seals": _seal_c,
+                            "jokers": [
+                                {"key": j.get("key", ""),
+                                 "label": j.get("label", ""),
+                                 "edition": (j.get("modifier", {}) or {}).get("edition", "")
+                                 if isinstance(j.get("modifier", {}), dict) else ""}
+                                for j in (raw.get("jokers", {}).get("cards", []) or [])
+                            ],
+                            "hand_levels": {
+                                _h: {"level": _i.get("level", 1),
+                                     "chips": _i.get("chips", 0),
+                                     "mult": _i.get("mult", 0)}
+                                for _h, _i in _hands.items() if isinstance(_i, dict)
+                            },
+                            "hand_size": (raw.get("hand", {}) or {}).get("limit", 8),
+                            "money": raw.get("money", 0),
+                        }
+                    except Exception:
+                        env.cur_blind_state = None
                     joker_cards = raw.get("jokers", {}).get("cards", [])
                     joker_keys = [j.get("key", "") for j in joker_cards]
                     env.joker_logger.round_start(
@@ -2445,7 +2494,22 @@ class Trainer:
             # SELECTING_HAND->SHOP), so beaten blinds undercount. A beaten blind
             # scored >= its target by definition -> floor realized at target.
             # (Failed-blind realized is accurate via the GAME_OVER raw fallback.)
+            #
+            # dec-076 WARNING — this floor DESTROYS the metric on beaten blinds.
+            # Because the tracker never observes the final (largest) hand, the
+            # floor binds on 100.0% of beaten blinds (46,731/46,732 measured), so
+            # `realized` collapses to exactly `target` and `realized_vs_proj`
+            # degenerates to 1/raw_margin — a TAUTOLOGY carrying zero information
+            # about scoring ability. dec-070 was justified by that very statistic
+            # ("realized/proj sat at ~0.30 at every ante"), so it changed the
+            # estimator on an artifact — and then REALIZATION_FACTOR was left
+            # stale on top (the live double-discount). `realized_censored` marks
+            # the affected rows so nothing builds on them again. The BINARY
+            # `beaten` flag is unaffected and is the trustworthy label.
+            realized_censored = False
             if beaten:
+                if realized < tgt:
+                    realized_censored = True
                 realized = max(realized, tgt)
             proj = env.last_proj_power
             rec = {
@@ -2453,6 +2517,7 @@ class Trainer:
                 "blind": env.cur_blind_name,
                 "beaten": bool(beaten),
                 "realized": round(realized, 0),
+                "realized_censored": realized_censored,   # dec-076
                 "target": round(tgt, 0),
                 "realized_margin": round(realized / max(tgt, 1.0), 3),
                 "hands_left": env.cur_hands_left,
@@ -2461,10 +2526,17 @@ class Trainer:
                 "realized_vs_proj": round(realized / max(proj, 1.0), 3),
                 "env": env.env_id, "step": self.global_step,
             }
+            # dec-076: attach the blind-START replay snapshot (deck/jokers/levels)
+            # so a distributional estimator can be validated offline against the
+            # `beaten` label. Only on the row that has it; never blocks.
+            if getattr(env, "cur_blind_state", None):
+                rec["start"] = env.cur_blind_state
             path = os.path.join("logs", "blind_results.jsonl")
             with open(path, "a") as f:
                 f.write(json.dumps(rec) + "\n")
             env.cur_blind_target = 0.0  # consumed; avoid double-logging the same blind
+            env.cur_blind_state = None  # dec-076: don't let a stale snapshot attach
+                                        # to the NEXT blind (con-013: this env only)
             # light rotation (dec-043 lesson: don't grow unbounded)
             self._blind_log_count = getattr(self, "_blind_log_count", 0) + 1
             if self._blind_log_count % 2000 == 0:

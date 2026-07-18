@@ -89,3 +89,10 @@ class EnvSession:
         self.cur_discards_left: int = -1    # dec-050: unused discards at death = policy under-dug
         self.cur_blind_ante: int = 0
         self.last_proj_power: float = 0.0   # last projected power (from build_progression)
+        # dec-076: blind-START snapshot (deck rank/suit/enhancement counts, jokers,
+        # hand levels) so a blind can be REPLAYED offline. Required to validate a
+        # distributional P(clear) estimator against real outcomes — the current
+        # survivability leaf scores AUC 0.527 overall / 0.63-0.68 at antes 3-8 for
+        # predicting `beaten`, and no prior logging captured the deck state needed
+        # to build or test a better one. Per-env (con-013); None if capture failed.
+        self.cur_blind_state: Optional[dict] = None

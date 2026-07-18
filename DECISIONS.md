@@ -951,6 +951,46 @@ training. Trust ante 4 (n=202) and ante 5 (n=134); ignore the deep rows (n=11–
 
 ---
 
+### The leaf doesn't discriminate — measured at last — 07-18 (`dec-076`)
+Prompted by the observation that **blind targets are deterministic** — each ante
+logs exactly **1 distinct target** (`ANTE_BASE_TARGET × BLIND_MULT`), identical
+every run, with **The Wall (4× base) and Violet Vessel (6× base) the only
+target-inflating bosses**. Verified true. Which means: since the target side is
+*exact*, **100% of the margin error lives in the power estimate**.
+
+So we finally measured that estimate. **It barely discriminates:**
+```
+AUC for predicting whether a blind is beaten (n=51,083):
+  ALL 0.527 | ante3 0.635 | ante4 0.655 | ante5 0.647 | ante6 0.650 | ante8 0.661
+```
+0.5 is a coin flip. **Every build decision — `d-surv`, the reroll threshold,
+dec-068's save-gate, the reverted dec-067 margin reward — is ranked by this.**
+That is why 12 planner-valuation tweaks moved nothing: *you cannot fix a search by
+retuning the weights of a leaf that doesn't discriminate.* dec-035 was right to
+gate SOLVER Phase-2 search behind leaf validation — that gate stayed shut 22 days
+because the validation was never run. (The pooled 0.527 vs per-ante ~0.65 is
+Simpson's paradox — pooling 98%- and 74%-clear antes hides it.)
+
+**Second finding — a metric that lied.** `realized` is floored to `target` on
+**100.0% of beaten blinds (46,731/46,732)**: `if beaten: realized = max(realized,
+tgt)`, which binds ~always because the per-step tracker never sees the final hand.
+So `realized_vs_proj` degenerates to **1/raw_margin — a tautology**. **dec-070 was
+justified by exactly that statistic** ("realized/proj ~0.30 at every ante"), i.e.
+it changed the estimator on an artifact — and then `REALIZATION_FACTOR` was left
+stale on top (the live double-discount). Now flagged `realized_censored` so
+nothing builds on it again. The binary `beaten` label is clean.
+
+**Shipped: instrumentation only.** A blind-START replay snapshot (deck rank/suit/
+enhancement/seal counts, jokers, hand levels, hand size) so a **distributional
+P(clear) estimator** — Monte-Carlo over the real deck vs the *exact* target,
+reusing `find_best_hands` — can be built **and validated offline** against
+`beaten`. It couldn't be before: no deck state was ever logged. Target to beat:
+**AUC 0.65 at antes 4–6.** If a distributional leaf can't beat that, the whole
+survivability-proxy approach is dead — and we learn it cheaply, before building
+search on it.
+
+---
+
 ## Gotchas & Hard-Won Lessons
 
 ### 1. The `won` flag means "reached the ante-8 boss," NOT "beat it"  *(critical)*
