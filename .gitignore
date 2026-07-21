@@ -57,3 +57,4 @@ demos/
 
 # Curriculum seed states (data, not code)
 seeds/
+.cambium/
