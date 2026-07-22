@@ -49,6 +49,7 @@ class EnvSession:
         self.shop_noop_count = 0
         self.prev_shop_fingerprint = None
         self.state_stuck_count = 0
+        self.stale_abort_streak = 0  # dec-077: consecutive stale-decision aborts
         self.prev_state_fingerprint = None
         self.menu_loop_count = 0
         self.current_ante = 1

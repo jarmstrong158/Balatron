@@ -1223,6 +1223,37 @@ and point the entropy bonus at no-op bits. Target entropy must use the
 `c352b54`.
 
 
+### Stale-decision aborts don't teach the policy — 07-22 (`dec-077`)
+A stuck/stale audit of a live run found ~1 mechanical-failure event/game (~68
+`[STATE-GUARD]` aborts + ~74 `[STUCK]` force-plays per run-log) while play is
+still centered on the ante-4/5 plateau (`dec-057`), 1% win rate.
+
+`[STATE-GUARD]` fires when the policy's action was valid for the state it was
+decided on, but the game raced ahead before the send landed (dominant:
+`HAND_PLAYED`/`ROUND_EVAL`/`DRAW_TO_HAND` needing `SELECTING_HAND`). The action
+**never executed** — yet a transition was stored with the intended action **and**
+the next-iteration settle applied `REWARD_INVALID_ACTION = -0.1` (`reward.py:279`)
+because `action_succeeded=False`. So the policy was penalized for **API latency**
+and trained on a decision that never happened — mechanical noise fighting the
+strategy signal (`dec-076`).
+
+- **Fix (option A):** on a stale abort, skip the whole iteration — store no
+  transition and don't advance the reward chain (`prev_raw`/`last_action` stay
+  put). The real previous action still settles on the next successful iteration
+  (or the rollout boundary). **No `reward.py` change needed:** the stale action
+  never becomes `last_action_succeeded=False`, so the −0.1 is never applied.
+- **Scope:** only the `STATE-GUARD` live-not-in-required race; generic execute
+  failures still store + penalize.
+- **con-010:** a skip is a retry, so it's bounded — `env.stale_abort_streak`
+  (per-env, `con-013`) escalates to `_restart_balatro` at 8 consecutive aborts so
+  a genuine desync can't spin invisibly with no heartbeat.
+- **Corrected diagnosis:** the first hypothesis (a missing settle-gate on the
+  decision path) was wrong — `_get_actionable_state` already waits out transient
+  states; the lever was in the reward accounting, not the game loop.
+- **Not yet measured** — recommend an eval A/B once it's picked up on the next
+  trainer restart. `train.py`, `env_session.py`.
+
+
 ---
 
 ## Operations

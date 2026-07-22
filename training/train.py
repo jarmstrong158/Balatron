@@ -1331,6 +1331,9 @@ class Trainer:
 
             # Execute action (with retry on UI timing errors)
             action_succeeded = True
+            # dec-077: set when a decision is aborted because the game raced past
+            # the state it was decided on (a timing race, NOT a bad choice).
+            stale_abort = False
             max_retries = 3
             for _attempt in range(max_retries):
                 try:
@@ -1358,6 +1361,7 @@ class Trainer:
                             live = ""
                         if required and live and live not in required:
                             action_succeeded = False
+                            stale_abort = True  # dec-077: timing race, not a bad choice
                             print(f"[STATE-GUARD] {api_method} aborted: game in "
                                   f"{live}, needs {sorted(required)} (stale "
                                   f"decision) — re-deriving from fresh state",
@@ -1373,6 +1377,34 @@ class Trainer:
                     print(f"[WARN] execute_action({api_method}, {api_params}) "
                           f"FAILED: {exc}", flush=True)
                     break
+
+            # dec-077: a stale-decision abort is a TIMING RACE, not a bad choice.
+            # The action was valid for the state it was decided on, but the game
+            # raced ahead before the send landed, so it NEVER executed. Skip the
+            # whole iteration: store NO transition and do NOT advance the reward
+            # chain (prev_raw / last_action stay put) — the real previous action's
+            # outcome is still settled on the next successful iteration (or at the
+            # rollout boundary). This drops both the phantom (state, action) and
+            # the REWARD_INVALID_ACTION penalty a raced-but-correct action would
+            # otherwise incur (the mechanical-noise fix from the stuck/stale audit).
+            # con-010: a skip is a retry, so bound it — a persistent stale loop
+            # (game genuinely desynced) escalates to a restart instead of spinning
+            # invisibly with no heartbeat. Counter is per-env (con-013).
+            if stale_abort:
+                env.stale_abort_streak = getattr(env, "stale_abort_streak", 0) + 1
+                if env.stale_abort_streak >= 8:
+                    print(f"[STATE-GUARD] {env.stale_abort_streak} consecutive "
+                          f"stale-decision aborts — game desynced, restarting "
+                          f"Balatro", flush=True)
+                    env.stale_abort_streak = 0
+                    self.ppo.amend_last_transition(done=True, env_id=env.env_id)
+                    last_done = True
+                    await self._restart_balatro(env)
+                    env.reward_calc.reset()
+                    env.game.reset()
+                    prev_raw = None
+                continue
+            env.stale_abort_streak = 0  # a real (non-stale) iteration breaks the streak
 
             # Skip shop rearrange — joker order only matters before plays,
             # and we already rearrange at round start + before each play.
