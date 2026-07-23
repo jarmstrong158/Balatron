@@ -1013,6 +1013,16 @@ a **measured A/B**: ckpt 004434, same 300 seeds, RF 0.43 (existing baseline) vs
 heuristic, which runs live at eval. **Revert to 0.43 if advance at ante 4/5
 doesn't hold.** Tests: `tests/test_planner.py` (23); 176 pass.
 
+> **RESULT (paired A/B, ckpt 005596, same 300 seeds) → KEPT.** Directionally
+> positive, not significant: reach≥4 65.0→**68.5%**, reach≥5 40.3→**45.9%**
+> (+5.6pp), reach≥8 5→11 runs, WIN 1→4; paired McNemar @ante-6 **35 vs 27,
+> P=56% [44,68]** (inconclusive). Only reach≥6 dipped (small n, noise). **Kept**
+> because (1) it's the measurably-*correct* calibration (0.43 is a confirmed
+> double-discount), and (2) the pre-registered rule was "revert if advance at
+> ante 4/5 doesn't hold" — it held/improved. Not a plateau breaker (weak leaf,
+> AUC ~0.6). RF is now `BALATRON_RF`-overridable (both arms ran on the current
+> checkpoint since 004434 was pruned).
+
 ---
 
 ## Gotchas & Hard-Won Lessons
