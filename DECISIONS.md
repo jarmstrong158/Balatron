@@ -991,6 +991,30 @@ search on it.
 
 ---
 
+### Refit the realization factor — end the double-discount — 07-23 (`dec-078`)
+**`REALIZATION_FACTOR` 0.43 → 1.0.** dec-038 fit 0.43 (=1/2.30) because the *old*
+power estimator crossed 50%-boss-clear at raw margin 2.30×. **dec-070 replaced
+that estimator** with a play-frequency-weighted average (~2× lower estimates) and
+**never refit RF** — so since 07-16 the planner has been **double-discounting**,
+reading every build ~2× too weak. Refit against the *current* estimator:
+boss-blind clear stratified by ante (n=16,995 post-dec-070 blinds, con-014
+respected) crosses 50% at raw margin **~0.7–1.0** at the deep antes (ante5 `[0,1)`
+= 50%; ante6 crossover ~1.0), so RF should be **~1.0**. *Watch the Simpson trap:*
+pooled, the curve looks inverted (91% clear at margin <0.5) because it mixes easy
+ante-2 bosses (92%) with hard ante-6 (54%); stratified, it's genuinely monotonic.
+Single decision-path line (`planner.py`); build_progression stays RAW.
+
+Honest scope: the leaf is weak (**AUC ~0.6**, dec-076) even correctly scaled, so
+this **re-centers** the planner (survivability ~doubles → dec-068 save-gate fires
+far more, d-surv comparisons shift) but can't make it *discriminate* — expect a
+modest effect at most. Sign is uncertain (could bank interest too early), so it's
+a **measured A/B**: ckpt 004434, same 300 seeds, RF 0.43 (existing baseline) vs
+1.0 — cleanly measurable on a frozen checkpoint because RF drives the *planner*
+heuristic, which runs live at eval. **Revert to 0.43 if advance at ante 4/5
+doesn't hold.** Tests: `tests/test_planner.py` (23); 176 pass.
+
+---
+
 ## Gotchas & Hard-Won Lessons
 
 ### 1. The `won` flag means "reached the ante-8 boss," NOT "beat it"  *(critical)*

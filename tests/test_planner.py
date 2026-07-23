@@ -93,19 +93,21 @@ def test_xmult_projection_cap_scales_with_runway():
     assert early > 6.0           # breaks past the old flat cap
 
 
-def test_realization_factor_discounts_survivability(monkeypatch):
-    """dec-038 calibration: the realization factor (raw estimate overshoots real
-    clearing ~2.3x) must make builds report a SHALLOWER deepest ante than the
-    un-discounted estimate would — that's how the planner stops greenlighting
-    additive builds it wrongly thinks survive deep."""
+def test_realization_factor_calibrates_survivability(monkeypatch):
+    """dec-078: RF is the power-calibration multiplier in _score_survivability.
+    dec-038 set it to 0.43 (estimator was 2.3x optimistic); dec-070 replaced the
+    estimator with a lower one and RF was refit to ~1.0 (now roughly calibrated —
+    boss-blind 50%-clear sits near raw margin 1). The invariant that must hold
+    regardless of the value: RF is a monotone power multiplier — a LOWER RF makes
+    builds project a SHALLOWER deepest ante."""
     import environment.planner as P
     gs = _gs(ante=3)
     jokers = [{"key": "j_cavendish", "id": 1}]
-    discounted = build_survivability(jokers, gs)
-    monkeypatch.setattr(P, "REALIZATION_FACTOR", 1.0)
-    raw = build_survivability(jokers, gs)
-    assert 0.0 < REALIZATION_FACTOR < 1.0           # it is a genuine discount
-    assert discounted < raw                          # discount -> shallower projected depth
+    assert 0.4 <= REALIZATION_FACTOR <= 2.0          # a sane calibration, not a fudge
+    high = build_survivability(jokers, gs)
+    monkeypatch.setattr(P, "REALIZATION_FACTOR", REALIZATION_FACTOR * 0.5)
+    low = build_survivability(jokers, gs)
+    assert low < high                                # less realized power -> shallower
 
 
 def _api_card(rank: str, suit: str) -> dict:

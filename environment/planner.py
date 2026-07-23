@@ -70,18 +70,26 @@ BLIND_MULT = {"small": 1.0, "big": 1.5, "boss": 2.0}
 # blind-clearing power is its per-hand estimate times the hands typically spent.
 HANDS_PER_BLIND = 3.0
 
-# EMPIRICAL CALIBRATION (dec-038). The raw estimate (score x HANDS_PER_BLIND) is
-# a best-case point estimate: it assumes every hand is the committed full-power
-# hand. Real play is worse — you don't always draw the committed hand, boss
-# debuffs cut scoring, and weak hands get discarded. Validated against 5,018
-# instrumented self-play games: real boss-blind advance crosses 50% at raw
-# margin 2.30x, NOT 1.0x — the estimate overshoots realized clearing by ~2.3x.
-# This factor (1/2.30) recalibrates power so margin>=1 means a real ~50/50 clear,
-# which stops the planner greenlighting additive builds it wrongly thinks survive
-# deep and raises the marginal value of multiplicative (xmult) scaling. Applied
-# ONLY in the decision path; the build_progression log stays RAW so this
-# calibration can be re-validated on fresh data.
-REALIZATION_FACTOR = 0.43
+# EMPIRICAL CALIBRATION. RF recenters the raw point estimate (score x
+# HANDS_PER_BLIND) so that planner-margin>=1 corresponds to a real ~50/50
+# boss-blind clear. It fixes SCALE, not discrimination (dec-076: the leaf's
+# AUC is only ~0.6 even calibrated).
+#
+# dec-038 (5,018 games) fit 0.43 = 1/2.30 because the OLD estimator (max over
+# played hand types) crossed 50%-clear at raw margin 2.30x. But dec-070 (07-16)
+# REPLACED that estimator with a play-frequency-weighted AVERAGE, which lowers
+# every estimate ~2x — and RF was never refit, so the planner has been
+# DOUBLE-DISCOUNTING (reading every build ~2x too weak) ever since.
+#
+# dec-078 refit against the CURRENT estimator: boss-blind clear stratified by
+# ante (n=16,995 post-dec-070 blinds, con-014 regime respected) crosses 50% at
+# raw margin ~0.7-1.0 at the deep antes (ante5 [0,1)->50%, ante6 crossover ~1.0),
+# i.e. the estimator is now roughly calibrated-to-slightly-pessimistic. So RF
+# should be ~1.0, NOT 0.43. Using 1.0 (trust the raw estimate; the deep-ante
+# 50% point sits right around margin 1). Applied ONLY in the decision path; the
+# build_progression log stays RAW. MEASURED A/B pending (ckpt 004434, same 300
+# seeds, RF 0.43 vs 1.0) — revert to 0.43 if advance at ante 4/5 doesn't hold.
+REALIZATION_FACTOR = 1.0
 MAX_PLAN_ANTE = 12
 
 # ── Non-scoring joker valuation (dec-065) ────────────────────────────────────
