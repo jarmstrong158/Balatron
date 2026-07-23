@@ -114,6 +114,8 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--no-restart", action="store_true",
                     help="leave training stopped afterwards (for back-to-back evals)")
+    ap.add_argument("--rf", default=None,
+                    help="override REALIZATION_FACTOR for this eval (dec-078 A/B)")
     args = ap.parse_args()
 
     if psutil is None:
@@ -134,6 +136,8 @@ def main():
     # (supervise.py:567 `env = dict(os.environ, PYTHONUTF8="1")`) — evaluate.py
     # never got the same treatment, so every eval crashed on its first redirect.
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    if args.rf is not None:
+        env["BALATRON_RF"] = str(args.rf)   # dec-078: pin RF for this arm
 
     rc = 1
     try:

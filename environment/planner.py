@@ -89,7 +89,11 @@ HANDS_PER_BLIND = 3.0
 # 50% point sits right around margin 1). Applied ONLY in the decision path; the
 # build_progression log stays RAW. MEASURED A/B pending (ckpt 004434, same 300
 # seeds, RF 0.43 vs 1.0) — revert to 0.43 if advance at ante 4/5 doesn't hold.
-REALIZATION_FACTOR = 1.0
+# dec-078: env-overridable so the A/B can run both arms (RF 0.43 vs 1.0) on the
+# SAME frozen checkpoint without editing code between eval runs. Default is the
+# calibrated 1.0; training and normal use ignore the env var.
+import os as _os
+REALIZATION_FACTOR = float(_os.environ.get("BALATRON_RF", "1.0"))
 MAX_PLAN_ANTE = 12
 
 # ── Non-scoring joker valuation (dec-065) ────────────────────────────────────
