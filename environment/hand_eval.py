@@ -4235,12 +4235,15 @@ def _find_dagger_sacrifice(
             # Non-scoring joker — sacrifice value is essentially free
             value_ratio = dagger_mult_gain * 10.0  # Very favorable
         else:
-            # Compare: permanent mult gain vs per-hand scoring contribution
-            # Permanent mult applies every hand for rest of run
-            # Estimate remaining hands: ~4 hands/round × 3 rounds/ante × remaining antes
-            remaining_antes = max(8 - ante, 1)
-            # But the mult gain also benefits all those hands
-            # Simple heuristic: sacrifice if gain > 3× per-hand contribution
+            # Compare: permanent mult gain vs per-hand scoring contribution.
+            # The permanent mult applies to every remaining hand, so a
+            # horizon term (~4 hands/round x 3 rounds/ante x antes left) was
+            # started here and never finished — `remaining_antes` and the
+            # `remaining_antes * 3 * 4` expression were both computed and
+            # discarded, so the ratio below has ALWAYS been horizon-free.
+            # Removed rather than wired in: making it horizon-aware would
+            # change sacrifice decisions, which is a behaviour change that
+            # belongs in its own measured commit, not a dead-code cleanup.
             value_ratio = dagger_mult_gain / max(scoring_power, 0.01)
 
         # Economy-only jokers get a bonus (they don't score)
