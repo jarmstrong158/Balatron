@@ -97,3 +97,9 @@ class EnvSession:
         # predicting `beaten`, and no prior logging captured the deck state needed
         # to build or test a better one. Per-env (con-013); None if capture failed.
         self.cur_blind_state: Optional[dict] = None
+        # dec-082: (ante, blind_name) the snapshot above belongs to. The capture
+        # lives in the per-STEP SELECTING_HAND handler, so without this key it
+        # re-ran every hand and the row that survived described the LAST hand of
+        # the blind — making deck_n an outcome proxy (a model read AUC 0.89 off
+        # that leak alone, 0.58-0.64 once removed). Capture once per blind.
+        self.cur_blind_state_key: Optional[tuple] = None

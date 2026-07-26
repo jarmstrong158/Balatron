@@ -353,6 +353,51 @@ def _level_committed_hand(gamestate: dict, ht: str, levels: float) -> dict:
     return gs
 
 
+# dec-083: route the CURRENT ante's leaf through a Monte-Carlo P(clear) instead
+# of the deterministic point estimate. Default OFF and NOT yet validated — it
+# ships only if tools/validate_rollout.py clears the pre-registered +0.05 AUC gate
+# on post-dec-082 rows, then wins a paired A/B. Same one-binary env pattern as
+# dec-078 (BALATRON_RF) / dec-079 / dec-081, so revert is `unset the var`.
+ROLLOUT_LEAF = _os.environ.get("BALATRON_ROLLOUT", "0") == "1"
+
+
+def _rollout_p_clear(jokers: list[dict], gamestate: dict, target: float):
+    """P(clear `target`) by simulation, or None if unavailable.
+
+    Prefers the LIVE deck (gamestate['cards']['cards'] is the real remaining card
+    list) and falls back to marginal counts. Never raises: any failure returns
+    None and the caller keeps the analytical estimate.
+    """
+    try:
+        from environment.rollout import p_clear
+
+        deck = (gamestate.get("cards", {}) or {}).get("cards", []) or []
+        if deck:
+            ranks, suits, enh, seals = {}, {}, {}, {}
+            for c in deck:
+                v = c.get("value", {}) or {}
+                m = c.get("modifier", {}) or {}
+                if not isinstance(m, dict):
+                    m = {}
+                ranks[v.get("rank", "?")] = ranks.get(v.get("rank", "?"), 0) + 1
+                suits[v.get("suit", "?")] = suits.get(v.get("suit", "?"), 0) + 1
+                if m.get("enhancement"):
+                    enh[m["enhancement"]] = enh.get(m["enhancement"], 0) + 1
+                if m.get("seal"):
+                    seals[m["seal"]] = seals.get(m["seal"], 0) + 1
+            snap = {"deck_n": len(deck), "ranks": ranks, "suits": suits,
+                    "enhancements": enh, "seals": seals,
+                    "hand_size": (gamestate.get("hand", {}) or {}).get("limit", 8)}
+        else:
+            return None
+        # seed=0: the planner ranks a shop by comparing candidates, so every
+        # candidate must face the SAME simulated draws or the noise swamps the
+        # signal it is trying to measure.
+        return p_clear(snap, jokers, gamestate, target, seed=0)
+    except Exception:
+        return None
+
+
 def _score_survivability(jokers: list[dict], gamestate: dict) -> float:
     """SCORE-ONLY fractional deepest ante this build can clear (solver phase 1,
     dec-036). At each future ante it PROJECTS the build's engines forward to that
@@ -384,6 +429,16 @@ def _score_survivability(jokers: list[dict], gamestate: dict) -> float:
         tgt = ante_target(a, "boss")
         if a == cur:
             tgt *= cur_boss_mult
+            # dec-083 (GATED, default OFF, UNVALIDATED): replace the CURRENT
+            # ante's point estimate with a Monte-Carlo P(clear). Only the current
+            # ante — its deck is known, future decks are not, and the rollout
+            # costs ~100x the leaf so running it 12x per call is untenable.
+            # `power` is rescaled so a coin-flip build lands exactly on target and
+            # the surrounding fractional-ante maths is untouched.
+            if ROLLOUT_LEAF:
+                p = _rollout_p_clear(pj, gamestate, tgt)
+                if p is not None:
+                    power = tgt * (0.5 + p) if p < 0.5 else tgt * (1.0 + 2.0 * (p - 0.5))
         if power >= tgt:
             prev_target = tgt
             continue

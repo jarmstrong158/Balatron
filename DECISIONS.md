@@ -1025,6 +1025,83 @@ doesn't hold.** Tests: `tests/test_planner.py` (23); 176 pass.
 
 ---
 
+### The ante-4/5 plateau is SAVE-gate myopia, not build evaluation — 07-25 (`dec-079`)
+**The plateau mechanism, finally located and quantified.** Deep audit of shop
+decisions across 50,667 real blind snapshots + live shop telemetry:
+
+*What is NOT broken* (each disproved by measurement, several were my own
+hypotheses): the **reward** (97% ante/blind clears, corr 0.977); the **power
+model** (`chips × mult × Π xmult` — xmult multiplies correctly); the **shop
+ranker** — probed with real `j_` keys, `build_value` tops xmult at *every* stage
+(Cavendish x3 ranked #1 even at ante 1), so the "flat-bias" and "first-xmult
+marginal-value trap" hypotheses are both **wrong**; and a **learned leaf** —
+a net on real build features scores AUC 0.640/0.583/0.573/0.563 at antes 3–6 vs
+the analytical leaf's 0.590/0.583/0.560/0.635, i.e. **no better** (an initial
+0.89 was a **`deck_n` data leak**; see gotchas). Evaluation is at its
+ceiling — the wall is **construction**.
+
+*What IS broken.* `[SHOP] SAVE: already clearing + marginal joker` is the **single
+most common shop outcome** (268 events — more than all buys combined). Replaying
+dec-068's `_already_clearing` over the real snapshots, the gate fires in **65% of
+ante-2** and **54% of ante-3** shops — exactly the cheap engine-building window —
+then only ~36% at antes 4–5, when it's too late. The trap is arithmetic: blind
+targets **~double per ante**, so `AHEAD_BUFFER=1.0` ("one ante of headroom") is a
+vanishing margin. Median headroom is **+1.54 at ante 2**, collapsing to
+**+0.70 → +0.30 → +0.00** by antes 4–6. Consequence chain: slots fill at **ante 4
+with median 0 xmult**, and **78% of runs never improve xmult composition again**
+(slot-lock — once full, a swap needs weakest-slot-only + `+10%` immediate score +
+affordability on a chronic $4–7). Net: **xmult acquisition is statistically
+indistinguishable from random** (pool 23% xmult → E[xmult] in 5 random jokers
+**1.17**; observed median **1**; 84% of ante-4 builds have ≤1). And survivors vs
+dyers build *identically* (xmult 0.70 vs 0.73) — the whole population sits at one
+weak ceiling where the boss is a coin flip.
+
+**Fix:** demand headroom *proportional to the curve*, and **more of it early**
+(a slot spent on an engine compounds for the rest of the run). `AHEAD_BUFFER` is
+now ante-scaled via `AHEAD_BUFFER_EARLY_BONUS` × antes-below-4, **env-overridable**
+(`BALATRON_AHEAD_EARLY_BONUS`, the dec-078 `BALATRON_RF` pattern) so both arms run
+off **one binary** and the control (`bonus=0`) is *provably* byte-identical dec-068.
+Simulated on real data, `bonus=1.0` drops SAVE firing to **0.9%/10.6%/25.9%** at
+antes 1/2/3 while leaving **antes 4+ unchanged** (dec-060 boss-spike banking
+preserved). Note dec-078 predicted this interaction: RF 0.43→1.0 doubled
+survivability, so *"the dec-068 save-gate fires far more"* — dec-079 is the other
+half of that fix. Tests: `tests/test_save_when_ahead.py` (+3); **179 pass**.
+
+- **Pre-registered rule:** keep only if reach≥5 / reach≥6 improves on a paired
+  A/B; revert the flag otherwise.
+- Deferred second arm: **floor the prior-KL** (`prior_anneal_updates=250` zeroed
+  the planner's guidance ~5,300 updates ago, so buy-*timing* has been unguided) —
+  deferred because it only pays off *after* retraining, the unfalsifiable
+  reasoning that made dec-075 null.
+
+**MEASURED — NULL. Not shipped** (07-25, ckpt 006268, 300 paired seeds, `dec-080`).
+Default stays `BALATRON_AHEAD_EARLY_BONUS=0.0` per the pre-registered rule.
+
+| gate | B better | A better | P(B) |
+|---|---|---|---|
+| ≥4 | 41 | 33 | 55% [44,66] ns |
+| ≥5 | 50 | 46 | 52% [42,62] ns |
+| ≥6 | 39 | 28 | 58% [46,69] ns |
+
+Mean ante 4.080 → 4.177, paired bootstrap 95% CI **[−0.100, +0.290]** (includes 0).
+Wins 3/300 vs 2/300. Every gate ns; direction consistently positive but never
+significant.
+
+**The mechanism DID fire** — this is a real null, not a null implementation.
+Replaying the gate over real logged builds: SAVE fires **66.5% → 8.3%** at ante 2
+and **57.2% → 24.8%** at ante 3, i.e. the treatment banked in 8% of ante-2 shops
+instead of 67% and bought far more aggressively, exactly as designed.
+
+**What it rules out:** buy *timing/quantity* is **not** the binding constraint.
+A behaviour change that large producing zero depth gain says acquisition
+**quality** is the ceiling — buying more from a pool whose expected xmult content
+is fixed (23% of pool → E[xmult]=1.17 in 5 slots, observed median 1) just fills
+the same 5 slots sooner with the same composition. Consistent with the learned-
+evaluator result (no model beat the analytical leaf once the `deck_n` leak was
+removed): boss-clearing is variance-dominated, not under-evaluated.
+
+---
+
 ## Gotchas & Hard-Won Lessons
 
 ### 1. The `won` flag means "reached the ante-8 boss," NOT "beat it"  *(critical)*
@@ -1256,6 +1333,30 @@ and point the entropy bonus at no-op bits. Target entropy must use the
 *conditioned* target distribution (the one actually sampled). Commit
 `c352b54`.
 
+### 14. The dec-076 blind snapshot is END-of-blind — it LEAKS the outcome
+`env.cur_blind_state` is rewritten at **every** `SELECTING_HAND` step, so a
+"blind-start" snapshot actually holds the **last hand before the blind
+resolved**. Any feature derived from it that changes *during* the blind encodes
+the result: `deck_n` (cards remaining) is high when a blind is beaten on hand 1
+and low when the agent dug through 4 hands and failed.
+
+This produced a **fake breakthrough**: a model predicting `beaten` scored
+**AUC 0.893** pooled / 0.885 at ante 3 — seemingly proving a better leaf was
+possible. Permutation importance exposed it: `deck_n` **+0.282** vs `ante`
++0.049 and *every* real build feature ≤0.011. Dropping the contaminated
+features collapsed it to **0.640/0.583/0.573/0.563** at antes 3–6 — no better
+than the analytical leaf. The real conclusion is the opposite of the first
+result: boss-clearing is **variance-dominated**, and no leaf beats ~0.6.
+
+- **Rule:** never report a learned-model AUC on this data without a leakage
+  check. Run permutation importance; if one feature dwarfs the rest, suspect it
+  before believing the score. Split **temporally** (train older, test newer).
+- Genuinely blind-invariant features only: jokers, hand levels, hand_size,
+  ante, boss. Suspect anything mid-blind mutable (`deck_n`, hands/discards
+  left, money-at-capture).
+- The snapshot itself should be captured **once** at blind start — until then,
+  treat every `start` field as end-of-blind.
+
 
 ### Stale-decision aborts don't teach the policy — 07-22 (`dec-077`)
 A stuck/stale audit of a live run found ~1 mechanical-failure event/game (~68
@@ -1287,6 +1388,108 @@ strategy signal (`dec-076`).
 - **Not yet measured** — recommend an eval A/B once it's picked up on the next
   trainer restart. `train.py`, `env_session.py`.
 
+---
+
+### The build FREEZES after ante 3 — the swap path was unreachable — 07-26 (`dec-081`)
+
+Traced the ante-4/5 plateau to a code defect, not judgement. `action_space.py`'s
+full-slot branch vetoed a shop-joker buy unless swapping out the *heuristically
+weakest* joker raised **immediate single-hand score** by ≥1.1×. Failing that it
+fell through to `continue`, leaving the mask at its `np.zeros` default → buy
+**illegal** → `any_buyable_joker` False → `ACTION_BUY_JOKER` hard-blocked → the
+agent leaves the shop. Slots fill by ante ~3, so this froze the build for the rest
+of every run.
+
+| measured over 6 trainer logs | |
+|---|---|
+| full-slot shops | 31,185 |
+| swaps actually executed | **289 (0.93%)** |
+| shops where the PLANNER wanted a swap | **~55%** |
+
+`_planner_pick_swap` — which evaluates all 5 sell candidates by multi-ante
+survivability — was therefore **unreachable**. Also a **con-011 violation**: the
+mask was making a heuristic value judgement instead of testing legality.
+
+**Fix (env-gated `BALATRON_SWAP_LEGALITY`, default 0):** legality = "some sellable
+joker frees the slot and funds it"; neutral weight 1.0, no heuristic thumb; the
+worth-it call goes to the planner. Also fixed the affordability precheck, which
+counted only the *weakest* joker's sell price. Verified on 120 real builds:
+full-slot buys reachable **63% → 98%**.
+
+**MEASURED — WORSE. Not shipped** (ckpt 006344, 300 paired seeds, `dec-081`).
+
+| gate | B | A | P(B better) |
+|---|---|---|---|
+| ≥4 | 28 | 38 | 42% [31,54] |
+| ≥5 | 34 | 41 | 45% [35,57] |
+| ≥6 | 25 | 40 | 38% [28,51] |
+
+Mean ante **4.240 → 4.093**; bootstrap CI [−0.330,+0.033]. No single gate is
+significant, but **all six favour control — sign test p=0.031**, so this reads as
+a small real harm, not noise.
+
+**Why it hurt (hypothesis, unverified):** a swap is inherently money-losing (sell
+at ~half, buy at full). That cost only pays if the chooser is a good judge — and
+the leaf is AUC ~0.6. Unblocking the path meant acting *more often* on a
+near-coin-flip evaluator at a guaranteed cost. The ugly 1.1× veto was accidentally
+protecting the agent from that. Testing it properly needs per-shop swap/money
+logging. *Kept dormant (default 0) rather than deleted — it encodes the finding.*
+
+---
+
+### Snapshot capture-once — the `deck_n` leak that faked AUC 0.89 — 07-26 (`dec-082`)
+
+The dec-076 replay snapshot sits in the per-**step** `SELECTING_HAND` handler, so
+despite its "once per blind" comment it re-ran every hand and the surviving row
+described the blind's **END** state. That made `deck_n` an outcome proxy — beaten
+on hand 1 leaves a full deck, a 4-hand grind leaves a stub. A model trained on the
+logged features read **AUC 0.89** almost entirely off that one column; with
+`deck_n` removed it fell to **0.58–0.64**, i.e. no better than the analytical leaf
+it was meant to beat.
+
+**Fix:** guard the capture on an `(ante, blind_name)` key and tag rows
+`at_blind_start: True` so validation can filter pre-fix rows explicitly. Verified
+live after a trainer restart — clean rows show median `deck_n` **44 vs 33**.
+
+⚠️ **Regime boundary (con-014):** `start` semantics changed from end-of-blind to
+start-of-blind. Never trend `deck_n` across this fix. All 51k prior rows remain
+contaminated and cannot validate any deck-reading estimator.
+
+---
+
+### Monte-Carlo rollout evaluator — built, GATED, unvalidated — 07-26 (`dec-083`)
+
+Three A/Bs (dec-075, dec-079, dec-081) came back null-or-worse *despite their
+mechanisms provably firing*. The common factor: they all improved **access** to
+shop decisions while the thing **ranking** them predicts `beaten` at AUC
+0.56–0.63. The leaf's structural flaw is that it computes one deterministic point
+estimate (`committed hand score × hands × RF`) assuming the build always draws its
+hand type — so it is blind to **consistency**, which is what decides a boss.
+
+`environment/rollout.py` returns `P(clear target)` by *simulating* the blind:
+reconstruct a deck, deal, pick the best play with the real scoring engine, play
+out the hands, repeat N times. 9ms/40 samples, deterministic per seed.
+
+**NOT in the decision path.** `BALATRON_ROLLOUT` defaults to 0; the planner
+integration covers the current ante only (its deck is known; the rollout costs
+~100× the leaf) and is fail-safe (`None` → keep the analytical estimate).
+
+**Pre-registered gate — offline first:** `tools/validate_rollout.py` must show
+**≥ +0.05 AUC** over the leaf at antes 4–6 on post-dec-082 clean rows *before* any
+A/B is run. This deliberately converts a 2.5h A/B into a cheap offline check.
+
+**Early evidence is against it:**
+
+| | AUC |
+|---|---|
+| rollout, deck as-logged (leaked) | 0.774 |
+| **rollout, deck size normalised** | **0.669** |
+| analytical leaf | 0.638 |
+
+The leak was worth **+0.105** of the apparent gain; the honest edge is **+0.031**,
+*below* the gate. It may well fail — which is itself informative: it would mean
+boss-clearing is not predictable from build state and this architecture is at its
+ceiling regardless of evaluator.
 
 ---
 

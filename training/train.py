@@ -1779,45 +1779,64 @@ class Trainer:
                     # requires replaying real blinds — which needs the deck state
                     # nobody logged. Capture it here, once per blind, cheaply
                     # (rank/suit/enhancement counts, not the full card list).
-                    try:
-                        _deck = raw.get("cards", {}).get("cards", []) or []
-                        _rank_c, _suit_c, _enh_c, _seal_c = {}, {}, {}, {}
-                        for _c in _deck:
-                            _v = _c.get("value", {}) or {}
-                            _m = _c.get("modifier", {}) or {}
-                            if not isinstance(_m, dict):
-                                _m = {}
-                            _rank_c[_v.get("rank", "?")] = _rank_c.get(_v.get("rank", "?"), 0) + 1
-                            _suit_c[_v.get("suit", "?")] = _suit_c.get(_v.get("suit", "?"), 0) + 1
-                            _e = _m.get("enhancement", "") or ""
-                            if _e:
-                                _enh_c[_e] = _enh_c.get(_e, 0) + 1
-                            _s = _m.get("seal", "") or ""
-                            if _s:
-                                _seal_c[_s] = _seal_c.get(_s, 0) + 1
-                        _hands = raw.get("hands", {}) or {}
-                        env.cur_blind_state = {
-                            "deck_n": len(_deck),
-                            "ranks": _rank_c, "suits": _suit_c,
-                            "enhancements": _enh_c, "seals": _seal_c,
-                            "jokers": [
-                                {"key": j.get("key", ""),
-                                 "label": j.get("label", ""),
-                                 "edition": (j.get("modifier", {}) or {}).get("edition", "")
-                                 if isinstance(j.get("modifier", {}), dict) else ""}
-                                for j in (raw.get("jokers", {}).get("cards", []) or [])
-                            ],
-                            "hand_levels": {
-                                _h: {"level": _i.get("level", 1),
-                                     "chips": _i.get("chips", 0),
-                                     "mult": _i.get("mult", 0)}
-                                for _h, _i in _hands.items() if isinstance(_i, dict)
-                            },
-                            "hand_size": (raw.get("hand", {}) or {}).get("limit", 8),
-                            "money": raw.get("money", 0),
-                        }
-                    except Exception:
-                        env.cur_blind_state = None
+                    #
+                    # dec-082 — CAPTURE-ONCE FIX. This block sits in the per-step
+                    # SELECTING_HAND handler, so despite the "once per blind" intent
+                    # above it re-ran EVERY hand and the surviving snapshot described
+                    # the LAST hand of the blind, not the first. That silently made
+                    # `deck_n` (cards remaining) an outcome proxy — beaten-on-hand-1
+                    # leaves a full deck, a 4-hand grind leaves a stub — and a model
+                    # trained on it scored AUC 0.89 purely off that leak (0.58-0.64
+                    # once removed, i.e. no better than the analytical leaf). Any
+                    # rollout evaluator reads the deck directly, so validating one on
+                    # contaminated snapshots would flatter it the same way. Guard on
+                    # a per-blind key so the snapshot is the BLIND-START state.
+                    _snap_key = (env.cur_blind_ante, current_blind_name)
+                    if env.cur_blind_state_key != _snap_key:
+                        try:
+                            _deck = raw.get("cards", {}).get("cards", []) or []
+                            _rank_c, _suit_c, _enh_c, _seal_c = {}, {}, {}, {}
+                            for _c in _deck:
+                                _v = _c.get("value", {}) or {}
+                                _m = _c.get("modifier", {}) or {}
+                                if not isinstance(_m, dict):
+                                    _m = {}
+                                _rank_c[_v.get("rank", "?")] = _rank_c.get(_v.get("rank", "?"), 0) + 1
+                                _suit_c[_v.get("suit", "?")] = _suit_c.get(_v.get("suit", "?"), 0) + 1
+                                _e = _m.get("enhancement", "") or ""
+                                if _e:
+                                    _enh_c[_e] = _enh_c.get(_e, 0) + 1
+                                _s = _m.get("seal", "") or ""
+                                if _s:
+                                    _seal_c[_s] = _seal_c.get(_s, 0) + 1
+                            _hands = raw.get("hands", {}) or {}
+                            env.cur_blind_state = {
+                                "deck_n": len(_deck),
+                                "ranks": _rank_c, "suits": _suit_c,
+                                "enhancements": _enh_c, "seals": _seal_c,
+                                "jokers": [
+                                    {"key": j.get("key", ""),
+                                     "label": j.get("label", ""),
+                                     "edition": (j.get("modifier", {}) or {}).get("edition", "")
+                                     if isinstance(j.get("modifier", {}), dict) else ""}
+                                    for j in (raw.get("jokers", {}).get("cards", []) or [])
+                                ],
+                                "hand_levels": {
+                                    _h: {"level": _i.get("level", 1),
+                                         "chips": _i.get("chips", 0),
+                                         "mult": _i.get("mult", 0)}
+                                    for _h, _i in _hands.items() if isinstance(_i, dict)
+                                },
+                                "hand_size": (raw.get("hand", {}) or {}).get("limit", 8),
+                                "money": raw.get("money", 0),
+                                # dec-082: marks a post-fix (uncontaminated) snapshot,
+                                # so validation can filter old rows without guessing.
+                                "at_blind_start": True,
+                            }
+                            env.cur_blind_state_key = _snap_key
+                        except Exception:
+                            env.cur_blind_state = None
+                            env.cur_blind_state_key = None
                     joker_cards = raw.get("jokers", {}).get("cards", [])
                     joker_keys = [j.get("key", "") for j in joker_cards]
                     env.joker_logger.round_start(
@@ -2569,6 +2588,7 @@ class Trainer:
             env.cur_blind_target = 0.0  # consumed; avoid double-logging the same blind
             env.cur_blind_state = None  # dec-076: don't let a stale snapshot attach
                                         # to the NEXT blind (con-013: this env only)
+            env.cur_blind_state_key = None   # dec-082: re-arm the capture-once guard
             # light rotation (dec-043 lesson: don't grow unbounded)
             self._blind_log_count = getattr(self, "_blind_log_count", 0) + 1
             if self._blind_log_count % 2000 == 0:

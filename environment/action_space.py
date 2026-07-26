@@ -15,6 +15,7 @@ See NOTES.md for full action space layout.
 """
 
 import math
+import os as _os
 from typing import Any, Optional
 
 import numpy as np
@@ -293,6 +294,13 @@ def _get_blind_target(raw_state: dict) -> float:
 # Positive bias on best-hand cards for PLAY, on non-best cards for DISCARD.
 # 5.0 strongly biases toward best hand while still allowing network to learn.
 HAND_BIAS_STRENGTH = 5.0
+
+# dec-081: when slots are FULL, treat a shop-joker buy as a LEGALITY question
+# ("can some sellable joker free the slot and pay for it?") instead of vetoing it
+# on a heuristic immediate-score threshold (con-011). Off by default so the
+# control arm of the paired A/B is provably byte-identical to the old behaviour;
+# both arms run off ONE binary (the dec-078/dec-079 BALATRON_RF pattern).
+SWAP_LEGALITY = _os.environ.get("BALATRON_SWAP_LEGALITY", "0") == "1"
 
 
 # ============================================================
@@ -665,7 +673,16 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             can_afford = cost <= money
             can_slot = has_joker_slot
             if not can_slot and weakest_owned_idx >= 0:
-                sell_price = _joker_sell_value(joker_cards[weakest_owned_idx])
+                # dec-081: legality means ANY sellable joker can fund the buy, not
+                # just the heuristically-weakest one (the planner picks the actual
+                # sell slot). Using the weakest alone rejected affordable swaps
+                # whenever the weakest happened to have the smallest sell value.
+                if SWAP_LEGALITY:
+                    _sp = [_joker_sell_value(joker_cards[idx])
+                           for idx, v in enumerate(owned_values) if v != float("inf")]
+                    sell_price = max(_sp) if _sp else 0
+                else:
+                    sell_price = _joker_sell_value(joker_cards[weakest_owned_idx])
                 can_afford = cost <= (money + sell_price)
 
             if not can_afford:
@@ -714,7 +731,8 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                 swap_score = estimate_score_for_hand_type(swapped_jokers, raw_state)
                 # High-value jokers use a lower swap threshold (5% instead of 10%)
                 swap_threshold = 1.05 if is_high_value else 1.1
-                if swap_score > best_hand_score * swap_threshold:
+                meaningful = swap_score > best_hand_score * swap_threshold
+                if meaningful:
                     # Swap is a meaningful upgrade
                     any_buyable_joker = True
                     has_scoring_joker_in_shop = True
@@ -725,6 +743,38 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
                     mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = math.exp(HAND_BIAS_STRENGTH * (base_boost + boost * 0.4))
                     upgrade_target_idx = i
                     upgrade_sell_idx = weakest_owned_idx
+                elif SWAP_LEGALITY:
+                    # dec-081 — THE FROZEN-BUILD BUG (con-011 violation).
+                    # The branch above is a heuristic VALUE VETO wearing a mask:
+                    # it demands a >=1.1x gain in IMMEDIATE single-hand score, and
+                    # only ever considers selling weakest_owned_idx. Anything else
+                    # fell through to `continue`, leaving mask[...] at its np.zeros
+                    # default -> the buy is ILLEGAL, so `any_buyable_joker` stays
+                    # False, so line ~778 hard-blocks ACTION_BUY_JOKER entirely and
+                    # the agent just leaves the shop. Because slots fill by ante ~3,
+                    # that freezes the build for the rest of the run: measured over
+                    # 6 trainer logs, only 289 of 31,185 full-slot shops (0.93%)
+                    # ever produced a swap, while the PLANNER (multi-ante
+                    # survivability, all 5 sell candidates) wanted one in ~55%.
+                    # The good swap logic in _planner_pick_swap was unreachable.
+                    #
+                    # con-011: the mask is a LEGALITY gate; heuristic preference
+                    # belongs in bias/prior-KL. Legality here = "could this buy
+                    # physically happen?" i.e. some sellable joker frees the slot
+                    # and pays for it. The worth-it call is the planner's.
+                    sell_prices = [_joker_sell_value(joker_cards[idx])
+                                   for idx, v in enumerate(owned_values)
+                                   if v != float("inf")]
+                    if sell_prices and cost <= money + max(sell_prices):
+                        any_buyable_joker = True
+                        if is_scoring:
+                            has_scoring_joker_in_shop = True
+                        # Neutral weight: legal, but no heuristic thumb on the
+                        # scale — the planner ranks it by build survivability.
+                        mask[target_offset + TARGET_SHOP_JOKER_OFFSET + i] = 1.0
+                        if upgrade_target_idx < 0:
+                            upgrade_target_idx = i
+                            upgrade_sell_idx = weakest_owned_idx
                 continue
 
             # Open slot available — evaluate via delta

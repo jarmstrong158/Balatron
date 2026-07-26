@@ -116,6 +116,15 @@ def main():
                     help="leave training stopped afterwards (for back-to-back evals)")
     ap.add_argument("--rf", default=None,
                     help="override REALIZATION_FACTOR for this eval (dec-078 A/B)")
+    ap.add_argument("--ahead-early-bonus", default=None,
+                    help="extra SAVE-gate headroom per ante below ante 4 "
+                         "(dec-079 A/B; 0 = dec-068 control, 1.0 = treatment)")
+    ap.add_argument("--rollout", default=None,
+                    help="use the Monte-Carlo P(clear) leaf for the current ante "
+                         "(dec-083 A/B; 0 = analytical control, 1 = rollout)")
+    ap.add_argument("--swap-legality", default=None,
+                    help="full-slot shop buys become a LEGALITY gate instead of a "
+                         "heuristic veto (dec-081 A/B; 0 = control, 1 = treatment)")
     args = ap.parse_args()
 
     if psutil is None:
@@ -138,6 +147,12 @@ def main():
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     if args.rf is not None:
         env["BALATRON_RF"] = str(args.rf)   # dec-078: pin RF for this arm
+    if args.ahead_early_bonus is not None:  # dec-079: pin the SAVE-gate arm
+        env["BALATRON_AHEAD_EARLY_BONUS"] = str(args.ahead_early_bonus)
+    if args.swap_legality is not None:      # dec-081: pin the full-slot buy arm
+        env["BALATRON_SWAP_LEGALITY"] = str(args.swap_legality)
+    if args.rollout is not None:            # dec-083: pin the evaluator arm
+        env["BALATRON_ROLLOUT"] = str(args.rollout)
 
     rc = 1
     try:

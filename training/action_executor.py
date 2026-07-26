@@ -11,6 +11,7 @@ module's top-level imports are intentionally minimal.
 """
 
 import asyncio
+import os as _os
 from typing import Optional
 
 import numpy as np
@@ -134,7 +135,44 @@ class ActionExecutor:
     # dec-068: how far PAST the upcoming ante the score-only build must already
     # project before near-term power counts as REDUNDANT (bank interest instead).
     # 1.0 = clears the immediate ante with a full ante of headroom.
-    AHEAD_BUFFER = 1.0
+    #
+    # dec-079 — THE ANTE-4/5 PLATEAU MECHANISM. AHEAD_BUFFER=1.0 was measured
+    # against the REAL logged builds (50k blind snapshots) and fires the SAVE
+    # gate in 65% of ante-2 shops and 54% of ante-3 shops — exactly the cheap
+    # window where the xmult engine has to be assembled. The trap is arithmetic:
+    # blind targets ~DOUBLE each ante, so "one ante of headroom" is a vanishing
+    # margin. A flat build genuinely clears ante 3 (median headroom +1.54 at
+    # ante 2), so the agent banks money instead of buying; by ante 4-5 headroom
+    # has collapsed (+0.70 -> +0.30 -> +0.00), all 5 slots are full of FLAT
+    # jokers (median 0 xmult at the moment slots fill, ante 4) and 78% of runs
+    # never improve their xmult count again. Net effect: xmult acquisition is
+    # statistically indistinguishable from buying at random (pool is 23% xmult;
+    # E[xmult] in 5 random jokers = 1.17, observed median = 1).
+    #
+    # The fix is to demand headroom PROPORTIONAL to the curve the build must
+    # outrun, and to demand MORE of it early (when a slot spent on an engine
+    # compounds for the rest of the run) than late (when banking for a boss
+    # spike is genuinely right). Env-overridable for a paired A/B, same pattern
+    # as dec-078's BALATRON_RF, so both arms run off ONE binary.
+    AHEAD_BUFFER = float(_os.environ.get("BALATRON_AHEAD_BUFFER", "1.0"))
+    # Extra headroom demanded per ante below EARLY_BUILD_UNTIL_ANTE. 0.0 keeps
+    # the flat dec-068 behaviour (the A/B's control arm).
+    AHEAD_BUFFER_EARLY_BONUS = float(
+        _os.environ.get("BALATRON_AHEAD_EARLY_BONUS", "0.0"))
+    EARLY_BUILD_UNTIL_ANTE = 4
+
+    def _ahead_buffer_for(self, ante: int) -> float:
+        """Required headroom (in antes) before near-term power is 'redundant'.
+
+        Flat by default (dec-068). With the dec-079 early bonus enabled, antes
+        below EARLY_BUILD_UNTIL_ANTE demand progressively more headroom, so the
+        agent keeps BUILDING through the window where engines are affordable
+        instead of banking into a wall it cannot clear later.
+        """
+        if self.AHEAD_BUFFER_EARLY_BONUS <= 0.0:
+            return self.AHEAD_BUFFER
+        deficit = max(0, self.EARLY_BUILD_UNTIL_ANTE - max(ante, 1))
+        return self.AHEAD_BUFFER + self.AHEAD_BUFFER_EARLY_BONUS * deficit
 
     def _already_clearing(self, jokers_raw: list, raw_state: dict) -> bool:
         """True when the build's SCORE-ONLY survivability already projects
@@ -146,7 +184,7 @@ class ActionExecutor:
             from environment.planner import _score_survivability
             surv = _score_survivability(jokers_raw, raw_state)
             cur = int(raw_state.get("ante_num", raw_state.get("ante", 1)) or 1)
-            return (surv - cur) >= self.AHEAD_BUFFER
+            return (surv - cur) >= self._ahead_buffer_for(cur)
         except Exception:
             return False
 
