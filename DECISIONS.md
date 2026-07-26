@@ -1610,6 +1610,72 @@ the credit horizon by ~4x; if the regime degrades, revert both and bisect.
 
 ---
 
+### Codebase audit — dead code out, silent failures surfaced — 07-26 (`dec-087`)
+
+Sweep over 23.5k lines. **Behaviour is unchanged** — this removes traps for
+future work, it does not move the plateau.
+
+**The real defect:** `derisk_saveload.py` sat importable at the repo root calling
+`asyncio.run(main())` at **module level**. Merely importing every module to check
+for import errors **connected to the live game on port 12346 and round-tripped a
+`.jkr` save/load against the trainer's in-progress run at ante 3.** Now
+`__main__`-guarded.
+
+**Eight boss effects** (Psychic, Water, Tooth, Hook, Amber Acorn, Cerulean Bell,
+Serpent, Manacle) were detected into locals nothing read — *looked* like coverage,
+was dead weight. Verified each is really handled elsewhere before removing
+(Psychic has its own "must play 5" wrapper; Water/Manacle are in
+`BOSS_DIFFICULTY`; all 8 are in `BOSS_BLIND_INFO`, so the policy sees them).
+
+**Exception handlers: classified, not swept.** 104 broad handlers, 55 silent, 37
+unexplained. Sweeping would have been wrong — most exist so instrumentation can
+never take the trainer down. The dangerous subset is the four on the **decision
+path**, where swallowing changes what the agent *does*:
+
+| site | silent consequence |
+|---|---|
+| `find_best_hands` | `current_score`=0.0 → mask treats the hand as worthless |
+| `find_best_discard` | `discard_ev`=0.0 → agent stops digging |
+| `_estimate_joker_value` | shop card reads worthless **in the state vector** |
+| joker flags | that joker drops out of the state vector entirely |
+
+These now call `diagnostics.warn_once` — loud on first failure, then backing off
+(1st, 2nd, 5th, 10th, 100th…), with exact counts via `swallowed_counts()`. Bare
+`print` was rejected: per-step hot paths would emit thousands of lines a minute,
+get muted, and the signal would be lost. The helper never raises. The two
+handlers that are *correctly* silent are now documented as such.
+
+**Found and deliberately NOT fixed:** the dagger-sacrifice heuristic has a
+horizon term that was started and never finished (`remaining_antes` computed and
+discarded), so that ratio has **always** been horizon-free. Completing it would
+change which jokers get sacrificed — a behaviour change belonging in its own
+measured commit, not a cleanup. Recorded in the code so it isn't re-found as a
+mystery.
+
+Also: duplicate `TIER_WEIGHTS` key (same value, harmless), 31 unused imports, 47
+dead locals, 11 orphaned expressions. `ruff.toml` added — **F + E9 only, no style
+rules**, because this file's dense decision-history comments would be buried by a
+reformat.
+
+⚠️ **Two tooling traps, now guarded (`con-019`):** `ruff --fix` rewrote **12 files
+in the cambium worktree nested inside `.git`** (restored; now excluded).
+
+**Verification — and a methodology correction.** The first fingerprint sampled
+*randomly* from `logs/blind_results.jsonl`, a file the live trainer **appends
+to**, so its input changed between runs and the hash wasn't reproducible; it
+briefly looked like the refactor had broken something. Re-done with the first 250
+rows pinned in file order:
+
+| | fingerprint |
+|---|---|
+| pre-refactor `061c9f2` | `6eb4c7fe2aab400d8d0c0f90` |
+| post-refactor `47d35ca` | `6eb4c7fe2aab400d8d0c0f90` |
+| final | `6eb4c7fe2aab400d8d0c0f90` |
+
+Plus action mask identical on 60 real shop states. **207 tests pass, ruff clean.**
+
+---
+
 ## Operations
 
 See the [Usage](README.md#usage) section for launch commands. Key points:
