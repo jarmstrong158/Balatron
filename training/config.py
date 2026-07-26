@@ -61,6 +61,10 @@ class TrainConfig:
     # rare successes instead of forgetting them. Off by default (0.0); flip on
     # once the demo buffer has a corpus. Small coef to avoid mode-collapse.
     sil_coef: float = 0.1            # SIL ACTIVE (06-21): replay banked wins.
+    # dec-084: weight banked-win actions by (R - V)+ so SIL imitates the
+    # decisions that BEAT expectation, not every action in a run that happened
+    # to win. False restores the pre-dec-084 uniform cloning (the A/B control).
+    sil_advantage_filter: bool = True
     sil_batch_size: int = 256
     # dec-056: value-target normalization (PopArt-lite, dec-054). Enabled for the
     # live value-head A/B (the +150 win becomes a representable normalized target).
@@ -153,6 +157,7 @@ class TrainConfig:
             device=self.device,
             num_envs=self.num_envs,
             sil_coef=self.sil_coef,
+            sil_advantage_filter=self.sil_advantage_filter,
             sil_batch_size=self.sil_batch_size,
             value_norm=self.value_norm,
         )

@@ -1493,6 +1493,48 @@ ceiling regardless of evaluator.
 
 ---
 
+### SIL was cloning lucky wins, not learning from them — 07-26 (`dec-084`)
+
+Audit question: *does balatron take the right signal from wins and learn from it?*
+**Signal: yes. Learning: crude.**
+
+**What was already right** (verified, not assumed):
+- **Win detection is sound on both paths.** `GAME_OVER` requires `ante > 8`; the
+  post-boss path trusts the API `won` flag **only** in `SHOP`/`BLIND_SELECT`/
+  `ROUND_EVAL`, because the base game sets `won=true` on merely *reaching* the
+  ante-8 boss. Confirmed in logs: `ante=8 … api_won=True` → **`won=False`**.
+  con-001's trap is closed. Recorded wins land at ante {9:35, 10:24, 11:4, 12:1}.
+- Wins-only capture (dec-040), FIFO buffer holding the most recent ~165 wins,
+  SIL live and learning (loss **0.123 → 0.115** over 106 updates).
+
+**The defect:** `_sil_loss` was `-mean(log π(a|s))` — uniform **behaviour
+cloning** wearing SIL's name, no advantage weighting. A winning run is ~180 steps
+at a ~1.3% win rate in a game we proved is **variance-dominated** (dec-083: no
+learned evaluator beat AUC ~0.6), so many banked wins are **lucky**. Uniform
+cloning teaches *"the average behaviour of runs that happened to win"* rather than
+the decisions that won them. Amplified because `BC 0.000@0.00` and `Pr …@0.00` —
+both annealed out, leaving **SIL as the only live guidance channel**.
+
+**Fix:** real SIL (Oh et al.) — weight by `(R − V(s))⁺`. Returns were previously
+unrecoverable because rewards settle one step late (`amend_last_transition`), so
+a parallel `env.episode_rewards` track mirrors that same lag, the win bonus lands
+on the last captured step (capture already stops at win detection, dec-058), and
+discounted return-to-go is computed at flush with `config.gamma`.
+
+- Pre-fix transitions load with **NaN** returns and keep the old uniform weight —
+  the corpus is weeks of 1.3%-rate wins and is irreplaceable.
+- Normalised by **total weight, not count**, so `sil_coef` keeps its meaning.
+- `sil_advantage_filter` (default **True**); `False` restores the byte-identical
+  old loss, pinned by a test. Tests: `test_sil_advantage.py` (+6); **201 pass**.
+
+⚠️ **UNMEASURED** — deploys on the next trainer restart, no A/B run. Efficacy
+depends on critic calibration: wins are rare, so the critic under-predicts them
+and `(R−V)⁺` stays positive for most steps of a winning run — this **re-weights**
+more than it sharply filters. If win rate or mean ante degrades, set
+`sil_advantage_filter=False` before investigating anything else.
+
+---
+
 ## Operations
 
 See the [Usage](README.md#usage) section for launch commands. Key points:

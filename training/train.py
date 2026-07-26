@@ -334,6 +334,7 @@ class Trainer:
             return
         if self.eval_mode:                      # dec-045: don't pollute SIL with eval runs
             env.episode_traj = []
+            env.episode_rewards = []      # dec-084
             env.max_ante_seen = 1
             return
         traj = env.episode_traj
@@ -345,9 +346,22 @@ class Trainer:
         # successes; once real wins appear, SIL becomes a correct flywheel.
         keep = bool(traj) and env.win_recorded
         if keep:
+            # dec-084: discounted return-to-go per step, so SIL can weight by
+            # (R - V)+ instead of cloning every action in the run uniformly.
+            # A winning run is ~180 steps and, at a ~1.3% win rate in a
+            # variance-dominated game, plenty of those wins are LUCKY — uniform
+            # cloning teaches "the average behaviour of runs that happened to
+            # win" rather than the decisions that won them.
+            rew = list(env.episode_rewards)[:len(traj)]
+            rew += [0.0] * (len(traj) - len(rew))     # defensive: never short
+            returns, acc = [0.0] * len(traj), 0.0
+            for i in range(len(traj) - 1, -1, -1):
+                acc = rew[i] + self.config.gamma * acc
+                returns[i] = acc
             n = self.demo_buffer.add_trajectory(
                 [t[0] for t in traj], [t[1] for t in traj],
                 [t[2] for t in traj], [t[3] for t in traj],
+                returns,
             )
             self._demo_captures += 1
             print(f"[DEMO] captured: env{env.env_id} ante={env.max_ante_seen} "
@@ -359,6 +373,7 @@ class Trainer:
                 self.demo_buffer.save()
         # Always clear the accumulator for the next run.
         env.episode_traj = []
+        env.episode_rewards = []          # dec-084
         env.max_ante_seen = 1
 
     def _curriculum_prob(self) -> float:
@@ -809,6 +824,13 @@ class Trainer:
                 # by _win_reward_stored so GAME_OVER won't double-count it.
                 if not env.win_reward_stored:
                     win_reward = env.reward_calc.terminal_win_reward(raw_state)
+                    # dec-084: the win bonus is the dominant term in every
+                    # return-to-go for this run. Capture stopped at the step
+                    # before the win was detected (dec-058), which is exactly
+                    # the transition amend_last_transition credits, so the last
+                    # captured entry is the right home for it.
+                    if env.episode_rewards:
+                        env.episode_rewards[-1] += win_reward
                     # Credit the win to the real decision that won the run by
                     # amending the last stored transition in place (set
                     # done=True, add the reward). Appending a fresh done=True
@@ -1466,6 +1488,12 @@ class Trainer:
 
             store_reward = 0.0
             if settled_reward != 0.0:
+                # dec-084: mirror the settle into the demo trajectory's reward
+                # track. `settled_reward` is the outcome of the PREVIOUS step,
+                # so it belongs to the last captured entry — same one-step lag
+                # amend_last_transition applies to the PPO buffer.
+                if env.episode_rewards:
+                    env.episode_rewards[-1] += settled_reward
                 if not self.ppo.amend_last_transition(reward_delta=settled_reward, env_id=env.env_id):
                     # Rollout boundary: the causing transition was consumed
                     # with the previous buffer — keep the reward on this
@@ -1567,6 +1595,7 @@ class Trainer:
                     state_vec.copy(), action_np.copy(), action_mask.copy(),
                     get_head_index(game_state_name),
                 ))
+                env.episode_rewards.append(0.0)   # dec-084: settled next step
                 if ante > env.max_ante_seen:
                     env.max_ante_seen = ante
             # Liveness heartbeat: touch on every REAL step so the

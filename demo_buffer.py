@@ -42,6 +42,12 @@ class DemoBuffer:
         self.actions = np.zeros((capacity, action_dim), dtype=np.float32)
         self.masks = np.zeros((capacity, mask_dim), dtype=np.float32)
         self.head_indices = np.zeros(capacity, dtype=np.int64)
+        # dec-084: discounted return-to-go per transition, so SIL can weight by
+        # (R - V)+ rather than cloning every action in a winning run uniformly.
+        # NaN means "unknown" — transitions banked before dec-084 carry no
+        # return, and the SIL loss falls back to uniform weight for those so the
+        # irreplaceable pre-fix win corpus stays usable instead of being dumped.
+        self.returns = np.full(capacity, np.nan, dtype=np.float32)
 
         # Lifetime diagnostics (persisted) — how much we've ever captured.
         self.trajectories_added = 0
@@ -52,7 +58,8 @@ class DemoBuffer:
     def __len__(self) -> int:
         return self.capacity if self.full else self.pos
 
-    def add_trajectory(self, states, actions, masks, head_indices) -> int:
+    def add_trajectory(self, states, actions, masks, head_indices,
+                       returns=None) -> int:
         """Append one episode's real transitions. Ring-buffer: oldest evicted
         once full. Returns the number of transitions added."""
         n = len(states)
@@ -64,6 +71,7 @@ class DemoBuffer:
             self.actions[p] = actions[i]
             self.masks[p] = masks[i]
             self.head_indices[p] = head_indices[i]
+            self.returns[p] = np.nan if returns is None else returns[i]
             self.pos += 1
             if self.pos >= self.capacity:
                 self.pos = 0
@@ -84,6 +92,7 @@ class DemoBuffer:
             "actions": self.actions[idx],
             "masks": self.masks[idx],
             "head_indices": self.head_indices[idx],
+            "returns": self.returns[idx],
         }
 
     def save(self):
@@ -107,6 +116,7 @@ class DemoBuffer:
                     actions=self.actions[:n],
                     masks=self.masks[:n],
                     head_indices=self.head_indices[:n],
+                    returns=self.returns[:n],          # dec-084
                     meta=np.array([self.trajectories_added,
                                    self.transitions_added], dtype=np.int64),
                 )
@@ -141,6 +151,14 @@ class DemoBuffer:
             self.actions[:n] = d["actions"][:n]
             self.masks[:n] = d["masks"][:n]
             self.head_indices[:n] = d["head_indices"][:n]
+            # dec-084: pre-fix corpora have no `returns`. Leave those NaN so the
+            # SIL loss falls back to uniform weight for them rather than
+            # discarding an irreplaceable win corpus that took weeks to gather.
+            if "returns" in d:
+                self.returns[:n] = d["returns"][:n]
+                _known = int(np.isfinite(self.returns[:n]).sum())
+                print(f"[DEMO] {_known}/{n} transitions carry a return "
+                      f"(dec-084 advantage filter applies to those)", flush=True)
             self.pos = n % self.capacity
             self.full = n >= self.capacity
             if "meta" in d:

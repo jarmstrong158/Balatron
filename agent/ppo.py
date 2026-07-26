@@ -66,6 +66,8 @@ class PPOConfig:
     # forward pass — never enter policy_loss/value_loss. 0.0 = off.
     sil_coef: float = 0.0            # Self-imitation loss weight
     sil_batch_size: int = 256        # Demo transitions sampled per minibatch
+    sil_advantage_filter: bool = True  # dec-084: weight demos by (R-V)+ (real
+                                     # SIL) instead of uniform behaviour cloning
 
     # Training schedule
     # Rollouts cost ~12 min of live-game wall-clock; the network update
@@ -615,16 +617,58 @@ class PPOTrainer:
                                 device=self.device)
 
         log_probs = torch.zeros(states.shape[0], device=self.device)
+        values = torch.zeros(states.shape[0], device=self.device)
         for h_idx in range(3):
             hm = heads == h_idx
             if not hm.any():
                 continue
-            _, h_lp, _, _, _ = self.network.get_action_and_value(
+            _, h_lp, _, h_v, _ = self.network.get_action_and_value(
                 states[hm], h_idx, masks[hm], action=actions[hm])
             log_probs[hm] = h_lp
+            values[hm] = h_v
         # Clamp like the BC term: a target-inconsistent demo action could carry
         # a ~-1e9 conditioned-target logit and one bad sample would dwarf it.
-        return -torch.clamp(log_probs, min=-30.0).mean()
+        log_probs = torch.clamp(log_probs, min=-30.0)
+
+        # dec-084: ADVANTAGE-FILTERED self-imitation, i.e. actual SIL (Oh et al.
+        # 2018) rather than behaviour cloning wearing its name. Weight each demo
+        # action by (R - V(s))+ so we imitate only what BEAT the critic's
+        # expectation.
+        #
+        # Why it matters here specifically: a winning run is ~180 steps, the win
+        # rate is ~1.3%, and this session established that boss-clearing is
+        # variance-dominated (AUC ~0.6 even for a learned build evaluator). So a
+        # large share of banked wins are LUCKY, not skillful. Cloning all 180
+        # actions uniformly teaches "reproduce the average behaviour of runs that
+        # happened to win" instead of "reproduce the decisions that won them" —
+        # it imprints the noise along with the signal. SIL is also currently the
+        # ONLY live guidance channel (bc_coef and prior_coef both anneal to 0),
+        # so its signal quality is not a second-order concern.
+        #
+        # Returns are stored per transition by the demo buffer. Transitions
+        # banked BEFORE dec-084 carry NaN; those keep the old uniform weight of
+        # 1.0 so the irreplaceable pre-fix win corpus stays usable during the
+        # changeover instead of being thrown away.
+        if not cfg.sil_advantage_filter or "returns" not in demo:
+            return -log_probs.mean()
+
+        rets = torch.as_tensor(demo["returns"], dtype=torch.float32,
+                               device=self.device)
+        known = torch.isfinite(rets)
+        weights = torch.ones_like(log_probs)
+        if known.any():
+            # Returns were accumulated in RAW reward units; the critic head is
+            # value-normalised. Denormalise the same way the rest of the critic
+            # path does (ppo.py:374) — identity when normalisation is off
+            # (ret_std=1, ret_mean=0), so this is safe either way.
+            v_raw = values * self.ret_std + self.ret_mean
+            adv = torch.clamp(rets - v_raw, min=0.0)
+            weights = torch.where(known, adv, torch.ones_like(adv))
+        # Normalise by total weight, not count: otherwise a batch where most
+        # actions were merely average silently shrinks the whole SIL term and
+        # the coefficient no longer means what it says.
+        denom = weights.sum().clamp(min=1e-6)
+        return -(log_probs * weights).sum() / denom
 
     def _update_batch(self, batch: dict) -> dict:
         """Run single minibatch PPO update.

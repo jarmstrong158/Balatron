@@ -66,6 +66,12 @@ class EnvSession:
         # a win / high-ante finish, discarded otherwise. Behavior-neutral —
         # pure logging, never reads back into the policy in Phase 1.
         self.episode_traj: list = []
+        # dec-084: per-step rewards parallel to episode_traj, so a captured WIN
+        # can be turned into discounted return-to-go and SIL can weight by
+        # (R - V)+ instead of cloning every action in the run uniformly.
+        # Rewards settle ONE STEP LATE (store_reward/amend_last_transition), so
+        # entry i is filled in while step i+1 is being processed.
+        self.episode_rewards: list = []
         self.max_ante_seen: int = 1
 
         # Build-progression instrumentation: highest ante already logged for
