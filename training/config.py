@@ -25,7 +25,29 @@ class TrainConfig:
     # reward to ~5% at early-ante decisions (0.99^300) — the shop choices
     # that determine wins could barely feel it. 0.995^300 ~ 22%.
     gamma: float = 0.995
-    gae_lambda: float = 0.95
+    # dec-086: 0.95 -> 0.99. gamma was already raised to 0.995 (above) precisely
+    # so the win reward would still be felt at early-ante decisions — but GAE
+    # discounts by gamma*LAMBDA, and lambda=0.95 silently undid it:
+    #
+    #   step-40 shop decision, win at step 179 (median winning run) = 139 back
+    #     gamma alone      0.995^139 = 0.50   <- what the gamma fix intended
+    #     gamma*lambda     0.9452^139 = 0.0004 <- what actually reached it
+    #     gamma*0.99       0.9850^139 = 0.12   <- with this change
+    #
+    # Credit decayed to 10% after 41 steps against runs of median 179 steps, so
+    # the BUILD decisions that determine a run were learning from ~nothing. This
+    # is the last untested mechanism that attacks CONSTRUCTION rather than
+    # evaluation — and dec-085 established evaluation is a dead end (four levers,
+    # provably-firing mechanisms, null or harm). 0.97 was considered and rejected:
+    # it only reaches 0.7% at the same distance, which does not solve the problem.
+    #
+    # NOTE: unlike every planner lever, this CANNOT be A/B'd on a checkpoint —
+    # gae_lambda is used only in compute_gae during TRAINING, so it is evaluated
+    # by training with it and watching the trend. See DECISIONS.md for the
+    # pre-registered success/revert criteria and the regime boundary.
+    # Tradeoff: higher lambda = less bias, MORE variance in the advantage
+    # estimate. Watch value loss and EV for a variance blowup.
+    gae_lambda: float = 0.99
     clip_epsilon: float = 0.2
     entropy_coef: float = 0.03   # 0.10 -> 0.03 (06-22, dec-029). With the VALUE
                                  # TRUNK now DECOUPLED (network.py value_trunk), the

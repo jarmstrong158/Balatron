@@ -1535,6 +1535,81 @@ more than it sharply filters. If win rate or mean ante degrades, set
 
 ---
 
+### Evaluation is a dead end — four measured levers — 07-26 (`dec-085`)
+
+`dec-083`'s Monte-Carlo rollout leaf **FAILED** its pooled A/B. Not shipped
+(`BALATRON_ROLLOUT` stayed 0 throughout, so the revert was a no-op).
+
+| | mean ante | 95% CI |
+|---|---|---|
+| batch 1 (300 seeds) | +0.107 | [−0.070, +0.283] |
+| **batch 2 (300 FRESH seeds)** | **+0.010** | [−0.180, +0.197] |
+| **pooled (600)** | **+0.058** | **[−0.072, +0.187]** |
+
+Batch 1 looked directionally positive (4 gates favouring treatment, 0 against).
+**It did not replicate.** In batch 2 the DEEP gates reverse — ante≥7 12/21 to
+control (36%), ante≥8 8/13 (38%) — so pooled, shallow gates lean slightly
+positive and deep gates lean negative: the signature of no effect plus noise. A
+real evaluator gain should persist or grow with depth. Wins 6 vs 8 of 600.
+
+**This is the important result.** The rollout was *measurably better at its job* —
+**+0.064 AUC** on clean leak-controlled data (a gate set before it was built) and
+it changed **32% of shop picks** — and run depth did not move. Four independent
+levers now, each with a mechanism **verified to fire before the outcome was read**:
+
+| lever | mechanism proven | outcome |
+|---|---|---|
+| dec-075 escape hatch | — | null |
+| dec-079 buy timing | save gate 66.5%→8.3% | null |
+| dec-081 buy legality | reachability 63%→98% | **worse** (p=0.031) |
+| dec-083 rollout leaf | +0.064 AUC, 32% picks changed | null |
+
+⇒ **Better build evaluation does not produce deeper runs.** Boss-clearing is
+variance-dominated. **Stop tuning the planner's evaluation** (constraint recorded).
+
+---
+
+### The gamma fix was silently undone by lambda — 07-26 (`dec-086`)
+
+`gae_lambda` **0.95 → 0.99**. GAE discounts by γ·**λ**, not γ — so the earlier
+`gamma` 0.99→0.995 raise, made *specifically* so early-ante decisions would feel
+the win, was neutralised:
+
+| step-40 shop decision, win at step 179 (median run) | credit |
+|---|---|
+| γ alone (`0.995^139`) | **0.50** ← what the gamma fix intended |
+| γ·λ (`0.9452^139`) | **0.0004** ← what actually reached it |
+| γ·0.99 (`0.9850^139`) | **0.12** ← with this change |
+
+Credit decayed to 10% after **41 steps** against runs of median **179**. The build
+decisions that determine a run were learning from ~nothing. `0.97` was rejected —
+0.7% at the same distance doesn't solve it. This is the last untested mechanism
+attacking **construction** rather than evaluation, which dec-085 just closed off.
+
+⚠️ **This CANNOT be A/B'd.** `gae_lambda` is used only in `compute_gae` during
+TRAINING, so it has no effect on a fixed checkpoint. It is evaluated by training
+with it and watching the trend — a different, weaker design than every planner
+lever, and stated as such rather than dressed up as an A/B.
+
+**Regime boundary (con-014) — do not trend across it.** Pre-registered *before*
+deploying:
+
+- **Baseline** (last ~150 updates, ~6399–6491): mean ante **4.30** (sd 0.43),
+  WR500 **1.37%**, value loss **0.178**, EV **0.620**.
+- **Window:** ≥500 updates (~1–2 days). The horizon change only pays off once the
+  policy has *learned* differently; earlier readings are noise.
+- **Success:** mean ante or WR500 clearly above the baseline noise band.
+- **REVERT trigger:** WR500 sustained below ~0.7%, **or** a variance blow-up —
+  value loss ≫0.178 or EV ≪0.62 — which is the known cost of raising lambda.
+- **Revert:** `gae_lambda` back to 0.95.
+
+**Co-deployed with `dec-084`** (advantage-filtered SIL) on the same restart —
+recorded here so neither is misattributed later. Accepted because dec-084's
+expected effect is small (it re-weights more than it filters) while this changes
+the credit horizon by ~4x; if the regime degrades, revert both and bisect.
+
+---
+
 ## Operations
 
 See the [Usage](README.md#usage) section for launch commands. Key points:
