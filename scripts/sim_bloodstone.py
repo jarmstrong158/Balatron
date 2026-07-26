@@ -163,7 +163,6 @@ def run_sim(n_trials: int = 100, hand_size: int = 8, seed: int = 42):
         plan_action = plan["action"]
 
         # Categorize
-        "flush" in discard_strategy.lower()
 
         # Find the flush-specific EV even if it wasn't the winner
         # Re-run discard to get all candidates
@@ -301,10 +300,6 @@ def run_sim(n_trials: int = 100, hand_size: int = 8, seed: int = 42):
     # Breakdown by hearts count in hand
     print("  Breakdown by Hearts in hand:")
     for h_count in range(0, 9):
-        [(flush_draw_evs[i], play_now_evs[i], margins[i])
-                  for i in range(n_trials)
-                  if Counter(card_suit(c) for c in make_deck()[:0]).get("Hearts", 0) == 0  # placeholder
-                  ]
         # Actually redo with real counts
         pass
 

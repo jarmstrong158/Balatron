@@ -2273,7 +2273,6 @@ def _project_hand_score(hand_type: str, num_scoring_cards: int,
     # Log projection breakdown for Flush/Straight Flush to diagnose low scores
     if hand_type in ("Flush", "Straight Flush") and projected_cards:
         proj_ranks = [card_rank(c) for c in projected_cards]
-        [card_suit(c) for c in projected_cards]
         sum(1 for r in proj_ranks if r in FACE_RANKS)
     return total_score
 
@@ -2958,7 +2957,6 @@ def _plan_optimal_action_inner(hand_cards: list[dict],
             if top_hands:
                 best_play = top_hands[0]
                 best_play_score = best_play["estimated_score"]
-                best_play["hand_type"]
                 play_cards = list(best_play["card_indices"])
 
     # The Mouth: only one hand type can be played this round. The locked
@@ -2980,7 +2978,6 @@ def _plan_optimal_action_inner(hand_cards: list[dict],
             if top_hands:
                 best_play = top_hands[0]
                 best_play_score = best_play["estimated_score"]
-                best_play["hand_type"]
                 play_cards = list(best_play["card_indices"])
 
     # The Needle: only 1 hand — make it count, never discard
@@ -3068,7 +3065,6 @@ def _plan_optimal_action_inner(hand_cards: list[dict],
     if best_ready and best_ready["projected_score"] > effective_play_score:
         effective_play_score = best_ready["projected_score"]
         effective_play_cards = best_ready["keep_indices"]
-        best_ready["detail"]
 
     # Helper: order discard candidates with seal + face card awareness
     # Priority: Purple Seal first (want tarot), face cards (if avoid_face),
@@ -4243,7 +4239,6 @@ def _find_dagger_sacrifice(
             # Permanent mult applies every hand for rest of run
             # Estimate remaining hands: ~4 hands/round × 3 rounds/ante × remaining antes
             remaining_antes = max(8 - ante, 1)
-            remaining_antes * 3 * 4
             # But the mult gain also benefits all those hands
             # Simple heuristic: sacrifice if gain > 3× per-hand contribution
             value_ratio = dagger_mult_gain / max(scoring_power, 0.01)

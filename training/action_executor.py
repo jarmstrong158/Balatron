@@ -1112,8 +1112,6 @@ class ActionExecutor:
                 hands_available = raw_state.get("round", {}).get("hands_left", 4)
                 if hands_available <= 0:
                     hands_available = 4  # default for next round
-                estimate_score_for_hand_type(
-                    jokers_raw, raw_state) * hands_available
 
                 worst_idx, worst_val = _find_weakest_sellable_joker(
                     jokers_raw, raw_state,
@@ -1339,6 +1337,11 @@ class ActionExecutor:
                     raw_state = await env.game.fetch_gamestate()
                     money = raw_state.get("money", 0)
                 except Exception:
+                    # Safe to absorb: the enclosing `except Exception as e`
+                    # below already reports voucher-buy failures, and a stale
+                    # `money` here only makes the next affordability check
+                    # conservative. Kept narrow so it cannot mask that outer
+                    # handler.
                     pass
             except Exception as e:
                 print(f"[SHOP] Voucher buy failed: {e}", flush=True)

@@ -410,7 +410,6 @@ def render():
         _last_hb["t"], _last_hb["step"] = now, hb_step
     hb_age = (now - hb_t) if hb_t else None
 
-    100.0 * life["wins"] / max(1, life["episodes"])
 
     # --- live training context (latest update + supervisor + velocity) ---
     state, state_detail = read_status()

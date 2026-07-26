@@ -20,6 +20,8 @@ from typing import Optional
 
 import numpy as np
 
+from diagnostics import warn_once
+
 from environment.hand_eval import (
     find_best_hands, find_best_discard, _api_key_to_name,
     estimate_score_for_hand_type, BASE_HAND_SCORES,
@@ -423,8 +425,12 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             if best:
                 best_indices = set(best[0]["card_indices"])
                 current_score = best[0]["estimated_score"]
-        except Exception:
-            pass
+        except Exception as e:
+            # Absorbing this is right (one bad hand must not kill the run) but
+            # it is NOT free: current_score stays 0.0, so the mask biases card
+            # selection as though the hand were worthless. A one-off is noise;
+            # a persistent failure is a silent play regression, so surface it.
+            warn_once("action_space.build_action_mask/find_best_hands", e)
 
         # --- Blind-target-aware play/discard decision ---
         # Figure out how much score we still need
@@ -433,17 +439,16 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
         remaining_target = max(blind_target - chips_scored, 0)
         hands_left = raw_state.get("round", {}).get("hands_left", 0)
 
-        # Per-hand target: how much does each remaining hand need to score?
-        remaining_target / max(hands_left, 1)
-
         # Check discard EV
         discard_ev = 0.0
         if discards_left > 0 and hand_cards and deck_cards:
             try:
                 advice = find_best_discard(hand_cards, deck_cards, jokers_raw, raw_state)
                 discard_ev = advice["expected_score"]
-            except Exception:
-                pass
+            except Exception as e:
+                # Same shape: discard_ev stays 0.0, so discarding never looks
+                # worth it and the agent silently stops digging.
+                warn_once("action_space.build_action_mask/find_best_discard", e)
 
         # PLAY/DISCARD BIAS: let plan_optimal_action make the real decision,
         # but bias the mask to match common cases so the NN learns faster.

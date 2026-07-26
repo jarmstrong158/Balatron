@@ -20,6 +20,8 @@ from typing import Any, Optional
 import aiohttp
 import numpy as np
 
+from diagnostics import warn_once
+
 from data.jokers import JOKERS
 from environment.hand_eval import assess_strategy, HAND_EVAL_FEATURES
 
@@ -1616,8 +1618,11 @@ class GameStateManager:
                         d = float(_estimate_joker_value(sc, jokers_raw, raw))
                         if d > best_delta:
                             best_delta = d
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # best_delta stays put, so this shop card reads as
+                        # worthless in the STATE VECTOR the policy sees. Fine
+                        # once; a standing failure quietly blinds the policy.
+                        warn_once("game_state.encode/_estimate_joker_value", e)
                 vec[offset + 1] = 1.0 if shop_has else 0.0
                 vec[offset + 2] = _log_norm(best_delta, 3.0)   # compounding value
                 vec[offset + 3] = 1.0 if (owned_xmult >= 1 and affordable) else 0.0
@@ -1994,7 +1999,10 @@ class GameStateManager:
                         flags["scaling"] = True
                     if s.get("retrigger_effect"):
                         flags["retrig"] = True
-                except Exception:
+                except Exception as e:
+                    # Skipping one joker's flags silently drops it from the
+                    # state vector - the policy then cannot see it at all.
+                    warn_once("game_state.encode/joker_flags", e)
                     continue
             vec[offset + 4] = 1.0 if flags["chip"] else 0.0
             vec[offset + 5] = 1.0 if flags["mult"] else 0.0

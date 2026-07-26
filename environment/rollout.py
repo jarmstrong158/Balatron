@@ -160,6 +160,11 @@ def _best_play(hand: list[dict], jokers: list[dict], gs: dict) -> tuple[float, l
             ht, _ = classify_hand(cards)
             sc = estimate_score(ht, cards, list(range(len(cards))), jokers, gs)
         except Exception:
+            # INTENTIONALLY silent. This loop probes candidate card subsets and
+            # some simply do not classify; skipping them IS the algorithm, not a
+            # swallowed error. It also runs thousands of times per evaluation,
+            # so reporting here would drown the signal from the handlers that
+            # actually matter (see diagnostics.warn_once).
             continue
         if sc > best_score:
             best_score, best_idx = sc, idxs

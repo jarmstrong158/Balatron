@@ -744,7 +744,6 @@ def main():
                 time.sleep(CHECK_INTERVAL_S)
                 continue
 
-            tpids[0]
             t_age = trainer_age_s()
 
             # --- (1) Proactive age recycle: never let it bloat/page ---------
