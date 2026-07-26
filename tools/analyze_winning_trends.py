@@ -178,7 +178,7 @@ def main():
     if deep and shallow:
         dn = 100.0 * sum(never_xmult(r) for r in deep) / len(deep)
         sn = 100.0 * sum(never_xmult(r) for r in shallow) / len(shallow)
-        print(f"\n=== never got an xmult engine ===")
+        print("\n=== never got an xmult engine ===")
         print(f"  deep (reached 8, n={len(deep)}):   {dn:4.1f}%")
         print(f"  shallow (died 4-6, n={len(shallow)}):  {sn:4.1f}%")
 

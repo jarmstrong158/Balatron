@@ -2218,7 +2218,8 @@ TIER_WEIGHTS: dict[str, float] = {
     "Seance": 2.0,
     "Shortcut": 2.0,
     "Showman": 2.0,
-    "Sly Joker": 2.0,
+    # (duplicate "Sly Joker": 2.0 removed — already set above with the same
+    # value, so this was dead weight rather than a silent override.)
     "Stone Joker": 2.0,
     "Marble Joker": 2.0,
     "Gift Card": 2.0,

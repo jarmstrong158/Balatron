@@ -17,7 +17,7 @@ nodes, RL value head as the leaf) is a later refinement within this pillar.
 import math
 
 from environment.hand_eval import (
-    estimate_score_for_hand_type, _estimate_joker_scoring_for_type, BASE_HAND_SCORES,
+    _estimate_joker_scoring_for_type, BASE_HAND_SCORES,
     _api_key_to_name, HAND_LEVEL_INCREMENTS, SCORING_CARD_CHIPS,
     SCALE_PROJECT_XMULT_CAP, SCALE_PROJECT_XMULT_CAP_PER_ANTE, SCALE_PROJECT_FLAT_CAP,
 )

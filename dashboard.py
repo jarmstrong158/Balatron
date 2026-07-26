@@ -400,7 +400,7 @@ def render():
     updates = read_updates()
     hb_t, hb_step = read_heartbeat()
     restarts = read_restarts_24h()
-    lw = last_win_info(rows)
+    last_win_info(rows)
 
     rate = None
     now = time.time()
@@ -410,7 +410,7 @@ def render():
         _last_hb["t"], _last_hb["step"] = now, hb_step
     hb_age = (now - hb_t) if hb_t else None
 
-    win_rate = 100.0 * life["wins"] / max(1, life["episodes"])
+    100.0 * life["wins"] / max(1, life["episodes"])
 
     # --- live training context (latest update + supervisor + velocity) ---
     state, state_detail = read_status()

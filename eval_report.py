@@ -18,7 +18,6 @@ Usage:
 """
 import json
 import math
-import sys
 
 
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float, float]:
@@ -109,7 +108,7 @@ def compare(path_a: str, path_b: str, seed_set: set = None):
         # McNemar exact-ish: significant if discordant pairs lopsided
         disc = a_better + b_better
         if disc:
-            p_b = b_better / disc
+            b_better / disc
             pp, lo, hi = wilson(b_better, disc)
             verdict = ("B>A" if lo > 0.5 else "A>B" if hi < 0.5 else "inconclusive")
             print(f"  discordant {disc}, P(B better|discordant)={100*pp:.0f}% "

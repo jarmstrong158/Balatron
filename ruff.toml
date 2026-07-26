@@ -1,0 +1,25 @@
+# Static-analysis config for balatron.
+#
+# EXCLUDES ARE LOAD-BEARING, not cosmetic:
+#   .git/**   — `git worktree list` shows a cambium worktree living INSIDE .git
+#               (.git/cambium-wt, branch `cambium`). Ruff does not skip it by
+#               default because it is nested under .git, so `ruff check . --fix`
+#               happily rewrote 12 files in another branch's checkout. Observed;
+#               restored with `git -C .git/cambium-wt checkout -- .`.
+#   audit_*, check_*, derisk_* — one-off diagnostic scripts kept for provenance,
+#               not maintained code. Linting them produces noise, not defects.
+extend-exclude = [
+    ".git",
+    "audit_*.py",
+    "check_*.py",
+    "balatron-escape-hatch",
+]
+
+line-length = 100
+
+[lint]
+# Start from real-defect rules only. F = pyflakes (dead code, undefined names),
+# E9 = syntax/IO errors. Style rules are deliberately NOT enabled: this codebase
+# carries dense explanatory comments by design and a formatting sweep would bury
+# the decision history in diff noise.
+select = ["F", "E9"]

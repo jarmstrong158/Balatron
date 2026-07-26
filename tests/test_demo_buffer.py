@@ -1,6 +1,5 @@
 """Tests for the self-imitation DemoBuffer (Phase 1: capture + persistence)."""
 import numpy as np
-import pytest
 
 from demo_buffer import DemoBuffer
 

@@ -194,7 +194,7 @@ def classify_hand(cards: list[dict]) -> tuple[str, list[int]]:
     ranks = [card_rank(c) for c in cards]
     suits = [card_suit(c) for c in cards]
     rank_counts = Counter(ranks)
-    suit_counts = Counter(suits)
+    Counter(suits)
 
     # Wild cards count as all suits — find best suit count including wilds
     wild_count = sum(1 for c in cards if card_is_wild(c))
@@ -380,7 +380,7 @@ def estimate_score(hand_type: str, cards: list[dict],
     total_mult = level_mult
 
     # Enhancement effects on SCORING cards only (kickers don't trigger)
-    scoring_set = set(scoring_indices)
+    set(scoring_indices)
     enhance_xmult = 1.0
     for card_pos_in_scoring, i in enumerate(scoring_indices):
         if i >= len(cards):
@@ -638,7 +638,6 @@ def compute_joker_scoring(hand_type: str, cards: list[dict],
 
     # Pre-compute held cards (cards NOT in the played hand) for held-in-hand triggers
     all_hand_cards = gamestate.get("hand", {}).get("cards", [])
-    played_indices = set()
     # Cards passed to this function are the played cards — figure out which
     # hand cards are being held (not played)
     played_card_ids = set()
@@ -926,7 +925,7 @@ def compute_joker_scoring(hand_type: str, cards: list[dict],
             total_retrigger_extra = 0
             for card_pos, c in enumerate(scoring_cards):
                 r = card_rank(c)
-                s = card_suit(c)
+                card_suit(c)
                 is_face = r in FACE_RANKS
                 card_extra = all_retriggers
                 if card_pos == 0:
@@ -2274,8 +2273,8 @@ def _project_hand_score(hand_type: str, num_scoring_cards: int,
     # Log projection breakdown for Flush/Straight Flush to diagnose low scores
     if hand_type in ("Flush", "Straight Flush") and projected_cards:
         proj_ranks = [card_rank(c) for c in projected_cards]
-        proj_suits = [card_suit(c) for c in projected_cards]
-        face_count = sum(1 for r in proj_ranks if r in FACE_RANKS)
+        [card_suit(c) for c in projected_cards]
+        sum(1 for r in proj_ranks if r in FACE_RANKS)
     return total_score
 
 
@@ -2363,7 +2362,7 @@ def _enumerate_targets(hand_cards: list[dict], deck_cards: list[dict],
         hand_type, detail, keep_indices, needed, outs, cards_per_discard, projected_score
     """
     n = len(hand_cards)
-    deck_size = len(deck_cards)
+    len(deck_cards)
     deck_suits = Counter(card_suit(c) for c in deck_cards)
     deck_ranks = Counter(card_rank(c) for c in deck_cards)
 
@@ -2572,7 +2571,7 @@ def _enumerate_targets(hand_cards: list[dict], deck_cards: list[dict],
             # For multi-discard probability, outs = min individual out count
             # (conservative: need exactly 1 of each missing rank in this suit)
             needed = len(need_vals)
-            min_outs = min(outs_per_val.values()) if outs_per_val else 0
+            min(outs_per_val.values()) if outs_per_val else 0
             # Total suit outs in deck for discard cycling
             total_suit_outs = sum(outs_per_val.values())
 
@@ -2712,19 +2711,11 @@ def _plan_optimal_action_inner(hand_cards: list[dict],
     boss_debuff_face = False  # The Plant: face cards debuffed
     boss_one_hand_type = False  # The Mouth: can only play 1 hand type all round
     boss_no_repeat_type = False  # The Eye: can't repeat hand types
-    boss_must_play_5 = False  # The Psychic: must play exactly 5 cards
     boss_halve_base = False  # The Flint: halves base chips AND mult
     boss_one_hand_only = False  # The Needle: only 1 hand allowed
-    boss_no_discards = False  # The Water: start with 0 discards
-    boss_lose_money = False  # The Tooth: lose $1 per card played
-    boss_hook = False  # The Hook: discards 2 random cards after each hand
     boss_ox_hand = ""  # The Ox: playing this hand type sets money to $0
     boss_verdant = False  # Verdant Leaf: all cards debuffed until joker sold
     boss_crimson = False  # Crimson Heart: random joker disabled each hand
-    boss_amber = False  # Amber Acorn: jokers flipped and shuffled
-    boss_cerulean = False  # Cerulean Bell: 1 card forced selected
-    boss_serpent = False  # The Serpent: always draw 3 cards after play/discard
-    boss_manacle = False  # The Manacle: -1 hand size
     boss_pillar = False  # The Pillar: previously played cards debuffed
 
     blinds = gamestate.get("blinds", {})
@@ -2745,8 +2736,6 @@ def _plan_optimal_action_inner(hand_cards: list[dict],
         debuffed_suit = BOSS_SUIT_DEBUFF[boss_name]
     if boss_name == "The Plant":
         boss_debuff_face = True
-    if boss_name == "The Psychic":
-        boss_must_play_5 = True
     if boss_name == "The Mouth":
         boss_one_hand_type = True
     if boss_name == "The Eye":
@@ -2755,12 +2744,6 @@ def _plan_optimal_action_inner(hand_cards: list[dict],
         boss_halve_base = True
     if boss_name == "The Needle":
         boss_one_hand_only = True
-    if boss_name == "The Water":
-        boss_no_discards = True
-    if boss_name == "The Tooth":
-        boss_lose_money = True
-    if boss_name == "The Hook":
-        boss_hook = True
     if boss_name == "The Ox":
         # Find most played hand type
         hand_usage = gamestate.get("hands", {})
@@ -2777,17 +2760,21 @@ def _plan_optimal_action_inner(hand_cards: list[dict],
         boss_verdant = True
     if boss_name == "Crimson Heart":
         boss_crimson = True
-    if boss_name == "Amber Acorn":
-        boss_amber = True
-    if boss_name == "Cerulean Bell":
-        boss_cerulean = True
-    if boss_name == "The Serpent":
-        boss_serpent = True
-    if boss_name == "The Manacle":
-        boss_manacle = True
     if boss_name == "The Pillar":
         boss_pillar = True
 
+    # NOTE (audit 07-26): eight boss effects are deliberately NOT flagged here —
+    # The Psychic, The Water, The Tooth, The Hook, Amber Acorn, Cerulean Bell,
+    # The Serpent, The Manacle. They used to be detected into locals that nothing
+    # ever read, which looked like coverage but was dead weight. Each is really
+    # handled elsewhere, so nothing is lost:
+    #   The Psychic  -> its own "must play exactly 5" wrapper above in this file
+    #   The Water    -> planner.BOSS_DIFFICULTY (no discards => harder to assemble)
+    #   The Manacle  -> planner.BOSS_DIFFICULTY (-1 hand size)
+    #   all 8        -> game_state.BOSS_BLIND_INFO, so the POLICY sees the boss in
+    #                   the state vector and can learn a response itself
+    # If in-blind play logic should special-case one of these, add the flag AND a
+    # consumer in the same change.
     # Only log actual boss blinds (not Small/Big Blind)
     from environment.game_state import BOSS_BLIND_INFO as _BBI
     is_actual_boss = boss_name in _BBI
@@ -2900,7 +2887,7 @@ def _plan_optimal_action_inner(hand_cards: list[dict],
 
     best_play = top_hands[0] if top_hands else None
     best_play_score = best_play["estimated_score"] if best_play else 0.0
-    best_hand_type = best_play["hand_type"] if best_play else "?"
+    best_play["hand_type"] if best_play else "?"
     play_cards = list(best_play["card_indices"]) if best_play else [0]
 
     # Debug: log top 3 hands for diagnostics
@@ -2971,7 +2958,7 @@ def _plan_optimal_action_inner(hand_cards: list[dict],
             if top_hands:
                 best_play = top_hands[0]
                 best_play_score = best_play["estimated_score"]
-                best_hand_type = best_play["hand_type"]
+                best_play["hand_type"]
                 play_cards = list(best_play["card_indices"])
 
     # The Mouth: only one hand type can be played this round. The locked
@@ -2993,7 +2980,7 @@ def _plan_optimal_action_inner(hand_cards: list[dict],
             if top_hands:
                 best_play = top_hands[0]
                 best_play_score = best_play["estimated_score"]
-                best_hand_type = best_play["hand_type"]
+                best_play["hand_type"]
                 play_cards = list(best_play["card_indices"])
 
     # The Needle: only 1 hand — make it count, never discard
@@ -3078,11 +3065,10 @@ def _plan_optimal_action_inner(hand_cards: list[dict],
     # Use the best of find_best_hands vs best_ready target
     effective_play_score = best_play_score
     effective_play_cards = play_cards
-    effective_play_label = best_hand_type
     if best_ready and best_ready["projected_score"] > effective_play_score:
         effective_play_score = best_ready["projected_score"]
         effective_play_cards = best_ready["keep_indices"]
-        effective_play_label = best_ready["detail"]
+        best_ready["detail"]
 
     # Helper: order discard candidates with seal + face card awareness
     # Priority: Purple Seal first (want tarot), face cards (if avoid_face),
@@ -3818,7 +3804,7 @@ def _estimate_joker_scoring_for_type(hand_type: str, jokers: list[dict],
     num_jokers = len(jokers)
     money = gamestate.get("money", 0)
     deck_remaining = len(gamestate.get("cards", {}).get("cards", []))
-    hands_left = gamestate.get("round", {}).get("hands_left",
+    gamestate.get("round", {}).get("hands_left",
                   gamestate.get("current_round", {}).get("hands_left", 4))
 
     # Detect retrigger jokers for rough estimation
@@ -4176,16 +4162,15 @@ def _find_dagger_sacrifice(
     # Parse game context
     ante = gamestate.get("ante_num", 1)
     rnd = gamestate.get("round", {})
-    hands_left = rnd.get("hands_left", 4)
-    current_chips = rnd.get("chips", 0)
+    rnd.get("hands_left", 4)
+    rnd.get("chips", 0)
 
     # Get blind target
     blinds = gamestate.get("blinds", {})
-    blind_target = 0.0
     if isinstance(blinds, dict):
         for b in blinds.values():
             if isinstance(b, dict) and b.get("status") == "CURRENT":
-                blind_target = b.get("score", 0)
+                b.get("score", 0)
                 break
 
     # Protected joker names — never sacrifice these
@@ -4258,7 +4243,7 @@ def _find_dagger_sacrifice(
             # Permanent mult applies every hand for rest of run
             # Estimate remaining hands: ~4 hands/round × 3 rounds/ante × remaining antes
             remaining_antes = max(8 - ante, 1)
-            estimated_remaining_hands = remaining_antes * 3 * 4
+            remaining_antes * 3 * 4
             # But the mult gain also benefits all those hands
             # Simple heuristic: sacrifice if gain > 3× per-hand contribution
             value_ratio = dagger_mult_gain / max(scoring_power, 0.01)
@@ -4931,7 +4916,7 @@ def plan_consumable_use(gamestate: dict) -> Optional[dict]:
     jokers = gamestate.get("jokers", {}).get("cards", [])
     money = gamestate.get("money", 0)
     _state = gamestate.get("state", "?")
-    ante = gamestate.get("ante_num", 1)
+    gamestate.get("ante_num", 1)
     rnd = gamestate.get("round", {})
     hands_left = rnd.get("hands_left", 4)
 
@@ -5086,7 +5071,7 @@ def plan_consumable_use(gamestate: dict) -> Optional[dict]:
         # - If target suit CONFLICTS with joker synergies: SKIP
         if key in SUIT_CHANGE_TAROTS:
             target_code, max_targets = SUIT_CHANGE_TAROTS[key]
-            target_suit_name = SUIT_CODE_TO_NAME.get(target_code, "")
+            SUIT_CODE_TO_NAME.get(target_code, "")
 
             if wanted_suits:
                 if target_code in wanted_suits:
@@ -5243,7 +5228,7 @@ def evaluate_pack_tarot(pack_cards: list[dict], hand_cards: list[dict],
         # ── Suit change tarots — high value if we have suit-specific jokers ──
         if key in SUIT_CHANGE_TAROTS:
             target_suit_code, max_targets = SUIT_CHANGE_TAROTS[key]
-            target_suit_name = SUIT_CODE_TO_NAME.get(target_suit_code, "")
+            SUIT_CODE_TO_NAME.get(target_suit_code, "")
 
             if target_suit_code in wanted_suits:
                 # Our jokers want this suit — high value

@@ -16,13 +16,13 @@ See NOTES.md for full action space layout.
 
 import math
 import os as _os
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 
 from environment.hand_eval import (
     find_best_hands, find_best_discard, _api_key_to_name,
-    estimate_score_for_hand_type, _get_dominant_suit, BASE_HAND_SCORES,
+    estimate_score_for_hand_type, BASE_HAND_SCORES,
     plan_consumable_use,
 )
 
@@ -434,7 +434,7 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
         hands_left = raw_state.get("round", {}).get("hands_left", 0)
 
         # Per-hand target: how much does each remaining hand need to score?
-        per_hand_needed = remaining_target / max(hands_left, 1)
+        remaining_target / max(hands_left, 1)
 
         # Check discard EV
         discard_ev = 0.0
@@ -524,7 +524,7 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
         )
 
         # Interest awareness: $1 per $5 held, max $5 at $25
-        current_interest = min(money // 5, 5)
+        min(money // 5, 5)
 
         # Estimate current scoring power (planet levels + joker effects)
         best_hand_score = estimate_score_for_hand_type(joker_cards, raw_state)
@@ -999,8 +999,6 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             mask[ACTION_BUY_PACK] = 0.5
 
         # Owned jokers (for selling) — HARD block on scoring/negative jokers unless upgrading
-        any_sellable = False
-        all_scoring = True
         for i, card in enumerate(joker_cards[:JOKER_SLOTS]):
             mod = _safe_modifier(card)
             if mod.get("eternal", False):
@@ -1010,10 +1008,9 @@ def build_action_mask(raw_state: dict) -> np.ndarray:
             if ed == "NEGATIVE":
                 mask[target_offset + TARGET_OWNED_JOKER_OFFSET + i] = 0.0
                 continue
-            any_sellable = True
             is_scoring = _joker_is_scoring(card)
             if not is_scoring:
-                all_scoring = False
+                pass
 
             if i == upgrade_sell_idx and upgrade_target_idx >= 0:
                 # This is the weakest joker and we have a BETTER one in shop — allow selling

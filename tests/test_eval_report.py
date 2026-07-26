@@ -1,6 +1,5 @@
 """Tests for the evaluation reporting instrument (eval_report.py)."""
 import json
-import math
 from eval_report import wilson, advance_curve, win_rate
 from evaluate import _done_seeds
 

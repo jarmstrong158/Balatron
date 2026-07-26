@@ -39,4 +39,12 @@ async def main():
         await g.disconnect()
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    # MUST stay guarded. Without this, `asyncio.run(main())` fired at IMPORT
+    # time — and this module sits importable at the repo root, so anything that
+    # walks the tree (a linter, an IDE indexer, a test collector, `import *`)
+    # would silently CONNECT TO THE LIVE GAME on port 12346 and perform a
+    # save/load against whatever run the trainer had in progress. Observed
+    # exactly that during an audit import sweep: it connected at ante 3 and
+    # round-tripped a .jkr while the trainer was mid-run.
+    asyncio.run(main())

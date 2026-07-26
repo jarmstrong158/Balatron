@@ -30,8 +30,6 @@ from environment.hand_eval import (
     card_suit,
     card_rank,
     card_chips,
-    CARD_CHIP_VALUES,
-    BASE_HAND_SCORES,
 )
 
 # ---------------------------------------------------------------------------
@@ -165,13 +163,11 @@ def run_sim(n_trials: int = 100, hand_size: int = 8, seed: int = 42):
         plan_action = plan["action"]
 
         # Categorize
-        is_flush_draw = "flush" in discard_strategy.lower()
-        flush_ev = discard_ev if is_flush_draw else 0.0
+        "flush" in discard_strategy.lower()
 
         # Find the flush-specific EV even if it wasn't the winner
         # Re-run discard to get all candidates
         flush_specific_ev = 0.0
-        non_flush_best_ev = 0.0
 
         # We need to peek inside find_best_discard to get per-strategy EVs.
         # Reconstruct flush draw EV manually.
@@ -305,7 +301,7 @@ def run_sim(n_trials: int = 100, hand_size: int = 8, seed: int = 42):
     # Breakdown by hearts count in hand
     print("  Breakdown by Hearts in hand:")
     for h_count in range(0, 9):
-        subset = [(flush_draw_evs[i], play_now_evs[i], margins[i])
+        [(flush_draw_evs[i], play_now_evs[i], margins[i])
                   for i in range(n_trials)
                   if Counter(card_suit(c) for c in make_deck()[:0]).get("Hearts", 0) == 0  # placeholder
                   ]

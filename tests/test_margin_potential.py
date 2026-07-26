@@ -1,6 +1,5 @@
 """dec-066: product-margin potential shaping (the winning-trend miner's causal
 spine). Off by default (ships byte-neutral); potential-delta form when enabled."""
-import importlib
 
 import environment.reward as R
 

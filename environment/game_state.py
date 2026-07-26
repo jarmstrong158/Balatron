@@ -13,7 +13,6 @@ See NOTES.md for full state vector layout.
 """
 
 import asyncio
-import json
 import math
 import zlib
 from typing import Any, Optional
@@ -977,7 +976,6 @@ class GameStateManager:
         valid response and is NOT retried.
         """
         import aiohttp
-        import asyncio
 
         payload = {
             "jsonrpc": "2.0",
@@ -1850,9 +1848,8 @@ class GameStateManager:
         shop_v_end = shop_j_end + SHOP_VOUCHER_SLOTS * SHOP_VOUCHER_SIZE
 
         # Shop packs (2 × 5)
-        from environment.hand_eval import compute_tarot_value
         joker_cards_for_packs = raw.get("jokers", {}).get("cards", [])
-        deck_cards_for_packs = raw.get("cards", {}).get("cards", [])
+        raw.get("cards", {}).get("cards", [])
 
         for slot_idx in range(SHOP_PACK_SLOTS):
             slot_offset = shop_v_end + slot_idx * SHOP_PACK_SIZE

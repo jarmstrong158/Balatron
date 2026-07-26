@@ -15,7 +15,6 @@ import importlib
 import os
 import sys
 
-import pytest
 
 
 def _reload(flag: str):

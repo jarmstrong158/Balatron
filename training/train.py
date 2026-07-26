@@ -42,26 +42,21 @@ import signal
 import string
 import subprocess
 import time
-from datetime import datetime
-from dataclasses import dataclass, asdict
-from pathlib import Path
+from dataclasses import asdict
 from typing import Optional
 
 import numpy as np
 import torch
 
-from agent.network import BalatronNetwork, create_network, get_head_index
-from agent.ppo import PPOConfig, PPOTrainer
+from agent.network import BalatronNetwork, get_head_index
+from agent.ppo import PPOTrainer
 from agent.confidence_gate import ConfidenceGate, gate_is_active
-from environment.game_state import GameStateManager, STATE_VECTOR_SIZE
+from environment.game_state import STATE_VECTOR_SIZE
 from environment.action_space import (
     build_action_mask, ActionDecoder, ACTION_HEAD_SIZE,
-    get_action_type_name,
 )
 from environment.hand_eval import (
-    find_best_discard, find_best_hands, estimate_score_for_hand_type,
-    plan_optimal_action, compute_optimal_joker_order,
-    plan_consumable_use, optimize_play_order,
+    find_best_hands, estimate_score_for_hand_type,
     evaluate_pack_tarot, evaluate_pack_spectral, pick_best_planet,
     evaluate_pack_standard, _hand_contains,
 )
@@ -84,7 +79,6 @@ def _get_blind_target_from_state(raw_state: dict) -> float:
             if isinstance(b, dict) and b.get("status") == "CURRENT":
                 return b.get("score", 300)
     return 300.0
-from environment.reward import RewardCalculator
 
 
 def _build_composition(joker_cards: list) -> tuple:
@@ -1306,7 +1300,6 @@ class Trainer:
                         env, raw_state, hand_cards=hand_cards, deck_cards=deck_cards
                     )
                 except Exception as e:
-                    err_msg = f"Pre-play: {e}"
                     print(f"[WARN] Joker rearrange failed: {e}")
                     env.joker_logger.log_rearrange_failure("pre-play", str(e))
 
@@ -1910,7 +1903,7 @@ class Trainer:
 
                     # Amber Acorn: jokers are shuffled — re-arrange immediately
                     if current_blind_name == "Amber Acorn":
-                        print(f"[BOSS] Amber Acorn — re-arranging shuffled jokers",
+                        print("[BOSS] Amber Acorn — re-arranging shuffled jokers",
                               flush=True)
 
                     # Auto-rearrange jokers at start of each hand round
@@ -1957,7 +1950,7 @@ class Trainer:
                     await asyncio.sleep(0.5)
                     # If we've bailed out too many times, game is probably broken
                     if pack_attempts > 25:
-                        print(f"⚠️  PACK STUCK beyond recovery — triggering restart", flush=True)
+                        print("⚠️  PACK STUCK beyond recovery — triggering restart", flush=True)
                         await self._restart_balatro(env)
                         env.reward_calc.reset()
                         env.game.reset()
@@ -2019,10 +2012,10 @@ class Trainer:
                                 await asyncio.sleep(cfg.api_poll_delay)
                                 continue
                         else:
-                            print(f"[PACK] SOUL CARD found but can't sell any joker — "
-                                  f"picking anyway (may fail)", flush=True)
+                            print("[PACK] SOUL CARD found but can't sell any joker — "
+                                  "picking anyway (may fail)", flush=True)
                     else:
-                        print(f"[PACK] SOUL CARD found! Picking Legendary joker", flush=True)
+                        print("[PACK] SOUL CARD found! Picking Legendary joker", flush=True)
                     pick_idx = soul_idx
                     # Skip all other evaluation — go straight to pick logic
                     try:
@@ -2080,7 +2073,7 @@ class Trainer:
                             if target_indices:
                                 pack_params["targets"] = target_indices
                             await env.game.execute_action("pack", pack_params)
-                        except Exception as e:
+                        except Exception:
                             pass  # print(f"PACK tarot {pick_idx} failed: {e}")
                             # Re-check state before skipping — the select may have
                             # partially succeeded and the pack is already closing.
@@ -2230,7 +2223,7 @@ class Trainer:
                             # No improvement or sell failed — skip remaining picks
                             try:
                                 await env.game.execute_action("pack", {"skip": True})
-                            except Exception as e:
+                            except Exception:
                                 pass
                             await asyncio.sleep(cfg.api_poll_delay)
                             continue
@@ -2314,13 +2307,13 @@ class Trainer:
                                 await env.game.execute_action("pack", {"card": try_idx, "targets": targets})
                                 selected = True
                                 break
-                            except Exception as e:
+                            except Exception:
                                 pass  # print(f"PACK card {try_idx} targets={targets} failed: {e}")
                     else:
                         try:
                             await env.game.execute_action("pack", {"card": try_idx})
                             selected = True
-                        except Exception as e:
+                        except Exception:
                             pass  # print(f"PACK card {try_idx} failed: {e}")
 
                 # INSTRUMENTATION: did the pick land?

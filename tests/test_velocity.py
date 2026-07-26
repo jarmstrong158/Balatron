@@ -210,7 +210,7 @@ def test_checkpoint_migration_zero_pads_appended_columns():
 
     # Simulate a trained first layer at the old input dim.
     saved_w = torch.randn(hidden, old_dim)
-    saved_b = torch.randn(hidden)
+    torch.randn(hidden)
 
     # The migration logic from ppo.load_checkpoint: 2D input-dim grew.
     target_w_shape = (hidden, new_dim)

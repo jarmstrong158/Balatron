@@ -1112,7 +1112,7 @@ class ActionExecutor:
                 hands_available = raw_state.get("round", {}).get("hands_left", 4)
                 if hands_available <= 0:
                     hands_available = 4  # default for next round
-                current_total_score = estimate_score_for_hand_type(
+                estimate_score_for_hand_type(
                     jokers_raw, raw_state) * hands_available
 
                 worst_idx, worst_val = _find_weakest_sellable_joker(
@@ -1143,7 +1143,7 @@ class ActionExecutor:
                                    intended_order: list[str] | None):
         """Log joker order details for the current play action."""
         from environment.hand_eval import (
-            _api_key_to_name, classify_hand, _resolve_copy_source, JOKERS
+            _api_key_to_name, _resolve_copy_source, JOKERS
         )
 
         # Get current joker order from API state
@@ -1264,26 +1264,22 @@ class ActionExecutor:
         v_set = set(owned_vouchers) if isinstance(owned_vouchers, list) else set()
         if "v_money_tree" in v_set:
             interest_cap = 25   # $25 max interest (from $125)
-            interest_cap_money = 125
         elif "v_seed_money" in v_set:
             interest_cap = 10   # $10 max interest (from $50)
-            interest_cap_money = 50
         else:
             interest_cap = 5    # $5 max interest (from $25)
-            interest_cap_money = 25
 
         # Determine which shop this is within the ante by checking
         # blind statuses. If Small Blind is defeated but Big Blind
         # is not, we're in the first shop (more shops coming).
         blinds = raw_state.get("blinds", {})
-        small_status = ""
         big_status = ""
         boss_status = ""
         if isinstance(blinds, dict):
             small_info = blinds.get("small", {})
             big_info = blinds.get("big", {})
             boss_info = blinds.get("boss", {})
-            small_status = small_info.get("status", "") if isinstance(small_info, dict) else ""
+            small_info.get("status", "") if isinstance(small_info, dict) else ""
             big_status = big_info.get("status", "") if isinstance(big_info, dict) else ""
             boss_status = boss_info.get("status", "") if isinstance(boss_info, dict) else ""
 
@@ -1292,11 +1288,11 @@ class ActionExecutor:
         # After Big Blind: Boss shop remains = 1
         # After Boss Blind: next ante = 0
         if boss_status == "DEFEATED":
-            shops_remaining = 0
+            pass
         elif big_status == "DEFEATED":
-            shops_remaining = 1
+            pass
         else:
-            shops_remaining = 2
+            pass
 
         # Only truly game-changing vouchers bypass interest protection
         CRITICAL_VOUCHERS = {
