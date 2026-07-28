@@ -1756,6 +1756,54 @@ or survivorship — antes 6/7/8 have overlapping CIs on n=1055/420/165.
 
 ---
 
+### Antes 4–5 are VARIANCE-dominated, not strength-gated — 07-28 (`dec-090`)
+
+**Analysis only.** Resolves the question `dec-089` left open — and corrects its
+claim that the logs couldn't answer it. `blind_results.start` carries full build
+state at **every** blind including deep antes, so strength-stratified clear rates
+were computable all along. That was a failure to look, not a real gap.
+
+**The test:** survivorship and real-difficulty make opposite predictions once
+strength is held fixed. Survivorship ⇒ matched-strength rates are FLAT across
+antes; real difficulty ⇒ they still FALL. Measured with **two independent
+proxies** — planner margin, and a structural one (xmult count × committed hand
+level) chosen so the answer can't inherit dec-076's weak-leaf problem. They agree.
+
+**Answer: BOTH, and they partially cancel** — which is exactly why the raw curve
+looked flat.
+
+| | ante 3 | ante 5 | ante 8 |
+|---|---|---|---|
+| mean xmult | 0.67 | 1.03 | 1.84 |
+| % strong (2x+) | 12.8% | 26.9% | **61.0%** |
+
+Survivorship is large. But at *matched* strength, rates still fall: mid(0x,lvl≥3)
+78%→28%, good(1x,lvl≥3) 78%→46%, **strong(2x+) 76%→61%**. The drop *shrinks* as
+strength rises — stronger builds are more ante-robust.
+
+**THE UNEXPECTED FINDING — build strength barely matters where runs actually die:**
+
+| ante | weak (0x) | good (1x) | strong (2x+) | spread |
+|---|---|---|---|---|
+| **4** | 76% | 78% | **76%** | **2 pp** |
+| 5 | 54% | 59% | 64% | 10 pp |
+| 7 | — | 47% | 60% | **32 pp** |
+
+At ante 4 a build with **2+ xmult engines clears the boss at the same rate as one
+with none** (n=490 vs n=254). Strength-dependence only emerges from ante 6.
+
+⇒ The antes where **45.6% of runs die are variance-dominated**; the deep antes
+that only **3.3%** of runs reach are strength-gated. This is outcome-side
+confirmation of what the AUC work found from the predictor side, and it explains
+why four build-QUALITY levers (dec-075/079/081/083) came back null or worse — at
+the antes that kill runs, build quality is not the binding variable.
+
+⚠️ It does **not** identify what the binding variable *is* at antes 4–5, only that
+xmult count and hand level don't capture it. Untested candidates: draw variance,
+boss-ability interaction, in-blind play quality. Deep-ante tiers rest on n=29–129.
+
+---
+
 ## Operations
 
 See the [Usage](README.md#usage) section for launch commands. Key points:
