@@ -1676,6 +1676,42 @@ Plus action mask identical on 60 real shop states. **207 tests pass, ruff clean.
 
 ---
 
+### `gae_lambda` reverted on its own variance trigger — 07-27/28 (`dec-088`)
+
+`dec-086` (λ 0.95→0.99) **REVERTED** at ~185 of its pre-registered 500 updates.
+
+| | baseline | post-dec-086 (105 sampled) |
+|---|---|---|
+| **EV** | **0.620** | **0.387** (43% of updates <0.40) |
+| VL median | 0.178 | 0.159 *(fine)* |
+| VL mean | — | **0.327** (18% of updates spiked >0.5, one 1.14) |
+| mean ante | 4.30 | 4.19 *(inside the ±0.43 noise band)* |
+
+The variance trigger — written **before** the data was seen, precisely so it
+couldn't be rationalised past — fired. Fat-tailed value loss plus a 38% relative
+EV drop, with **zero hint of upside**.
+
+**The counter-argument, stated rather than buried:** some EV loss is
+*mechanically expected* as λ→1, because GAE then leans on realised returns rather
+than the critic, so a worse-fitting critic matters less for the advantage
+estimate. EV alone is not proof of harm. What decided it was the combination — a
+real stability cost, no upside, and ~2 more days needed to confirm what the
+variance signal already showed.
+
+⚠️ **This reverts the CURE, not the diagnosis.** The credit-assignment problem is
+untouched and still real: at λ=0.95 a step-40 shop decision receives **~0.04%** of
+the win signal for a win at step 179, so build decisions still learn from almost
+nothing. **0.97 was considered and rejected** — it reaches only 0.7% at that
+distance, so it pays the variance without solving the problem. Any next attempt
+should **shorten the episode or reshape the reward** so a shorter horizon
+suffices, rather than stretching the horizon to cover 179 steps.
+
+`dec-084` (advantage-filtered SIL) **stays on** — barely confounded anyway, since
+the trainer reports only 496/30000 demo transitions carry a return, so the filter
+is ~1.7% active and phases in as new wins bank.
+
+---
+
 ## Operations
 
 See the [Usage](README.md#usage) section for launch commands. Key points:

@@ -47,7 +47,22 @@ class TrainConfig:
     # pre-registered success/revert criteria and the regime boundary.
     # Tradeoff: higher lambda = less bias, MORE variance in the advantage
     # estimate. Watch value loss and EV for a variance blowup.
-    gae_lambda: float = 0.99
+    #
+    # REVERTED 0.99 -> 0.95 (dec-088) after ~185 of the pre-registered 500
+    # updates, on the variance trigger set BEFORE the data was seen:
+    #     EV   0.620 -> 0.387   (43% of updates below 0.40)
+    #     VL   median 0.159 (fine) but MEAN 0.327 — 18% of updates spiked >0.5
+    #     ante 4.30 -> 4.19     (inside the +/-0.43 noise band; no upside)
+    # Some EV loss is mechanically expected as lambda -> 1 (GAE leans on realised
+    # returns rather than the critic), so EV alone is not proof of harm. What
+    # decided it: a real stability cost, zero hint of upside, and ~2 more days
+    # needed to confirm what the variance signal already showed. The credit-
+    # horizon PROBLEM is unchanged and still real (a step-40 shop decision gets
+    # 0.04% of the win signal at 0.95) — this reverts the attempted CURE, not the
+    # diagnosis. A gentler value (0.97) reaches only 0.7% at that distance, so it
+    # is not a compromise worth running; the next attempt should shorten the
+    # EPISODE or reshape the reward rather than lengthen the credit horizon.
+    gae_lambda: float = 0.95
     clip_epsilon: float = 0.2
     entropy_coef: float = 0.03   # 0.10 -> 0.03 (06-22, dec-029). With the VALUE
                                  # TRUNK now DECOUPLED (network.py value_trunk), the
