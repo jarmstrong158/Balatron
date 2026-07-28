@@ -1804,6 +1804,50 @@ boss-ability interaction, in-blind play quality. Deep-ante tiers rest on n=29–
 
 ---
 
+### In-blind play is NOT the lever either — 07-28 (`dec-091`)
+
+The last unexamined decision surface. Every build-side one was already closed
+(dec-073 reward, dec-085 evaluation, dec-079/081 access, dec-088 credit horizon,
+dec-090 no build feature predicts clearing), and discard usage measured sensible.
+Chips only come from played hands — nobody had checked whether the agent played
+the **best** one.
+
+`play_quality.py` logs, per played hand, the agent's cards and score against the
+**best available** hand — computed under the **same boss debuffs** (an undebuffed
+optimum would manufacture a gap that isn't the agent's fault). Logging-only, one
+guarded call site placed *after* the rearrange/fallback mutations so it records
+the cards actually sent.
+
+**Pre-registered before any data:** <0.90 = a real lever; ≥0.95 = play is fine
+and antes 4–5 are variance-dominated.
+
+**Result (329 clean plays): mean capture 0.9829, median 1.0000, exact-best 97.0%.**
+
+| ante | 1 | 2 | 3 | **4** | **5** |
+|---|---|---|---|---|---|
+| capture | 1.000 | 0.999 | 0.999 | **0.957** | **0.935** |
+| exact-best | 100% | 98.3% | 98.5% | 94.3% | **90.0%** |
+
+Play *does* degrade exactly where runs die — a real finding. **But the arithmetic
+rules it out:** at ante 5 the median loss sits at **0.70 of target** (needs +43%),
+while perfect play adds **~7%**. An order of magnitude too small.
+
+⚠️ **Two bugs in my own instrumentation, both caught by invariants, not
+inspection:**
+1. Discarded `classify_hand`'s `scoring_indices` and passed `range(len(cards))`,
+   crediting every played card. Live data read **capture 1.061** — impossible
+   against a true maximum, which is how it surfaced. Fixed + `capture ≤ 1.0` test
+   and a stricter "best hand ⇒ capture exactly 1.0" test.
+2. **Open bug:** 7/329 (2.13%) of plays use the *same cards* as the baseline yet
+   the two scoring paths disagree — one pair by exactly **3.00×**, both boss
+   blinds. `estimate_score` direct vs `find_best_hands` internal. Flagged and
+   clamped; worth chasing separately.
+
+⚠️ n=329 from ~4 min of training. The 97% headline is robust; per-ante figures
+rest on n=50–89 and should be re-read after several hours.
+
+---
+
 ## Operations
 
 See the [Usage](README.md#usage) section for launch commands. Key points:

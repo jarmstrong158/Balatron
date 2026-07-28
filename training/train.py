@@ -62,6 +62,7 @@ from environment.hand_eval import (
 )
 from recorder import RunRecorder
 from demo_buffer import DemoBuffer
+import play_quality
 from data.jokers import JOKERS
 from training.config import TrainConfig
 from training.episode_tracker import EpisodeTracker
@@ -1323,6 +1324,15 @@ class Trainer:
             if api_method == "play":
                 self.action_executor._log_play_for_joker_order(
                     env, raw_state, _intended_joker_order
+                )
+                # dec-091: play-QUALITY log. Deliberately placed HERE, after the
+                # rearrange/fallback mutations above, so it records the cards
+                # actually sent rather than the ones first intended. Logging
+                # only — it never influences the action, and play_quality
+                # swallows its own errors so it cannot break a run.
+                play_quality.log_play(
+                    raw_state, (api_params or {}).get("cards"),
+                    env_id=env.env_id, global_step=self.global_step,
                 )
 
             # Debounce state-TRANSITION actions: re-issuing next_round /
