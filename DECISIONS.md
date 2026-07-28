@@ -1712,6 +1712,50 @@ is ~1.7% active and phases in as new wins bank.
 
 ---
 
+### The plateau is a two-ante STEP-DOWN, not a decay or a cliff — 07-28 (`dec-089`)
+
+**Analysis only** — no code, config or experiment. Conditional survival decomposed
+from existing logs (5,000 runs / 50,003 blinds, all post-U4417; dec-086 window
+split as a robustness check: boss clear 83.7% vs 84.1% post-revert, so pooling is
+safe).
+
+| ante | 1 | 2 | 3 | **4** | **5** | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| conditional clear | 93.8% | 85.2% | 83.5% | **67.3%** | **47.0%** | 39.8% | 39.0% | 34.8% |
+| Δ | | −8.7 | −1.7 | **−16.2** | **−20.3** | −7.2 | −0.7 | −4.3 |
+
+**Not smooth decay** (that needs a *constant* rate; spread is 2.70× max/min).
+**Not a single cliff** (two adjacent drops, and the pre-drop region isn't flat).
+**45.6% of all runs die at antes 4–5.**
+
+**The boss is the killer** — gap vs small blind widens 4.6 → 9.8 → 20.1 → **31.1
+pp** by ante 5. But **no single boss is the wall**: ante-stratified (essential —
+pooled, The Psychic reads 74.3%, yet at ante 6 it is the *worst* at 26.9%), the
+ante-6 spread is 26.9%–83.8% and the hard ones cluster by **mechanism**
+(score-suppressors: Psychic, Mouth, Wall, Eye, Water).
+
+**The decisive number:** the boss target curve *decelerates* (2.67× → 2.50× →
+2.20× → 1.82× → 1.43×) exactly where survival collapses (87.8% → 75.7% → 60.3%).
+The wall gets *relatively easier* to keep pace with and the agent falls behind
+anyway ⇒ **build power stops growing around ante 4.**
+
+Chip deficit at loss (uncensored: 0/4518 losses censored): median **0.721**,
+broad — 28.7% near misses (≥0.85) **and** 24.5% blowouts (<0.50). Both problems
+coexist.
+
+⚠️ **Two requested failure classes are NOT derivable — reported, not estimated
+around.** "Failed to meet chips" and "ran out of hands" are *the same event*
+(`hands_left` reads 1 on 4233/4273 losses — it is recorded *before* the fatal
+hand; a first classifier returned "100% died with hands left" and was discarded
+as an artifact). **"Economy death" needs a shop-level log that does not exist.**
+Smallest fix: one row per shop visit — `{ante, money, offers:[{key,cost}],
+n_affordable, bought_key|null, rerolls_used}`.
+
+⚠️ **Unresolved:** whether the post-ante-5 plateau (~35–40%) is real stabilisation
+or survivorship — antes 6/7/8 have overlapping CIs on n=1055/420/165.
+
+---
+
 ## Operations
 
 See the [Usage](README.md#usage) section for launch commands. Key points:
