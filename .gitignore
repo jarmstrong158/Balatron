@@ -58,3 +58,7 @@ demos/
 # Curriculum seed states (data, not code)
 seeds/
 .cambium/
+
+# Plan C baseline: the checkpoint the rewrite must beat. 54MB — kept on disk,
+# never committed (con-017: large artefacts are release assets, not repo files).
+baselines/

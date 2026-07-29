@@ -1862,6 +1862,128 @@ with a wider margin than first reported.
 
 ---
 
+### Every build-side null was measured inside a band the agent never leaves — 07-29 (`dec-093`)
+
+**The economy hypothesis died first.** dec-090 swept seven build features and
+never tested *money* — which mattered, because dec-031 concluded the agent is
+*rationally* not stacking xmult (it never pays by ante 4) and dec-080 showed
+acquisition is random-like, which is what you get when you cannot afford to
+reroll for better. Blind-level AUC for money predicting a boss clear: **0.528 /
+0.551 / 0.541 / 0.524** at antes 3–6. But that is the *wrong test* — cash scores
+no chips, so it cannot predict clearing the blind you are standing in. Money buys
+*future* power. The right frame is run-level, reconstructing runs (5,732, split
+per env on ante resets) and asking whether state at ante A predicts **reaching
+ante A+2**:
+
+| from ante | n | money | xmult | hand lvl |
+|---|---|---|---|---|
+| 3 | 3943 | 0.540 | 0.476 | 0.486 |
+| 4 | 3418 | 0.556 | 0.491 | 0.523 |
+| 5 | 2299 | 0.562 | 0.558 | 0.555 |
+
+Nothing predicts depth either. Economy closes exactly like every other build-side
+hypothesis.
+
+**But the obvious reading of all of this is wrong.** "Builds don't matter" is NOT
+supported, because of **range restriction**: at ante 4 the agent's entire build
+space is 0–2 xmult engines — **3 engines = 2.9% of the field, 4 = 0.1%**. A real
+Balatro engine is a stacked multiplicative loop worth 5–10×. Every measurement in
+dec-085/090 and above compared *mediocre builds against other mediocre builds*
+and correctly found no difference. **Mediocre-vs-engine has never been measured,
+because the agent never builds an engine.**
+
+So the premise underneath the entire investigation — *better builds go deeper* —
+is untested. Four levers optimized toward it without anyone verifying it.
+
+**The probe.** `engine_forcing.py` (env-gated `BALATRON_FORCE_ENGINE=1`, default
+OFF so control is byte-identical): buy by flat engine priority (xmult > copier /
+retrigger > additive scaling > economy), **bypass the dec-068
+bank-when-already-clearing hold**, and reroll to hunt when no engine piece is
+affordable. That hold is the key bypass — it is locally correct (why buy power
+you don't need for *this* ante?) and is exactly what leaves the agent arriving at
+ante 6 with the build that only ever cleared ante 3.
+
+This is an **instrument, not a proposed policy**. It is deliberately crude and is
+certainly a worse policy in the short run, so a raw win-rate drop alone would not
+refute the premise.
+
+**Pre-registered before any data:**
+- forced engines reach **deeper** → engines *are* the lever; the problem is
+  acquisition/affordability, not evaluation. Reopens everything.
+- forced engines **don't** → builds don't determine depth even at the top of the
+  reachable range, and the ceiling is somewhere nobody has looked.
+
+**Mandatory manipulation check, also pre-registered:** if the forced arm does not
+actually shift the xmult distribution upward vs control, the instrument did not
+fire and the run is **INVALID, not null**.
+
+⚠️ That check exists because the first draft of `_tier` keyed off
+`scaling_type`/`scaling_increment` — **fields that do not exist anywhere in
+`data/jokers.py`**. Every joker would have scored 0, the forced arm would have
+been byte-identical to control, and the experiment would have reported a
+confident null while measuring nothing. Caught by dumping the real schema before
+wiring. `test_tiers_are_not_all_zero` and `test_every_field_tier_reads_actually_exists`
+now pin it. *A vacuous instrument that reports "no effect" is worse than no
+instrument.*
+
+**RESULT — three arms, same 60 seeds, same checkpoint (`update007070`):**
+
+| arm | med $ | buys/run | t5/run | t5 share | afford/run | capture | **mean ante** | ≥5 |
+|---|---|---|---|---|---|---|---|---|
+| control | 9 | 5.67 | 0.67 | 12% | 3.33 | 20% | **4.267** | 46.7% |
+| mode 1 (spend) | 6 | 4.58 | 0.63 | 14% | 0.82 | 78% | **3.283** | 23.3% |
+| mode 2 (bank) | 8 | 4.77 | **0.90** | 19% | 2.78 | 32% | **3.817** | 35.0% |
+
+Control reproduces the 600-seed baseline (4.267 vs 4.277), so the 60-seed subset
+is representative.
+
+**Mode 2 shifted engines/run 0.67 → 0.90 (+34%) and outcomes got WORSE.** By the
+pre-registered rule the manipulation fired, so this is a real result — but it is
+a result about *slightly more engines*, not about engines. 0.90/run is still deep
+inside the 0–2 band. **The hypothesis that a real 3–5 engine build wins remains
+untested, because no shop policy can reach that range.**
+
+⚠️ **Two of my own numbers in this session were wrong, both flattering the story
+I was already telling — recorded because the errors are the useful part:**
+
+1. **The "affordability cliff" was an artifact.** I reported median bankroll $6
+   against $7 engines, a $4-wide cliff, "the agent lives under the wall". That
+   was measured on **mode 1's log — the arm that had spent its own bankroll
+   down**. Control's real median is **$9**, it can afford **3.33** engines/run and
+   declines **80%** of them. Engines were never priced out. I measured the wall
+   inside the one arm guaranteed to manufacture it.
+2. **"Mode 2 suppressed buying (0.92/run vs control's 5.67)"** compared mode 2's
+   FORCE-ENGINE *subset* against control's *total*. Consistent accounting across
+   all buy paths gives 4.77 vs 5.67 — banking barely changed buy rate.
+
+**A third limitation, unresolved:** `_tier` scores any `xmult=True` joker as
+tier 5, but that set includes heavily conditional cards (Blackboard needs all-black
+hands, Loyalty Card fires every 6th, Cavendish is a 1-in-1000 lottery). "Tier 5"
+is therefore a proxy for *nominal* xmult, not for a working engine. Forcing
+nominal-xmult share from 12%→19% buying more conditional jokers that rarely fire
+is a plausible mechanism for mode 2 being worse, and it means **the arms tested
+"buy more cards labelled xmult", not "build an engine".** Any future attempt must
+score jokers by *realised* contribution, not by schema flag.
+
+**Where this leaves the plateau:** engine acquisition is not affordability-limited
+(control declines 80% of what it can pay for) and not obviously policy-limited in
+a way that helps (forcing it up hurt twice). The 0–2 band is not a budget
+constraint — it is what the shop supplies (3.42 tier-5 offered/run against 5
+slots and 5.67 buys/run) crossed with the agent preferring non-engine cards.
+Whether a genuine engine wins is still unmeasured.
+
+**Invalid first pilot, retained deliberately.** Before the fix, the forced branch
+returned a no-op whenever it had no engine to buy AND no affordable reroll — the
+normal state at antes 1–2 ($4–5 money, $7 engines, hunting needs $8). The arm did
+nothing on every early shop step and spun until runs died: **mean ante 2.06, 21
+of 64 runs dead at ante 1**, a blind no build strategy can fail. Read naively
+that is a crushing refutation of the engine hypothesis. It was the instrument
+destroying itself. An override may only ever ADD a decision it can act on; with
+nothing to do it must defer. `test_early_ante_money_leaves_the_forcing_with_nothing_to_do`
+pins how *common* that state is so it can never be treated as a rare edge case.
+
+---
+
 ## Operations
 
 See the [Usage](README.md#usage) section for launch commands. Key points:

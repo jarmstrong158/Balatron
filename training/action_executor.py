@@ -16,6 +16,7 @@ from typing import Optional
 
 import numpy as np
 
+import engine_forcing
 from environment.hand_eval import (
     find_best_discard, find_best_hands, estimate_score_for_hand_type,
     plan_optimal_action, compute_optimal_joker_order,
@@ -623,6 +624,17 @@ class ActionExecutor:
                     # distills toward the planner's picks over time.
                     pick_idx = self._planner_pick_joker(
                         jokers_raw, raw_state, money, target_idx)
+                    # dec-093 FORCED ENGINE probe (env-gated, default OFF).
+                    # Overrides the planner's MARGINAL ranking with a flat engine
+                    # priority. build_value scores a joker by how much it advances
+                    # survivability ON ITS OWN, so a synergy piece that is weak
+                    # alone can never rank first — which is one mechanism that
+                    # could keep every build in the 0-2 xmult band. This arm
+                    # removes the ranking entirely to test whether an engine would
+                    # even help; it is an instrument, not a proposed policy.
+                    _forced = engine_forcing.pick_engine_joker(raw_state, money)
+                    if _forced is not None:
+                        pick_idx = _forced
                     shop_cards = raw_state.get("shop", {}).get("cards", [])
                     pick_name = ""
                     if 0 <= pick_idx < len(shop_cards):
@@ -634,6 +646,40 @@ class ActionExecutor:
                     # slot + surplus, reroll for a real engine piece instead of
                     # buying junk — the strong-player move that gets engines online
                     # (the audit's early-death cost). Gated so it can't drain econ.
+                    if engine_forcing.FORCE_ENGINE:
+                        # The forced arm does not bank and does not defer. It
+                        # buys the engine piece if one is there, and hunts if not.
+                        # Skipping the dec-068 "already clearing -> SAVE" hold is
+                        # the POINT: that rule is locally correct (why buy power
+                        # you don't need for THIS ante?) and is exactly the
+                        # behaviour that could leave the agent arriving at ante 6
+                        # with the build that only ever cleared ante 3.
+                        if _forced is None and engine_forcing.should_force_reroll(
+                                raw_state, money):
+                            env.shop_rerolls = env.shop_rerolls + 1
+                            print("[SHOP] FORCE-ENGINE reroll (no engine piece "
+                                  "affordable)", flush=True)
+                            return "reroll", None
+                        if _forced is not None:
+                            print(f"[SHOP] FORCE-ENGINE buy: "
+                                  f"{pick_name or joker_key} (slot {pick_idx})",
+                                  flush=True)
+                            return "buy", {"card": pick_idx}
+                        # NO engine affordable and no reroll affordable: FALL
+                        # THROUGH to the normal planner path. It must not return a
+                        # no-op here.
+                        #
+                        # The first pilot did exactly that and self-destructed:
+                        # at antes 1-2 money is $4-5, every engine piece costs
+                        # more, and should_force_reroll needs reroll(5)+reserve(3),
+                        # so the arm returned "gamestate" on EVERY shop step and
+                        # spun until the run died. Mean ante 2.06 vs a 4.28
+                        # baseline, with 21/64 runs dead at ante 1 — a blind no
+                        # build strategy can fail. That is an instrument breaking,
+                        # not evidence about engines, and it would have been read
+                        # as "engines don't help" by anyone looking only at the
+                        # ante numbers. An override may only ever ADD a decision
+                        # it can act on; when it has nothing, it defers.
                     if joker_count < joker_limit:
                         try:
                             from environment.planner import build_value as _bval

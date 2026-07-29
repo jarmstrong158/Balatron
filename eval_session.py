@@ -125,6 +125,13 @@ def main():
     ap.add_argument("--swap-legality", default=None,
                     help="full-slot shop buys become a LEGALITY gate instead of a "
                          "heuristic veto (dec-081 A/B; 0 = control, 1 = treatment)")
+    ap.add_argument("--force-engine", default=None,
+                    help="shop buys by flat ENGINE PRIORITY (xmult > copier > "
+                         "scaling > econ), bypassing the dec-068 bank-when-ahead "
+                         "hold and rerolling to hunt (dec-093 A/B; 0 = control, "
+                         "1 = forced). Probes whether an engine would even help — "
+                         "every prior build-side null was measured inside the "
+                         "0-2 xmult band the agent never leaves.")
     args = ap.parse_args()
 
     if psutil is None:
@@ -153,6 +160,8 @@ def main():
         env["BALATRON_SWAP_LEGALITY"] = str(args.swap_legality)
     if args.rollout is not None:            # dec-083: pin the evaluator arm
         env["BALATRON_ROLLOUT"] = str(args.rollout)
+    if args.force_engine is not None:       # dec-093: pin the forced-engine arm
+        env["BALATRON_FORCE_ENGINE"] = str(args.force_engine)
 
     rc = 1
     try:
