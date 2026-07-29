@@ -108,27 +108,43 @@ def log_play(raw_state: dict, played_indices, env_id: int = 0,
 
         suit, face = debuffs_for(raw_state)
 
-        # What the agent actually played.
-        # classify_hand returns (hand_type, SCORING_INDICES) — the subset that
-        # actually scores. Passing range(len(cards)) instead credits every played
-        # card, so a Pair played among 5 cards is scored as if all 5 counted.
-        # That inflated capture ABOVE 1.0 (mean 1.061, ante-4 1.243) on the first
-        # live run, which is impossible against a true best-available baseline
-        # and is what exposed the bug.
-        cards = [hand[i] for i in idxs]
-        ht, scoring = classify_hand(cards)
-        got = float(estimate_score(ht, cards, list(scoring or []), jokers,
-                                   raw_state, debuffed_suit=suit,
-                                   boss_debuff_face=face))
-
-        # the best it COULD have played, under the same debuffs
-        best = find_best_hands(hand, jokers, raw_state, top_n=1,
-                               debuffed_suit=suit, boss_debuff_face=face)
-        if not best:
+        # Score BOTH sides through find_best_hands' own enumeration.
+        #
+        # It already evaluates every C(n,k) subset for k=1..5, so the agent's
+        # play is necessarily in there — we just look it up by card indices.
+        # Computing the played score separately (classify_hand + estimate_score)
+        # made the two sides disagree on 171/16545 live plays, ALL of them boss
+        # blinds and ALL with a debuff active, the direct path reading HIGHER in
+        # 163 of them. Cause: classify_hand has no debuff awareness, so it hands
+        # back scoring indices that still include debuffed cards which
+        # find_best_hands correctly excludes. Asking one function for both
+        # numbers removes the whole class of discrepancy by construction rather
+        # than papering over it with a clamp.
+        ranked = find_best_hands(hand, jokers, raw_state, top_n=10_000,
+                                 debuffed_suit=suit, boss_debuff_face=face)
+        if not ranked:
             return
-        best_score = float(best[0].get("estimated_score") or 0.0)
-        best_type = best[0].get("hand_type")
-        best_idx = sorted(best[0].get("card_indices") or [])
+        want = sorted(idxs)
+        mine = next((h for h in ranked
+                     if sorted(h.get("card_indices") or []) == want), None)
+        if mine is None:
+            # Not in the enumeration (should be unreachable for 1-5 cards).
+            # Fall back rather than guess, and mark the row so it can be excluded.
+            cards = [hand[i] for i in idxs]
+            ht, scoring = classify_hand(cards)
+            got = float(estimate_score(ht, cards, list(scoring or []), jokers,
+                                       raw_state, debuffed_suit=suit,
+                                       boss_debuff_face=face))
+            ht_used, fallback = ht, True
+        else:
+            got = float(mine.get("estimated_score") or 0.0)
+            ht_used, fallback = mine.get("hand_type"), False
+
+        best = ranked[0]
+        best_score = float(best.get("estimated_score") or 0.0)
+        best_type = best.get("hand_type")
+        best_idx = sorted(best.get("card_indices") or [])
+        ht = ht_used
 
         rnd = raw_state.get("round", {}) or {}
         row = {
@@ -137,6 +153,7 @@ def log_play(raw_state: dict, played_indices, env_id: int = 0,
                      if current_boss(raw_state) else "",
             "is_boss": bool(current_boss(raw_state)),
             "played_type": ht,
+            "score_fallback": fallback,
             "played_n": len(idxs),
             "played_score": round(got, 1),
             "best_type": best_type,

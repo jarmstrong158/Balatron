@@ -1838,13 +1838,27 @@ inspection:**
    crediting every played card. Live data read **capture 1.061** — impossible
    against a true maximum, which is how it surfaced. Fixed + `capture ≤ 1.0` test
    and a stricter "best hand ⇒ capture exactly 1.0" test.
-2. **Open bug:** 7/329 (2.13%) of plays use the *same cards* as the baseline yet
-   the two scoring paths disagree — one pair by exactly **3.00×**, both boss
-   blinds. `estimate_score` direct vs `find_best_hands` internal. Flagged and
-   clamped; worth chasing separately.
+2. **Scoring-path disagreement — now DIAGNOSED and FIXED.** 171/16,545 (1.03%)
+   of plays used the *same cards* as the baseline yet the two paths returned
+   different scores. **All 171 were boss blinds and all 171 had a debuff active**
+   (151 suit, 20 face), the direct path reading higher in 163. Cause:
+   `classify_hand` has **no debuff awareness**, so it returns scoring indices
+   still including debuffed cards that `find_best_hands` correctly excludes. Fix:
+   score BOTH sides by looking the agent's play up inside `find_best_hands`' own
+   enumeration — removing the discrepancy class by construction rather than
+   clamping over it. Verified across every debuffed-boss case: 0 disagreements,
+   0 captures >1.0, 0 enumeration misses. Pre-fix rows keep their flag.
 
-⚠️ n=329 from ~4 min of training. The 97% headline is robust; per-ante figures
-rest on n=50–89 and should be re-read after several hours.
+**RE-READ ON 16,545 PLAYS (50× the first sample) — finding STRENGTHENED:**
+
+| ante | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| capture | 0.997 | 0.993 | 0.989 | 0.983 | 0.965 | 0.961 | 0.940 | 0.936 |
+| exact-best | 98.4% | 98.6% | 97.8% | 96.4% | 94.3% | 93.8% | 92.0% | 91.8% |
+
+Ante 5 is **0.9648**, not the 0.935 the thin sample suggested — so perfect play
+adds only **~3.6%** against the **+43%** a median loss needs. The conclusion holds
+with a wider margin than first reported.
 
 ---
 
