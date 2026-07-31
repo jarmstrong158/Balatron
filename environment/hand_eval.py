@@ -556,7 +556,8 @@ def _resolve_copy_source(jokers: list[dict], idx: int, direction: str) -> Option
 def compute_joker_scoring(hand_type: str, cards: list[dict],
                           scoring_indices: list[int],
                           jokers: list[dict], gamestate: dict,
-                          base_mult: float = 0.0) -> tuple[float, float, float]:
+                          base_mult: float = 0.0,
+                          breakdown: list | None = None) -> tuple[float, float, float]:
     """Compute joker chip/mult/xmult contributions.
 
     Handles all major scoring triggers:
@@ -681,7 +682,54 @@ def compute_joker_scoring(hand_type: str, cards: list[dict],
         if copy_src is not None:
             resolved_jokers.append(copy_src)
 
+    # dec-095 REALISED CONTRIBUTION (opt-in; breakdown=None costs one `is None`
+    # per joker and changes nothing).
+    #
+    # dec-093 could not tell a working engine from a dead one because it scored
+    # jokers by the `xmult=True` SCHEMA FLAG, which is true for Blackboard (needs
+    # an all-black hand), Loyalty Card (every 6th hand) and Cavendish (1-in-1000)
+    # just as it is for a real engine. This records what each joker ACTUALLY
+    # contributed to a real played hand.
+    #
+    # Deltas are captured at the ITERATION BOUNDARY rather than at each of the 11
+    # accumulation sites inside this loop: the body has many `continue` paths, so
+    # a per-site hook would silently miss whichever branch a joker took. Snapshot
+    # at the top of every iteration, attribute to the PREVIOUS joker, and flush
+    # the last one after the loop — that is correct regardless of how the body
+    # exits, and adds no coupling to the scoring maths itself.
+    # NOTE the mult accumulators here are during_add_mult/after_add_mult, NOT
+    # bonus_mult — the latter does not exist yet at this point in the function
+    # (it is derived from the two of them AFTER the loop). Reading it here raised
+    # UnboundLocalError on the DEFAULT path, because this snapshot runs
+    # unconditionally; that is why the snapshot is now taken from the real
+    # accumulators and why test_no_breakdown_is_byte_identical exists.
+    _bd_prev = None
+    _bd_snap = (bonus_chips, during_add_mult + after_add_mult,
+                during_xmult, after_xmult)
+
+    def _bd_flush(_prev, _snap):
+        if breakdown is None or _prev is None:
+            return
+        dc = bonus_chips - _snap[0]
+        dm = (during_add_mult + after_add_mult) - _snap[1]
+        dx = (during_xmult / _snap[2] if _snap[2] else 1.0) * \
+             (after_xmult / _snap[3] if _snap[3] else 1.0)
+        if dc or dm or abs(dx - 1.0) > 1e-9:
+            breakdown.append({"joker": _prev, "chips": round(dc, 3),
+                              "mult": round(dm, 3), "xmult": round(dx, 5)})
+        else:
+            # Recorded explicitly: a joker that fired for NOTHING on this hand is
+            # the whole point of the measurement, not an absence of data.
+            breakdown.append({"joker": _prev, "chips": 0.0, "mult": 0.0,
+                              "xmult": 1.0})
+
     for joker in resolved_jokers:
+        if breakdown is not None:
+            _bd_flush(_bd_prev, _bd_snap)
+            _bd_snap = (bonus_chips, during_add_mult + after_add_mult,
+                        during_xmult, after_xmult)
+            _bd_prev = _api_key_to_name(
+                joker.get("joker_key", "") or joker.get("key", "")) or "?"
         joker_key = joker.get("joker_key", "") or joker.get("key", "")
         # Convert API key to schema name
         name = _api_key_to_name(joker_key)
@@ -1049,6 +1097,11 @@ def compute_joker_scoring(hand_type: str, cards: list[dict],
                     during_xmult *= x
                 else:
                     after_xmult *= x
+
+    # Flush the final joker (dec-095) — the loop attributes on entry, so the last
+    # one has no following iteration to close it out.
+    if breakdown is not None:
+        _bd_flush(_bd_prev, _bd_snap)
 
     # Apply joker EDITION bonuses (Foil +50 chips, Holo +10 mult, Polychrome x1.5)
     # Edition bonuses fire AFTER the joker's own scoring effect, effectively

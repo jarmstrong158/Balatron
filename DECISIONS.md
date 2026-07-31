@@ -1984,6 +1984,188 @@ pins how *common* that state is so it can never be treated as a rare edge case.
 
 ---
 
+### 226 updates of training bought nothing — the plateau is intact — 07-30 (`dec-094`)
+
+Training-log win counts looked far above the historical ~1% and raised the
+question of whether the plateau had finally broken. It had not.
+
+**Training log first** (5,000 non-curriculum runs, 07-29/07-30, chronological
+chunks of 1000): 1.00 / 0.80 / 1.30 / 1.10 / **1.70** percent, overall 1.18%
+[0.92%, 1.52%], mean ante 4.158. The trailing 1.70% is the source of the "more
+wins" impression, but its CI [1.06%, 2.71%] overlaps every earlier chunk and the
+sequence is non-monotone — noise around ~1.2%.
+
+**Held-out eval, the EXACT 600 seeds the baseline used** (`eval_seeds.txt` +
+`eval_seeds_batch2.txt`), so the only difference is 226 updates of training — no
+code change is active, since the dec-093 forcing is env-gated off and the rest of
+that commit was additive:
+
+| metric | baseline `006964` | current `007190` |
+|---|---|---|
+| mean ante | 4.277 | **4.242** [4.102, 4.381] |
+| win % (ante>8) | 1.00% | **0.83%** [0.36%, 1.94%] |
+| reach ≥5 | 47.3% | 47.7% [43.7, 51.7] |
+| reach ≥6 | 20.3% | 22.7% [19.5, 26.2] |
+| reach ≥7 | — | 7.5% |
+| reach ≥8 | — | 2.8% |
+
+Wins counted per con-001 (ante advanced PAST 8); the `won` flag agreed exactly
+(5 and 5). Nothing separates from baseline; win% is nominally *down*, and the
+one positive (reach≥6, +2.4pp) sits inside its own CI.
+
+**Endpoints were chosen BEFORE the run, from a power calculation.** Distinguishing
+1.0% from 1.7% needs **~4,261 seeds per arm**; at n=600 the win% CI half-width is
+±0.87% on a ~1.2% rate. So win% cannot be settled at this sample size by
+construction, and mean ante / reach depth were designated primary. Reporting
+win% as the headline would have been a claim the design could not support.
+
+⚠️ **The comparison is UNPAIRED, and that is a self-inflicted limitation.** No
+per-seed results file survived from the baseline run — only the summary
+aggregates and the checkpoint. Pairing by seed would tighten the interval
+materially. Judged not worth another hour of stopped training here, because a
+−0.035 delta with a ±0.139 half-width cannot become a gain under pairing, only a
+sharper null — but a marginal or positive future result must re-run the preserved
+baseline checkpoint rather than trust remembered numbers. Going forward the
+per-seed jsonl is preserved (`baselines/eval_600seeds_update007190_PERSEED.jsonl`).
+
+**Two rules out of this:** never read a win-rate improvement off training-log
+counts (volume moves counts without moving rate), and always keep the per-seed
+output of anything that may later serve as a baseline.
+
+---
+
+### The agent's evaluator cannot SEE the scaling-engine archetype — 07-30 (`dec-095`)
+
+dec-093 couldn't test the engine hypothesis because `_tier` scored jokers by the
+`xmult=True` **schema flag**, identical for a real engine and for Blackboard
+(X3 only if every card *held in hand* is black), Loyalty Card (every 6th) or
+Cavendish (1-in-1000). So: measure what each joker **actually contributes**.
+
+`compute_joker_scoring` gained an optional `breakdown` list; `play_quality` logs
+it per played hand. Deltas are captured at the **iteration boundary** of the
+joker loop — snapshot on entry, attribute to the previous joker, flush the last
+after the loop — rather than at the 11 accumulation sites inside it, because the
+body has many `continue` paths and a per-site hook silently misses whichever
+branch a joker took. Default `None` ⇒ the default path is untouched.
+
+**Validated against theory:** Acrobat (`final_hand_of_round`, implemented) fires
+**11%** of hands with mean **1.226×**, against a predicted 1 + 0.11×2 = **1.22**
+for an X3 firing 11% of the time. Three decimals on 62 samples — the delta
+arithmetic is right.
+
+**Then it found something much bigger.** Ranking nominal tier-5 engines by how
+often they actually fire:
+
+| joker | held | fire% | mean × |
+|---|---|---|---|
+| The Idol | 27 | **0%** | 1.00 |
+| Obelisk | 57 | **0%** | 1.00 |
+| Acrobat | 62 | 11% | 1.23 |
+| Campfire | 53 | 28% | 1.07 |
+| Flower Pot | 25 | 48% | 1.96 |
+| Photograph | 44 | 61% | 2.30 |
+
+The obvious read — *four of six engines are dead* — is **wrong**, and checking
+saved it. `hand_eval` contains **zero** occurrences of `xmult_scaling` and
+**zero** of `rotating_condition`. Those jokers don't read 0% because they're
+dead; they read 0% because **the estimator does not model them**.
+
+**17 of 150 jokers are affected, 14 of them nominal tier-5 engines** — the entire
+scaling archetype: Glass Joker, Hologram, Lucky Cat, Vampire, Constellation,
+Madness, Yorick, Canio, Ramen, Obelisk, The Idol, Ancient Joker, Campfire, Hit
+the Road.
+
+### ⛔ RETRACTED, 07-31 — the instrument was blind, not the evaluator
+
+**The conclusion above is wrong.** `hand_eval` implements scaling correctly. The
+retraction is kept in place of a silent edit because the error chain is the
+lesson.
+
+What actually happened, in order:
+
+1. `play_quality` passes `raw_state` jokers **without** the `_scaled_value`
+   injection that `GameState.inject_scaling_values()` performs from its
+   `ScalingTracker`. So every scaling joker reads ×1.0 in the instrument no matter
+   how large it has grown. Verified directly: Vampire **without** `_scaled_value`
+   → ×1.0, **with** `_scaled_value=2.5` → ×2.5.
+2. I grepped `hand_eval` for the literal strings `xmult_scaling` and
+   `rotating_condition`, got zero hits, and concluded the effects were
+   unimplemented. But the implementation keys off **`scaling_type`** (which does
+   exist — `'xmult'` for all 12) and `_scaled_value`. `hand_eval.py:~1008` already
+   applies a tracked `_scaled_value` unconditionally, carrying a comment stating
+   the exact reasoning I later "discovered" independently: *these jokers' trigger
+   field describes what makes them grow, not when they score.*
+3. I asserted `scaling_type` was absent from the schema on the basis of a
+   truncated `head -40` key dump. A test written to pin that absence **failed**,
+   which is what exposed the whole chain.
+4. Acting on the wrong conclusion I wrote a parallel scaling implementation into
+   `hand_eval`. It was **reverted before commit** — on the agent's live path
+   `_scaled_value` *is* injected, so the new branch would have **double-applied
+   every scaling multiplier** on real scoring.
+
+**What survives:** the breakdown instrument itself (validated to three decimals
+against Acrobat), and the fact that its scaling-joker numbers are a **floor, not a
+measurement**. Fix is to thread the GameState (or the already-injected joker list)
+through to `log_play` from its `train.py` call site.
+
+**What does not survive:** "the agent can't see the scaling archetype", and with
+it the mechanism it appeared to give for the plateau. No such mechanism has been
+demonstrated.
+
+Twice now a confident plateau explanation has come from an instrument measuring
+its own defect — dec-093's no-op stall, and this. Both were caught by a check
+written to confirm the story rather than to tell it.
+
+---
+
+### Recording HUMAN play, to reach a build region the agent cannot — 07-31 (`dec-096`)
+
+Every build-side result is uninterpretable for one reason: **range restriction**.
+The agent holds ~0.67 xmult engines per run and never leaves the 0–2 band (3
+engines = 2.9% of the field, 4 = 0.1%), so dec-085/090/093 all compared mediocre
+builds against other mediocre builds and correctly found nothing. dec-093 then
+showed **no shop policy reaches that range** — forcing it made outcomes worse in
+both directions tried.
+
+Human wins supply the missing arm **observationally**. Secondarily, `demo_buffer`
+currently holds only the agent's own ~1% wins, so SIL imitates mediocre play.
+
+`human_record.py` polls the gamestate the mod already exposes and **never sends an
+action**, so it cannot interfere with play or corrupt a run.
+
+**The hard part is that a human does not announce actions.** The trainer knows
+what it did because it chose it; here the action must be reconstructed from
+consecutive states. The two halves are biased in *opposite* directions on purpose:
+
+- `infer_action` returns `None` on anything ambiguous, so the transition is
+  **dropped rather than guessed** — a mislabelled action teaches the agent the
+  wrong lesson from a good run, which is worse than missing data.
+- `is_decision` calls a transition a decision **when unsure**, so genuinely missed
+  actions stay visible in coverage instead of being excused as engine noise.
+
+Together those mean coverage cannot be flattered from either side.
+
+**The filter was necessary, not cosmetic.** The first measurement reported 47%,
+computed as labelled ÷ *all* state changes. A live diagnostic showed the misses
+were dominated by `state`-only and `chips`+`state` changes — scoring animations,
+round evaluation, draws and round-boundary counter refills. None are decisions;
+putting the game's own state machine in the denominator measured the wrong thing.
+With the filter: **60%** overall, 75% in the steady-state window.
+
+⚠️ **Measured against the AGENT at `GAMESPEED=8`, not a human.** A human plays far
+slower than the 0.35s poll, so real coverage should be higher — but that is an
+assumption, not a measurement, and must be re-checked on a real session.
+
+**Deliberately not built:** the `demo_buffer` path (state-vector encoding +
+`head_indices`). That is the expensive half and is pointless until input quality
+is known; a pipeline fed mislabelled actions trains on a fiction. Unlabelled
+decisions are printed with their changed fields so a low number can be diagnosed
+rather than merely reported — and if they stay high, it means the *agent's* action
+space cannot represent moves a human treats as routine, which is worth knowing on
+its own.
+
+---
+
 ## Operations
 
 See the [Usage](README.md#usage) section for launch commands. Key points:

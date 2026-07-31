@@ -1330,9 +1330,17 @@ class Trainer:
                 # actually sent rather than the ones first intended. Logging
                 # only — it never influences the action, and play_quality
                 # swallows its own errors so it cannot break a run.
+                # `game` is passed so log_play can inject `_scaled_value` onto the
+                # joker dicts before measuring per-joker contribution. Without it
+                # every scaling joker (Vampire, Hologram, Glass Joker, ...) reads
+                # x1.0 no matter how large it has grown, because the accumulated
+                # value lives in the ScalingTracker and not in raw_state. That
+                # under-count previously read as "the evaluator cannot see the
+                # scaling archetype" — the instrument was blind, not hand_eval.
                 play_quality.log_play(
                     raw_state, (api_params or {}).get("cards"),
                     env_id=env.env_id, global_step=self.global_step,
+                    game=env.game,
                 )
 
             # Debounce state-TRANSITION actions: re-issuing next_round /

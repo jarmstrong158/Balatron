@@ -89,10 +89,15 @@ def debuffs_for(raw_state: dict):
 
 
 def log_play(raw_state: dict, played_indices, env_id: int = 0,
-             global_step: int = 0) -> None:
+             global_step: int = 0, game=None) -> None:
     """Record one played hand alongside the best hand that was available.
 
     `played_indices` are indices into the CURRENT hand. Never raises.
+
+    `game` is the env's GameStateManager. It is used ONLY to inject
+    `_scaled_value` onto the joker dicts (dec-095 follow-up) so scaling jokers report their
+    accumulated multiplier instead of a flat x1.0; optional, and everything still
+    works without it — just with scaling jokers under-counted.
     """
     global _count
     try:
@@ -146,6 +151,56 @@ def log_play(raw_state: dict, played_indices, env_id: int = 0,
         best_idx = sorted(best.get("card_indices") or [])
         ht = ht_used
 
+        # dec-095: what each joker ACTUALLY contributed to THIS hand.
+        #
+        # dec-093's instrument scored jokers by the `xmult=True` schema flag, so
+        # Blackboard (needs an all-black hand), Loyalty Card (every 6th) and
+        # Cavendish (1-in-1000) all counted as engines identical to a real one.
+        # That is why forcing "tier 5" share from 12%->19% could make outcomes
+        # WORSE and why the engine hypothesis stayed untestable. This records the
+        # realised numbers instead of the nominal ones.
+        #
+        # SCALING JOKERS (dec-095 follow-up). The 12 `scaling_type == "xmult"` jokers —
+        # Vampire, Hologram, Glass Joker, Lucky Cat, Constellation, Madness,
+        # Yorick, Canio, Ramen, Obelisk, Campfire, Hit the Road — keep their
+        # ACCUMULATED multiplier in `_scaled_value`, which lives in the
+        # ScalingTracker rather than in raw_state. hand_eval applies it correctly
+        # (hand_eval.py:~1008 fires a tracked _scaled_value unconditionally,
+        # because these jokers' trigger field says what makes them GROW, not when
+        # they score) — but only if it is actually injected.
+        #
+        # Without `game` this path measured un-injected jokers, so every scaler
+        # read x1.0 no matter how large it had grown. That under-count was briefly
+        # read as "the evaluator cannot see the scaling archetype" and nearly
+        # produced a redundant second implementation inside hand_eval that would
+        # have DOUBLE-APPLIED the multiplier on the agent's live scoring path. The
+        # instrument was blind, not the evaluator.
+        #
+        # Injection is done on COPIES: raw_state is shared with the caller and
+        # this is a logging path, which must not mutate the state the trainer is
+        # still using.
+        realized = []
+        try:
+            from environment.hand_eval import classify_hand as _ch
+            cards = [hand[i] for i in idxs]
+            _ht, _si = _ch(cards)
+            _bm = float(((raw_state.get("hands", {}) or {}).get(_ht, {})
+                         or {}).get("mult", 0) or 0)
+            _jk = jokers
+            if game is not None:
+                try:
+                    _jk = [dict(j) for j in jokers]
+                    game.inject_scaling_values(_jk)
+                except Exception:
+                    _jk = jokers        # fall back to the under-count, never fail
+            from environment.hand_eval import compute_joker_scoring as _cjs
+            _cjs(_ht, cards, list(_si or []), _jk, raw_state,
+                 base_mult=_bm, breakdown=realized)
+        except Exception as e:
+            from diagnostics import warn_once
+            warn_once("play_quality.realized_contribution", e)
+            realized = []
+
         rnd = raw_state.get("round", {}) or {}
         row = {
             "ante": raw_state.get("ante_num", 0),
@@ -180,6 +235,10 @@ def log_play(raw_state: dict, played_indices, env_id: int = 0,
             "hands_left": rnd.get("hands_left", -1),
             "discards_left": rnd.get("discards_left", -1),
             "chips": rnd.get("chips", 0),
+            # dec-095: per-joker realised contribution on this hand. A joker that
+            # was held but contributed nothing is recorded as a zero row, not
+            # omitted — "held and did nothing" is the measurement.
+            "realized": realized,
             "debuffed_suit": suit,
             "debuff_face": face,
             "env": env_id,
