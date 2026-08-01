@@ -96,6 +96,15 @@ class EnvSession:
         self.cur_discards_left: int = -1    # dec-050: unused discards at death = policy under-dug
         self.cur_blind_ante: int = 0
         self.last_proj_power: float = 0.0   # last projected power (from build_progression)
+        # dec-097: hand-LEVEL alignment for this blind. build_progression's
+        # `margin` cannot answer whether misalignment costs anything, because its
+        # `power` is computed FOR the committed hand and so cannot see the loss
+        # from playing a different one. These carry hand identity + levels to the
+        # blind_results row, where the binary `beaten` label lives.
+        self.cur_committed_ht: str = ""
+        self.cur_played_ht: str = ""
+        self.cur_committed_level: int = 0
+        self.cur_played_level: int = 0
         # dec-076: blind-START snapshot (deck rank/suit/enhancement counts, jokers,
         # hand levels) so a blind can be REPLAYED offline. Required to validate a
         # distributional P(clear) estimator against real outcomes — the current

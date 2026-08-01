@@ -2166,6 +2166,57 @@ its own.
 
 ---
 
+### Hand levels vs the hand actually played — and why reward can't fix it — 08-01 (`dec-097`)
+
+`pick_best_planet` levels the build's **committed archetype**, not the hand being
+played. That is deliberate: its docstring says Jupiter beats Mercury *"even if
+you've played more Pairs"*, and the Pillar 3b comment dismisses play frequency as
+*"lagging frequency"*. On clean rows the committed hand is the most-played hand
+only **50.4%** of the time — half the celestial investment goes into a hand the
+agent isn't primarily playing.
+
+⚠️ **The existing alignment signal was fabricating data.** `_committed_hand_signals`
+opened its max-search at `most_n = -1`, so before any hand was played `0 > -1`
+made the **first hand in dict order** the reported `most_played`, and strict `>`
+stopped any other zero-count hand displacing it. The game lists **Flush House**
+first.
+
+That produced 47,474 rows reading *"commits Flush but plays Flush House"* — 36% of
+all apparent misalignment — while `play_quality` ground truth shows Flush House
+played **zero times in 31,041 hands**. 47,472 of them were rows where nothing had
+been played yet. It polluted **31.8%** of `build_progression` and inflated
+misalignment from its true **49.6%** to 65.6%. Fixed; `most_played` is now `""`
+when nothing has been played.
+
+**The cost is still unmeasured, because the obvious instrument can't see it.**
+`build_progression.margin` is `power/target` with
+`power = estimate_score_for_hand_type(COMMITTED)` — it measures how strong the
+*committed* hand looks and structurally cannot see the loss from playing a
+different one. It gave a meaningless 1.00–1.06 ratio. `blind_results` now carries
+`committed_ht` / `played_ht` / their levels / `ht_aligned` beside the binary
+`beaten` flag (con-001). Reading pre-registered in
+`audit_ht_alignment_cost.py` before any data.
+
+**A reward signal was requested; it cannot work, for a structural reason.**
+`pick_best_planet` is called by the trainer at `train.py:2063`, so planet
+selection is **heuristic-owned** under dec-002's hybrid split. The policy never
+emits that action, so PPO has nothing to reinforce and no gradient path to the
+behaviour — a reward would pay the agent for an outcome it does not control.
+Separately, con-008 requires potential-based shaping and dec-073 established PBRS
+is **policy-invariant by construction**, which is exactly why margin shaping was
+null; an alignment potential would be null by the same theorem.
+
+The lever is the **picker** — a heuristic we edit directly, no training, effect
+immediate. Deliberately not changed yet: the cost is unmeasured, and *fix-then-
+check* is the pattern behind four nulls (dec-075/079/081/083) and two
+instrument-artifact retractions.
+
+**General rule out of this:** don't add a reward term for an outcome the policy
+doesn't control. Heuristic-owned decisions — planet picks, hand selection, joker
+order — have no action for PPO to reinforce. Fix the heuristic.
+
+---
+
 ## Operations
 
 See the [Usage](README.md#usage) section for launch commands. Key points:

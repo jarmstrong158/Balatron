@@ -134,7 +134,15 @@ def _committed_hand_signals(ht: str, hands: dict, joker_cards: list) -> dict:
     total = 0
     ht_played = 0
     most_played = ""
-    most_n = -1
+    # Starts at 0, not -1. With -1 the FIRST hand in dict order satisfied
+    # `0 > -1` and became most_played before anything had been played, and strict
+    # `>` meant no other zero-count hand could displace it. Every run therefore
+    # opened by reporting whichever hand the game happens to list first — which is
+    # Flush House. That polluted 31.8% of build_progression rows (47,472 of them
+    # claiming "most played: Flush House" when Flush House had never been played
+    # ONCE in 31,041 ground-truth hands from play_quality) and inflated the
+    # measured build<->play misalignment from its true 49.6% to 65.6%.
+    most_n = 0
     for name, info in hands.items():
         if not isinstance(info, dict):
             continue
@@ -144,6 +152,10 @@ def _committed_hand_signals(ht: str, hands: dict, joker_cards: list) -> dict:
             ht_played = p
         if p > most_n:
             most_n, most_played = p, name
+    # No hand played yet: report "" rather than a fabricated winner, so consumers
+    # can exclude these rows instead of silently treating dict order as data.
+    if total == 0:
+        most_played = ""
     play_share = round(ht_played / total, 3) if total else 0.0
     ht_level = int(hands.get(ht, {}).get("level", 1) or 1)
     # jokers that reward the committed hand type (schema triggers; owned jokers
@@ -442,6 +454,14 @@ class Trainer:
         env.last_api_method = None
         env.last_action_succeeded = True
         env.prev_actionable_state = None
+        # dec-097: clear the hand-alignment carriers. They are written when
+        # build_progression logs; if a new run's blind ended BEFORE that happened,
+        # a stale value would silently attach the previous run's committed/played
+        # hand to this run's blind_results row — wrong data that looks valid.
+        env.cur_committed_ht = ""
+        env.cur_played_ht = ""
+        env.cur_committed_level = 0
+        env.cur_played_level = 0
         env.shop_rerolls = 0
         env.shop_noop_count = 0
         env.prev_shop_fingerprint = None
@@ -1570,9 +1590,22 @@ class Trainer:
                             "margin": round(float(power) / max(float(tgt), 1.0), 3),
                         })
                         # dec-069: play<->build alignment + leveling + synergy
-                        record.update(_committed_hand_signals(
-                            ht, raw_state.get("hands", {}), jcards))
+                        _sig = _committed_hand_signals(
+                            ht, raw_state.get("hands", {}), jcards)
+                        record.update(_sig)
                         env.last_proj_power = float(power)  # dec-049: for realized-vs-projected
+                        # dec-097: carry hand identity + LEVELS to blind_results,
+                        # where the binary `beaten` label lives. `most_played` is
+                        # "" until something has actually been played, so these
+                        # stay empty rather than reporting dict order as data.
+                        _hands = raw_state.get("hands", {}) or {}
+                        _mp = _sig.get("most_played") or ""
+                        env.cur_committed_ht = ht or ""
+                        env.cur_played_ht = _mp
+                        env.cur_committed_level = int(
+                            (_hands.get(ht, {}) or {}).get("level", 1) or 1)
+                        env.cur_played_level = int(
+                            (_hands.get(_mp, {}) or {}).get("level", 1) or 1) if _mp else 0
                     except Exception:
                         pass  # diagnostics are best-effort; never block the log
                     with open(os.path.join("logs", "build_progression.jsonl"),
@@ -2613,6 +2646,27 @@ class Trainer:
                 "realized_margin": round(realized / max(tgt, 1.0), 3),
                 "hands_left": env.cur_hands_left,
                 "discards_left": env.cur_discards_left,  # dec-050: under-dig signal
+                # dec-097: hand-LEVEL alignment, per blind, against `beaten`.
+                #
+                # pick_best_planet deliberately levels the build's COMMITTED
+                # archetype rather than the hand actually played -- its docstring
+                # says Jupiter beats Mercury "even if you've played more Pairs".
+                # On clean rows the committed hand is the most-played hand only
+                # 50.4% of the time, so half the celestial investment goes into a
+                # hand the agent is not primarily playing.
+                #
+                # Whether that COSTS anything could not be answered from
+                # build_progression, because its `margin` is computed FOR the
+                # committed hand (power = estimate_score_for_hand_type(committed)),
+                # so it structurally cannot see the loss from playing a different
+                # hand. These fields put hand identity and levels next to the
+                # binary `beaten` label, which is the trustworthy outcome.
+                "committed_ht": env.cur_committed_ht,
+                "played_ht": env.cur_played_ht,
+                "committed_level": env.cur_committed_level,
+                "played_level": env.cur_played_level,
+                "ht_aligned": (None if not (env.cur_committed_ht and env.cur_played_ht)
+                               else int(env.cur_committed_ht == env.cur_played_ht)),
                 "proj_power": round(proj, 0),
                 "realized_vs_proj": round(realized / max(proj, 1.0), 3),
                 "env": env.env_id, "step": self.global_step,
