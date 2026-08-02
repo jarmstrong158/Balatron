@@ -2215,6 +2215,89 @@ instrument-artifact retractions.
 doesn't control. Heuristic-owned decisions — planet picks, hand selection, joker
 order — have no action for PPO to reinforce. Fix the heuristic.
 
+**RESULT — 35,945 tagged blinds. Alignment does NOT help; the surface closes.**
+
+| ante | aligned | misaligned | diff |
+|---|---|---|---|
+| 3 | 93.6% | 94.5% | −1.0% |
+| **4** | **88.1%** | **88.6%** | **−0.5%** |
+| **5** | **80.1%** | **80.7%** | **−0.7%** |
+| 6 | 76.1% | 78.9% | −2.8% |
+| 7 | 72.5% | 78.4% | −5.9% |
+
+Aligned clears the same or *slightly worse* at every ante but 2 and 8. At the
+plateau antes the gap is −0.5% / −0.7%, inside the CIs. Per the pre-registered
+reading, levelling the committed hand is fine and the 50% misalignment is
+harmless. **Not changing `pick_best_planet` before measuring saved a fifth null
+lever.**
+
+**A second null fell out:** hand LEVEL doesn't predict clearing either. Within
+antes 4–5, levels 1–4 clear at **86.0 / 84.6 / 84.8 / 85.7%** — flat. Consistent
+with dec-090, where hand level scored AUC 0.544 at ante 4.
+
+⚠️ **Confound caught in my own output.** The first per-level table showed clear
+rate falling 92.5% → 81.8% from level 1 to 5, which reads as *"levelling hurts"*.
+It was pure ante confound — mean ante rises monotonically with level (2.87 →
+6.34), so the table was measuring ante difficulty. Stratifying within antes 4–5
+erases it. **Any per-level or per-build statistic must be stratified by ante
+before it is interpreted** — the same mistake dec-090 was built to avoid.
+
+---
+
+### The plateau is exponential decay, and every A/B was underpowered — 08-02 (`dec-098`)
+
+Ten decision surfaces investigated, ten reported nulls, plateau unmoved. The
+framing was that one component must be broken. **The framing was wrong, and the
+evidence used to eliminate each candidate could not have detected a real
+improvement anyway.**
+
+A run clears ~24 blinds, so **win rate = per-blind clear rate ^24**:
+
+| ante | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| clear | .978 | .953 | .942 | **.886** | **.804** | .772 | .749 | .777 |
+
+Product over 3 blinds/ante = **2.22%**, against 0.83–1.18% measured — right
+order, gap from skips and non-independence.
+
+**Consequence 1 — no single lever can fix this.** A 10% win rate needs **0.909
+per blind: +5pp at every ante simultaneously**. No shop policy or evaluator
+delivers that. The hunt for the broken component was chasing something that
+doesn't exist.
+
+**Consequence 2 — the old nulls are non-results.** A good lever is worth ~+1pp
+per blind: a **1.3× win rate**, genuinely worth having. Detecting that as win
+rate needs **18,627 runs/arm**. dec-079/081/083/093 ran **60–600**.
+
+**Per-blind clear is ~24× more sample-efficient** — and the number isn't
+arbitrary: a run yields 24 blinds of evidence but only **one bit** of win/loss,
+so scoring per blind recovers what the binary throws away.
+
+| effect | blinds/arm | ≈ |
+|---|---|---|
+| +3pp | 1,934 | hours |
+| +2pp | 4,498 | ~a day |
+| +1pp | 18,537 | ~a week |
+| +0.5pp | 75,416 | out of reach |
+
+So 2–3pp levers are now testable **from training logs alone** — no stopped
+training, no eval sessions. `audit_blind_clear.py` does it, with `--split-step`
+for A/B at a deploy boundary and `--min-step` for con-014 regimes.
+
+⚠️ **Two arithmetic errors of mine, both caught by tests written to pin the
+claims rather than by re-reading them:**
+1. I reported the efficiency gain as **~7×**. It is **24.1×**. The 7× compared an
+   ante-4 base (0.886) at Δ0.005 against a 0.858 base at Δ0.01 — varying *both*
+   the base rate and the effect size across the two sides, which makes the ratio
+   meaningless.
+2. I conflated the uniform `0.858^24 = 2.53%` with the per-ante product `2.22%`.
+   Different quantities; the per-ante product is harsher because the late antes
+   sit far below the mean and the exponent punishes them.
+
+**Caveat:** per-blind clear conditions on *reaching* that ante, so it is a
+conditional rate — a lever that changes reach-depth alters the population being
+compared. Check arm sizes alongside any difference.
+
 ---
 
 ## Operations
