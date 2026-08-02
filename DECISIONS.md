@@ -2300,6 +2300,67 @@ compared. Check arm sizes alongside any difference.
 
 ---
 
+### ENGINES WIN — the hypothesis dec-093 couldn't test — 08-02 (`dec-099`)
+
+Triggered by a real win the user spotted: seed `ZHAYBFDH`, **ante 10**, verified
+per con-001 as advancing *past* 8 rather than trusting the `won` flag. It carried
+Photograph + Madness (tier-5) plus Hanging Chad + Brainstorm.
+
+**Stratified by REACHED ante** — every run in a row had ~the same number of shops:
+
+| engines | reached 6+ | reached 7+ | reached 8+ |
+|---|---|---|---|
+| 0 | 0.8% | 2.7% | 8.3% |
+| 1 | 4.1% | 9.9% | 27.7% |
+| 2 | 6.2% | 14.3% | 36.0% |
+| **3+** | **18.0%** | **32.7%** | **62.1%** |
+
+At ante 6+, 3+ engines wins **22× more often** than 0 (18.0% [11.7–26.7] vs 0.8%
+[0.2–2.9]) — **non-overlapping CIs at every depth**.
+
+The stratification is not optional. Raw win-rate-by-engine-count is severely
+survivorship-biased: mean final ante rises monotonically with engine count
+(3.63 → 6.56), so engines and survival feed each other circularly.
+
+**This reconciles the two results that appeared to contradict it:**
+- **dec-090** found no build feature predicts *per-blind* clearing at antes 4–6 —
+  correct, because engines barely rescue the blind in front of you. They
+  **compound** across all remaining blinds, exactly the dec-098 frame where a
+  +2pp per-blind edge is invisible at one blind and decisive over twenty.
+- **dec-093** found forcing engines made things *worse* — also consistent, because
+  forced acquisition of nominal tier-5 cards (including dead conditionals) at the
+  cost of tempo is a different population from natural assembly.
+
+**The bottleneck is FREQUENCY, not value:** the agent assembles 3+ engines in only
+**4.5%** of runs (219/4,906).
+
+**And the constraint is SLOT ALLOCATION, not acquisition.** Comparing the
+*non-engine* composition at ante 6+ (comparing engine counts would be circular):
+
+| tier | 3+ engines | 0 engines |
+|---|---|---|
+| copier/retrigger | 0.41 | 0.55 |
+| additive scaling | 0.17 | 0.43 |
+| economy | 0.05 | 0.08 |
+| **tier-0 (no value)** | **1.45** | **3.67** |
+| total held | 5.21 | 4.73 |
+
+Engine builds don't hold *more* of anything — they hold **less junk**. Engine-free
+runs carry **3.67 worthless jokers out of 4.73**, 78% of a near-full board, and
+never sell them. No individual non-engine joker stands out (every lift ≈1%), so
+it is the aggregate junk load, not a missing enabler.
+
+⚠️ **Not fully causal.** Conditioning on reached-ante removes the dominant
+confound but not all of it. `_tier` is also the nominal schema flag (the dec-095
+limitation), counting Blackboard and Cavendish as engines — that adds noise and
+biases *toward* the null, so the true effect is plausibly larger.
+
+**This reopens `dec-081` (swap-legality)**, which exists precisely to stop the
+mask vetoing full-slot buys, and was closed on a 300-seed win-rate measurement —
+a non-result under dec-098's power arithmetic.
+
+---
+
 ## Operations
 
 See the [Usage](README.md#usage) section for launch commands. Key points:
