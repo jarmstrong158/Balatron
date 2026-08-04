@@ -1854,7 +1854,7 @@ def mouth_should_dig(hand_cards: list[dict], jokers: list[dict],
         return False
     # Already locked? (some hand type has been played this round)
     for info in gamestate.get("hands", {}).values():
-        if isinstance(info, dict) and info.get("round_played", 0) > 0:
+        if isinstance(info, dict) and info.get("played_this_round", 0) > 0:
             return False
     if int(gamestate.get("round", {}).get("discards_left", 0) or 0) <= 0:
         return False
@@ -3001,7 +3001,7 @@ def _plan_optimal_action_inner(hand_cards: list[dict],
         played_types = set()
         hand_usage = gamestate.get("hands", {})
         for ht, info in hand_usage.items():
-            if isinstance(info, dict) and info.get("round_played", 0) > 0:
+            if isinstance(info, dict) and info.get("played_this_round", 0) > 0:
                 played_types.add(ht)
         if played_types:
             targets = [t for t in targets
@@ -3013,7 +3013,7 @@ def _plan_optimal_action_inner(hand_cards: list[dict],
                 play_cards = list(best_play["card_indices"])
 
     # The Mouth: only one hand type can be played this round. The locked
-    # type is whatever already has round_played > 0 — derived from the
+    # type is whatever already has played_this_round > 0 — derived from the
     # game state every call, NOT from the chase-commitment field (which is
     # reset on every play return, so the lock was forgotten after the
     # first hand and the old detail-vs-hand_type comparison never matched
@@ -3021,7 +3021,7 @@ def _plan_optimal_action_inner(hand_cards: list[dict],
     if boss_one_hand_type:
         mouth_type = ""
         for ht, info in gamestate.get("hands", {}).items():
-            if isinstance(info, dict) and info.get("round_played", 0) > 0:
+            if isinstance(info, dict) and info.get("played_this_round", 0) > 0:
                 mouth_type = ht
                 break
         if mouth_type:
@@ -4126,7 +4126,20 @@ def _estimate_joker_scoring_for_type(hand_type: str, jokers: list[dict],
         # (Steel/Stencil xmult, Stone/Bull/Banner chips, Erosion/Swashbuckler
         # mult, gate jokers). Replaces the base/x1.0 the loop would otherwise use.
         _mag = _resolve_magnitude_contribution(joker, schema, gamestate, hand_type)
-        if _mag is not None:
+        # dec-100: an ALL-ZERO magnitude result must NOT consume the joker.
+        #
+        # _magnitude_count handles 11 detail strings and falls through to
+        # `return 0` for anything else — including `cards_remaining` (Blue Joker)
+        # and `blinds_skipped` (Throwback), both of which are SCORING jokers. The
+        # resolver still returned a non-None (0.0, 0.0, 1.0), so this `continue`
+        # skipped the normal effect application below, where Blue Joker's
+        # `per_card_remaining_in_deck` branch would have valued it correctly.
+        # The resolver was deleting value the trigger path had already computed:
+        # both jokers were worth exactly 0 in every shop and planner decision,
+        # while compute_joker_scoring (which does not call the resolver) valued
+        # Blue Joker correctly — one more silent disagreement between the two
+        # estimators.
+        if _mag is not None and (_mag[0] or _mag[1] or _mag[2] != 1.0):
             bonus_chips += _mag[0]
             bonus_mult += _mag[1]
             if _mag[2] != 1.0:
@@ -4149,6 +4162,35 @@ def _estimate_joker_scoring_for_type(hand_type: str, jokers: list[dict],
                     xmult_val = max(scaled_value, 1.0)
                 else:
                     xmult_val = schema.get("xmult_value") or 1.0
+                # dec-100: fold PROBABILITY and ROTATING conditions into an
+                # expected value here, because both were being ignored on this
+                # path while compute_joker_scoring accounted for them — the shop
+                # and the play-selector were valuing the same joker differently.
+                #
+                #   probability: `effect_probability` is a schema FIELD, but the
+                #   branch that read it above tested it as a TRIGGER NAME, which
+                #   validate_joker can never produce (it is not in
+                #   TRIGGER_VOCABULARY). So it was unreachable, and Bloodstone
+                #   (p=0.5, x1.5, per-card) scored the FULL 1.5^n: x7.59 on a
+                #   Hearts flush against a true EV of x3.05. It is also in
+                #   HIGH_VALUE_JOKERS, so the over-valuation drove a buy bias.
+                #
+                #   rotating: The Idol and Ancient Joker carry
+                #   rotating_condition=True with EMPTY trigger_ranks/suits (the
+                #   real target rotates each round and is not in the schema).
+                #   compute_joker_scoring's `any(... & set())` is always False so
+                #   it scored x1.0, while this path's fallback set trigger_count=2
+                #   and scored x4.0. Neither is right: the condition is unknown,
+                #   so the honest value is P(condition holds) x the payoff.
+                _p = schema.get("effect_probability")
+                if _p:
+                    xmult_val = (1 - float(_p)) + float(_p) * xmult_val
+                elif schema.get("rotating_condition"):
+                    # P(an unknown rank+suit target appears among 5 scoring
+                    # cards) ~= 0.10; an unknown SUIT alone ~= 1-(3/4)^5 ~= 0.76.
+                    _pr = 0.10 if (schema.get("triggers") or []).count(
+                        "specific_rank") else 0.76
+                    xmult_val = 1.0 + _pr * (xmult_val - 1.0)
                 if schema.get("per_card_instance") and effective_count > 1:
                     xmult_product *= xmult_val ** effective_count
                 elif trigger_count > 1:

@@ -17,11 +17,16 @@ measured 0.83-1.18%. Two consequences follow, and both are load-bearing:
    of no effect, and should not be cited as "measured null" for realistic effect
    sizes.
 
-Per-blind clear rate needs ~62,134 blinds per arm for the same +1pp -- and a run
-is ~24 blinds, so that is ~7x more sample-efficient than the equivalent
-447,000-blind run requirement. Not orders of magnitude, but the difference
-between "weeks" and "months", and it localises WHICH ante moved instead of
-collapsing everything into one binary per run.
+Per-blind clear rate needs ~18,537 blinds per arm for the same +1pp -- and a run
+is ~24 blinds, so the win-rate route costs ~447,000 blinds of play for the same
+answer. That is ~24x more sample-efficient, and the ratio is not a coincidence: a
+run yields 24 blinds of evidence but only ONE bit of win/loss.
+
+(This docstring said "~7x / 62,134 blinds" until 08-03. That figure compared an
+ante-4 base rate at delta 0.005 against a 0.858 base at delta 0.01 -- varying BOTH
+the base rate and the effect size across the two sides. The decision entry was
+corrected; this file was not, for a day. Corrections have to reach the code, not
+just the prose.)
 
 con-014: regime boundaries are respected. A metric whose accounting changed must
 never be read across one, so rows are filtered by `step` and the boundary list is

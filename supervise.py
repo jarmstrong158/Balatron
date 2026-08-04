@@ -42,6 +42,7 @@ Stop:
 import ctypes
 import datetime
 import glob
+import json
 import os
 import re
 import shutil
@@ -557,6 +558,102 @@ def start_server(port: int = PORT) -> bool:
     return False
 
 
+ARM_STATE_FILE = os.path.join(REPO, "logs", "arm_state.json")
+BOUNDARY_DIR = os.path.join(REPO, "baselines", "boundaries")
+
+
+def _snapshot_blind_clear(arms: dict) -> None:
+    """On any change to the experiment-arm set, snapshot per-ante clear rates.
+
+    dec-098 built --split-step to A/B off ordinary training logs, and the first
+    real use of it LOST ITS CONTROL ARM: blind_results.jsonl rotates, and 36
+    hours of treatment (50,421 blinds) evicted every pre-boundary row. The
+    comparison became unrecoverable and had to fall back on a summary that
+    survived only because it had been echoed into a chat transcript.
+
+    dec-094 already recorded the rule -- preserve the output of anything that may
+    serve as a baseline -- and this violated it by trusting a rotating log to
+    hold both arms. So the snapshot is taken HERE, automatically, at the one
+    moment that always precedes a regime change: the supervisor starting a
+    trainer with a different arm set than last time.
+
+    Writes only when the arm set CHANGES, so ordinary 90-minute recycles do not
+    pile up files. Never raises -- a failed snapshot must not stop training.
+    """
+    try:
+        prev = None
+        if os.path.exists(ARM_STATE_FILE):
+            with open(ARM_STATE_FILE, encoding="utf-8") as fh:
+                prev = json.load(fh).get("arms")
+        if prev == arms:
+            return                      # same regime, nothing to mark
+
+        blinds = os.path.join(REPO, "logs", "blind_results.jsonl")
+        summary, steps = {}, []
+        if os.path.exists(blinds):
+            per = {}
+            with open(blinds, encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except Exception:
+                        continue
+                    per.setdefault(r.get("ante", 0), []).append(bool(r.get("beaten")))
+                    steps.append(r.get("step", 0) or 0)
+            summary = {str(a): {"n": len(v), "clear": sum(v) / len(v)}
+                       for a, v in sorted(per.items()) if len(v) >= 100}
+
+        # game_history is capped at 5000 runs and rotates just as fast. It
+        # destroyed the dec-099 engine baseline within 36 hours -- the same
+        # failure as blind_results, on the log that carries RUN outcomes and
+        # final joker composition. Snapshot the run-level summary too, or every
+        # engine/win analysis is only ever comparable within one arm.
+        runs, wins, eng_hist = 0, 0, {}
+        try:
+            gh = os.path.join(REPO, "logs", "game_history.jsonl")
+            if os.path.exists(gh):
+                import engine_forcing as _ef
+                with open(gh, encoding="utf-8", errors="ignore") as fh:
+                    for line in fh:
+                        if not line.strip():
+                            continue
+                        try:
+                            r = json.loads(line)
+                        except Exception:
+                            continue
+                        if r.get("from_curriculum") or not r.get("jokers"):
+                            continue
+                        runs += 1
+                        # con-001: a real win is ante PAST 8, never the won flag.
+                        if r.get("ante", 0) > 8:
+                            wins += 1
+                        k = sum(_ef._tier(j) == 5 for j in r["jokers"])
+                        d = eng_hist.setdefault(str(min(k, 4)), [0, 0])
+                        d[0] += 1
+                        d[1] += 1 if r.get("ante", 0) > 8 else 0
+        except Exception:
+            pass
+
+        os.makedirs(BOUNDARY_DIR, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+        path = os.path.join(BOUNDARY_DIR, f"boundary_{stamp}.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"ended_arms": prev, "starting_arms": arms,
+                       "step_range": [min(steps), max(steps)] if steps else None,
+                       "n_blinds": len(steps), "per_ante": summary,
+                       "runs": runs, "real_wins": wins,
+                       "by_engine_count": eng_hist}, fh, indent=1)
+        os.makedirs(os.path.dirname(ARM_STATE_FILE), exist_ok=True)
+        with open(ARM_STATE_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"arms": arms}, fh)
+        log(f"ARM CHANGE {prev} -> {arms}: snapshotted {len(steps)} blinds to "
+            f"{os.path.basename(path)}")
+    except Exception as e:
+        log(f"WARNING: arm snapshot failed ({e}) — training continues")
+
+
 def start_trainer() -> bool:
     cp = newest_checkpoint()
     if not cp:
@@ -565,6 +662,22 @@ def start_trainer() -> bool:
     ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     trainer_log_path = os.path.join(LOG_DIR, f"trainer_{ts}.log")
     env = dict(os.environ, PYTHONUTF8="1")  # cp1252 emoji crash (gotcha 6)
+    # dec-100: make any active experiment arm VISIBLE in this log.
+    #
+    # BALATRON_* flags reach the trainer by plain inheritance, so an arm can run
+    # for days without appearing anywhere except the shell that happened to
+    # launch the supervisor. That silently splits the training logs into two
+    # regimes with nothing recording where the boundary is, which is precisely
+    # what con-014 exists to prevent. Logging it here makes the split point
+    # recoverable from logs alone.
+    _arms = {k: v for k, v in os.environ.items() if k.startswith("BALATRON_")}
+    _snapshot_blind_clear(_arms)
+    if _arms:
+        log(f"EXPERIMENT ARMS ACTIVE: {_arms} — training logs from this point "
+            f"are a SEPARATE REGIME (con-014); compare with "
+            f"audit_blind_clear.py --split-step")
+    else:
+        log("experiment arms: none (control)")
     trainer_log = open(trainer_log_path, "a", encoding="utf-8")
     subprocess.Popen(
         [sys.executable, "-u", "-m", "training.train",

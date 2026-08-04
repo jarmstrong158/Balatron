@@ -90,11 +90,20 @@ def _tier(name: str) -> int:
     additive scaling, then economy that buys more of the above.
 
     Every field read here is verified present in data/jokers.py (all 150 entries
-    carry the full key set, values are bools except money_per_round). An earlier
-    draft keyed off `scaling_type`/`scaling_increment`, which DO NOT EXIST in the
-    schema — every joker would have scored 0, the forcing would have bought
-    nothing, and the experiment would have silently measured the control arm
-    against itself. test_tiers_are_not_all_zero pins this.
+    carry the full key set, values are bools except money_per_round).
+
+    CORRECTION (dec-100). This docstring previously claimed `scaling_type` and
+    `scaling_increment` "DO NOT EXIST in the schema". Both DO exist —
+    data/jokers.py JOKER_DEFAULTS carries them, 29 jokers set `scaling_type` and
+    24 set `scaling_increment`. That false claim came from a truncated key dump
+    and was already retracted in dec-095, but the retraction never reached this
+    file, so the code kept teaching the wrong fact to whoever edited it next.
+
+    `_tier` still reads the boolean flags rather than `scaling_type`, which is
+    fine — but as a CHOICE, not because the alternative is absent. The real
+    limitation is that these flags are NOMINAL: `xmult=True` is equally true of a
+    working engine and of Blackboard, Cavendish or Loyalty Card, which is why
+    dec-093's forcing arms could not distinguish them.
     """
     from data.jokers import JOKERS
 

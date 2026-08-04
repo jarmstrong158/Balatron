@@ -1297,9 +1297,21 @@ def _is_action_feasible(action_type: int, raw_state: dict) -> bool:
                      _safe_modifier(j).get("edition", "") == "NEGATIVE")
                 for j in joker_cards[:JOKER_SLOTS]
             )
-            weakest_sell = 0
+            # dec-100: MAX, not min. Feasibility asks "could this buy physically
+            # happen?", and it can if ANY sellable joker frees the slot and pays
+            # for it — which is the best one, not the cheapest. The mask body
+            # (~line 773) already uses `cost <= money + max(sell_prices)`, but
+            # build_action_mask only reaches that branch when THIS gate passes,
+            # so a min here masked ACTION_BUY_JOKER off entirely whenever
+            # min(sell) < cost - money <= max(sell) — silently defeating the
+            # dec-081 legality fix it was supposed to admit.
+            #
+            # The name `weakest_sell` described the intent (the weakest joker's
+            # value) but min() takes the cheapest SALE, which is the opposite of
+            # what frees up the most money.
+            best_sell = 0
             if has_sellable:
-                weakest_sell = min(
+                best_sell = max(
                     _joker_sell_value(j) for j in joker_cards[:JOKER_SLOTS]
                     if not (_safe_modifier(j).get("eternal", False) or
                             _safe_modifier(j).get("edition", "") == "NEGATIVE")
@@ -1312,7 +1324,7 @@ def _is_action_feasible(action_type: int, raw_state: dict) -> bool:
                 cost = c.get("cost", {}).get("buy", 999)
                 if ed == "NEGATIVE" and cost <= money:
                     return True  # Negative edition bypasses slot limit
-                if has_sellable and cost <= money + weakest_sell:
+                if has_sellable and cost <= money + best_sell:
                     return True  # Can afford via sell-then-buy
             return False
         return any(

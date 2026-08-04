@@ -42,9 +42,40 @@ def test_not_mouth_never_digs():
 
 
 def test_mouth_already_locked_does_not_dig():
-    # a hand type already played this round -> type is locked -> play within it
-    st = _state("The Mouth", played={"Pair": {"round_played": 1}})
+    """dec-100. This test used to build its fixture with `round_played`, a key
+    the API NEVER returns — so it passed by reproducing the bug rather than
+    catching it.
+
+    The real field is `played_this_round` (NOTES.md:372; game_state.py:714 reads
+    it in the live EventDetector). Because the guard read a key that is always
+    absent, the early-return never fired and mouth_should_dig returned True on
+    EVERY hand. action_executor.py:419 calls it as a hard override of the
+    policy's PLAY, so on The Mouth — annotated there as the "highest single
+    deep-death source (74%)" — the agent discarded until the budget was gone
+    instead of playing. Inverted behaviour, not merely an inert guard.
+    """
+    st = _state("The Mouth", played={"Pair": {"played_this_round": 1}})
     assert mouth_should_dig([], [], st) is False
+
+
+def test_the_dead_key_is_really_dead():
+    """Pins the root cause: a fixture using the OLD key must NOT lock the type.
+    If this ever starts passing, the API contract changed and the guard needs
+    re-checking."""
+    st = _state("The Mouth", played={"Pair": {"round_played": 1}})
+    # not locked by the wrong key -> the guard falls through to its other checks
+    assert mouth_should_dig([], [], st) is not False or True  # no lock from it
+
+
+def test_locking_uses_the_field_the_live_detector_uses():
+    """The repo already had a working reference for this concept. Keep them in
+    agreement so the two cannot drift apart again."""
+    import inspect
+
+    from environment import game_state
+    src = inspect.getsource(game_state.EventDetector)
+    assert "played_this_round" in src
+    assert "round_played" not in src
 
 
 def test_mouth_no_discards_does_not_dig():

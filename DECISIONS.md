@@ -2361,6 +2361,61 @@ a non-result under dec-098's power arithmetic.
 
 ---
 
+### Three-way audit: the code wasn't doing what it said — 08-04 (`dec-100`)
+
+Ten surfaces declared closed, plateau unmoved, and nobody had ever checked
+whether the code *did* what its comments claimed. Three separate incidents in one
+session (a no-op stall killing runs, an instrument reading un-injected scaling
+jokers as dead, a max-search fabricating data from dict order) suggested a
+systemic failure mode. Three parallel audits — decision-record integrity, code
+intent-vs-reality, quantitative gap.
+
+**THE BIG ONE — a boss guard that actively harmed.** Three guards in `hand_eval`
+read **`round_played`**, a key the API *never returns*. The real field is
+`played_this_round` (`NOTES.md:372`; `game_state.py:714` reads it in the live
+EventDetector — the repo already contained a working reference).
+
+`mouth_should_dig`'s "already locked?" early-return therefore **never fired**, so
+it returned `True` on every hand. `action_executor.py:419` calls it as a **hard
+override of the policy's PLAY** — so on **The Mouth**, annotated in that same file
+as the *"highest single deep-death source (74%)"*, the agent **discarded its whole
+budget instead of playing**. Inverted behaviour, not a dead guard. The Eye's ban
+filter and the Mouth target filter were inert for the same reason.
+
+⚠️ Its test built the fixture with `round_played` too — **it passed by
+reproducing the bug.**
+
+**Also fixed:**
+
+| defect | was | now |
+|---|---|---|
+| `_is_action_feasible` used `min()` sell value — masked `ACTION_BUY_JOKER` off before the dec-081 legality branch could run | `min` | `max` |
+| all-zero magnitude result consumed the joker, skipping a working fallback | Blue Joker **0 chips** | **80** |
+| `effect_probability` tested as a *trigger name* (impossible — not in `TRIGGER_VOCABULARY`) | Bloodstone **×2.25** | **×1.562** (EV) |
+| rotating conditions ignored; shop said ×4, play-path said ×1 | The Idol **×4.00** | **×1.210** |
+
+The estimator disagreements matter beyond the individual cards: the shop was
+buying jokers at ×4 that the hand-selector then valued at ×1.
+
+**Deliberately NOT fixed, recorded rather than guessed:**
+- `trigger_combination: "all"` is set on **9 jokers** and read by **no code** —
+  both trigger loops fire on the first match, so AND-jokers behave as OR. Needs
+  both loops restructured to collect all outcomes before deciding.
+- **Baseball Card** reads `rarity`, absent from all 150 jokers and unaddable
+  per-joker (`make_joker` raises on unknown fields). Needs a schema decision.
+
+The rotating-condition probabilities (0.10 unknown rank+suit, 0.76 unknown suit)
+are derived, not measured — far closer than ×1.0 or ×4.0, but worth validating.
+
+**From the record audit, still open:** dec-099 is confounded (its stratification
+does not equalise shops — jokers held still climbs 4.78→5.09 within a stratum);
+dec-070's power estimator rests on the retracted `realized_vs_proj`; dec-057
+(~11–12% reachable) and dec-098 (nothing reachable) contradict and both are live;
+dec-092 (Plan C) was never mirrored here at all, a con-016 violation on the
+largest commitment in the project.
+
+---
+
 ## Operations
 
 See the [Usage](README.md#usage) section for launch commands. Key points:
