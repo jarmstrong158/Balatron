@@ -396,8 +396,30 @@ def system_ram_pct() -> float:
         return 0.0
 
 
-def top_memory_hog():
-    """(name, pid, gb) of the single biggest-RSS process, for diagnosis."""
+# dec-101: OS-managed processes that cannot be closed, restarted, or reclaimed
+# by recycling anything. MemCompression in particular is the Windows memory
+# COMPRESSION store: it grows BECAUSE memory is tight, so it is a symptom of
+# pressure, not a cause of it.
+#
+# Treating it as "the hog" caused a recycle LOOP on 08-05: the guardian tore down
+# the whole stack at RAM 73%, the trainer came back 110s later, RAM was still 74%
+# (because nothing about MemCompression had changed), and it tore the stack down
+# again 95 seconds after that. The action can never satisfy the trigger. Only the
+# burst limiter stopped it, after two destroyed trainer sessions in seven minutes.
+UNRECLAIMABLE_PROCS = {
+    "memcompression", "system", "registry", "system idle process",
+    "ntoskrnl.exe", "memory compression",
+}
+
+
+def top_memory_hog(exclude_unreclaimable: bool = True):
+    """(name, pid, gb) of the biggest-RSS process we could actually DO something
+    about.
+
+    dec-101: skips OS-managed processes by default. A hog we cannot close is
+    worth REPORTING (so a human knows the real cause) but must never drive a
+    recycle, because recycling Balatron does not shrink it.
+    """
     if psutil is None:
         return ("?", 0, 0.0)
     best = ("?", 0, 0.0)
@@ -406,8 +428,11 @@ def top_memory_hog():
             rss = p.info["memory_info"].rss / 1e9
         except Exception:
             continue
+        name = p.info.get("name") or "?"
+        if exclude_unreclaimable and name.strip().lower() in UNRECLAIMABLE_PROCS:
+            continue
         if rss > best[2]:
-            best = (p.info.get("name") or "?", p.info["pid"], rss)
+            best = (name, p.info["pid"], rss)
     return best
 
 
@@ -672,6 +697,14 @@ def start_trainer() -> bool:
     # recoverable from logs alone.
     _arms = {k: v for k, v in os.environ.items() if k.startswith("BALATRON_")}
     _snapshot_blind_clear(_arms)
+    # dec-101: name the ablation set explicitly. BALATRON_ABLATE already shows up
+    # in _arms, but an ablation arm is the one case where "what is missing" is
+    # the whole point of the run, so it gets its own line to read for in the log.
+    try:
+        import ablation
+        log(ablation.describe())
+    except Exception as e:
+        log(f"WARNING: ablation set unreadable ({e})")
     if _arms:
         log(f"EXPERIMENT ARMS ACTIVE: {_arms} — training logs from this point "
             f"are a SEPARATE REGIME (con-014); compare with "
@@ -807,10 +840,25 @@ def main():
                     write_status("MEM_RECLAIMED",
                                  f"RAM {ram:.0f}%, restarted {reclaimed}")
                 else:
+                    # dec-101: report the true top consumer (including OS
+                    # processes) but decide on the RECLAIMABLE one. If the
+                    # machine is merely compressing memory, recycling Balatron
+                    # changes nothing and just destroys a trainer session.
+                    true_top = top_memory_hog(exclude_unreclaimable=False)
                     msg = (f"RAM {ram:.0f}% critical; biggest consumer is "
-                           f"{hog[0]} ({hog[2]:.1f}GB). Balatron is being "
-                           f"STARVED by external memory — close it for "
+                           f"{true_top[0]} ({true_top[2]:.1f}GB). Balatron is "
+                           f"being STARVED by external memory — close it for "
                            f"sustained speed.")
+                    if true_top[0].strip().lower() in UNRECLAIMABLE_PROCS:
+                        log(f"MEM pressure — {msg} Top consumer is OS-managed "
+                            f"and CANNOT be reclaimed by recycling; largest "
+                            f"reclaimable is {hog[0]} ({hog[2]:.1f}GB). NOT "
+                            f"recycling (dec-101: that action cannot satisfy "
+                            f"this trigger).")
+                        write_status("MEM_PRESSURE_UNRECLAIMABLE",
+                                     f"RAM {ram:.0f}%, top {true_top[0]}")
+                        time.sleep(CHECK_INTERVAL_S)
+                        continue
                     if len(recycle_times) < RECYCLE_BURST_LIMIT:
                         log(f"MEM pressure — {msg} Recycling Balatron to "
                             f"reclaim its working set.")

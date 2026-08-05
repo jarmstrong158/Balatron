@@ -2416,6 +2416,59 @@ largest commitment in the project.
 
 ---
 
+### Guardian recycle loop, and the first ablation arm — 08-05 (`dec-101`)
+
+**A recycle loop that destroyed trainer sessions.** The memory guardian tore down
+the whole stack whenever RAM crossed 72% with **MemCompression** as the "biggest
+consumer":
+
+```
+07:18:30  RECYCLE (RAM 73%, hog MemCompression)
+07:20:20  trainer started
+07:21:55  RECYCLE (RAM 74%, hog MemCompression)   <- 95s later
+```
+
+MemCompression is a Windows **kernel** process. It cannot be closed, recycling
+Balatron cannot shrink it, and it *grows because memory is tight* — a symptom
+being read as the cause. **The action can never satisfy the trigger.** Only the
+burst limiter stopped it, after two destroyed sessions in seven minutes.
+
+Fixed by separating diagnosis from decision: `top_memory_hog` still reports the
+true top consumer so a human sees the real cause, but the recycle decision uses
+the largest **reclaimable** process. Verified live — true top MemCompression
+3.3GB (now excluded), largest reclaimable Discord 2.45GB.
+
+**The first ablation arm.** The 08-03 audit's central finding was that *nothing
+currently running has a valid efficacy measurement*: ~30 shipped changes, nine
+never measured, three validated against a metric dec-076 proved tautological, one
+kept on a non-significant A/B, five resting on non-results. **No no-op reference
+point exists anywhere in the record**, so the ~4.2 mean ante has never been
+attributed to anything.
+
+Ablation is newly affordable, which is what makes this the moment: under win rate
+a component worth +1pp/blind needs ~18,600 runs/arm, but per-blind clear (dec-098,
+~24× more efficient) needs ~4,500 blinds — **about a day, from ordinary training
+logs**. Roughly one component per day.
+
+`BALATRON_ABLATE=boss_overrides` is live. First arm because dec-100 just moved
+those overrides from permanently-inert to actually-firing, so their contribution
+has never been measured in *either* state.
+
+⚠️ The harness **raises** on an unknown component name, at import and at the call
+site. A misspelled arm ablates nothing, is identical to control, and its "no
+effect" is a measurement of the control against itself — the dec-093 failure mode.
+Failing loudly costs a restart; failing silently costs a false conclusion.
+
+**First arm with a captured control.** 50,226 blinds snapshotted to
+`baselines/boundaries/boundary_20260805T101706.json`, split step **18,390,659**.
+Every prior arm compared against a summary echoed into a chat transcript — the
+swap-legality control and the dec-099 baseline were both lost to log rotation
+inside 36 hours.
+
+Read it with `python audit_blind_clear.py --split-step 18390659`.
+
+---
+
 ## Operations
 
 See the [Usage](README.md#usage) section for launch commands. Key points:

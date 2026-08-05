@@ -16,6 +16,7 @@ from typing import Optional
 
 import numpy as np
 
+import ablation
 import engine_forcing
 from environment.hand_eval import (
     find_best_discard, find_best_hands, estimate_score_for_hand_type,
@@ -416,8 +417,15 @@ class ActionExecutor:
                         # what PPO records). Highest single deep-death source (74%).
                         # dec-053 adds The Needle (63%): only 1 hand all blind, so
                         # dig to maximize it instead of playing a weak hand now.
-                        if (mouth_should_dig(hand_cards, jokers_raw, raw_state)
-                                or needle_should_dig(hand_cards, jokers_raw, raw_state)):
+                        # dec-101: ablatable. These two overrides were INERT
+                        # until dec-100 (they read `round_played`, a key the API
+                        # never returns), so their contribution has never been
+                        # measured in either state — and mouth_should_dig was
+                        # actively inverting behaviour at the deadliest boss.
+                        # Measuring them now needs the ability to turn them off.
+                        if (not ablation.is_ablated("boss_overrides")
+                                and (mouth_should_dig(hand_cards, jokers_raw, raw_state)
+                                     or needle_should_dig(hand_cards, jokers_raw, raw_state))):
                             advice = find_best_discard(hand_cards, deck_cards,
                                                        jokers_raw, raw_state)
                             dig = list(advice["discard_indices"])[:5]
