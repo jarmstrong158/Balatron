@@ -2469,6 +2469,69 @@ Read it with `python audit_blind_clear.py --split-step 18390659`.
 
 ---
 
+### ⛔ PLAN C — SUSPENDED, not cancelled — 07-29, suspended 08-05 (`dec-092`)
+
+**This decision was never mirrored here.** It lived only in
+`.context/decisions.json` for a week — a con-016 violation on the largest
+commitment in the project. Anyone reading this file could not see that it had been
+made, that its basis collapsed, or whether it was still live.
+
+**What it committed to:** the deferred dec-002 rewrite — move build decisions from
+heuristics into the policy, with a relational/attention encoder so synergy is
+representable. Weeks of work plus a from-scratch retrain. Baseline preserved:
+`update006964`, 1.00% win / mean ante 4.277 over 600 held-out seeds.
+
+**Its case had two independent legs. Only one collapsed.**
+
+**① The exhaustion argument — VOID.** *"This session closed every remaining
+decision surface: reward exonerated (dec-073), build evaluation dead (dec-085),
+shop access dead (dec-079/081), no build feature predicts clearing (dec-090)."*
+dec-098 showed those studies ran 60–600 runs against an ~18,600 runs/arm
+requirement — **non-results, not measured nulls**. dec-100 then found the
+architecture wasn't running as designed while they were measured: three boss
+guards reading a key the API never returns (one *inverting* behaviour at the
+deadliest boss), two estimators disagreeing 4× on the same jokers, Blue Joker
+valued at zero in every shop decision.
+
+**② The design argument — SURVIVES.** dec-002 named this ceiling *at design time*:
+the hybrid gives tactics to heuristics and judgment to PPO, which *"caps how much
+pure strategy the net can discover"*, and combo discovery was deliberately
+designed **out** as the accepted cost of early competence. A depth-1 marginal
+`build_value` structurally cannot value a synergy piece worthless on its own,
+however accurate its leaf becomes. dec-080 supports it: xmult acquisition is
+statistically indistinguishable from random buying.
+
+**Why suspended rather than executed:** its *trigger* was exhaustion, and that
+elimination is void. More decisively — **you cannot conclude an architecture is at
+its ceiling when you have just discovered it was not running as designed.** The
+system Plan C proposes to replace has never actually been evaluated. The cost
+asymmetry seals it: Plan C is weeks plus a retrain; the dec-101 ablation sweep is
+~a day per component and directly separates an architectural ceiling from
+accumulated breakage.
+
+**RE-TRIGGER, fixed now so it cannot be rationalised later:** Plan C fires when
+the ablation sweep confirms the major components work as designed **and** per-blind
+clear at antes 4–6 is still ~0.86. That is a fair evaluation of the hybrid with
+its parts functioning — and if it is still stuck, dec-002's design-time prediction
+is confirmed and the rewrite is justified on its own merits.
+
+Its two constraints remain in force: the preserved baseline must never be deleted
+and any Plan C improvement claim must be a paired eval against it; and Plan C is
+expected to look *worse* before better, so it must not be reverted on an early dip.
+
+### Also unmirrored, recorded here for completeness
+
+- **`dec-062`** (07-10) — Balatron carries a repo-level Xylem discipline block in
+  CLAUDE.md, fenced with XYLEM:BEGIN/END markers. Superseded in practice by
+  **con-018**, which already binds it to stay transport-agnostic and secret-free.
+- **`dec-071`** (07-17, **deprecated**) — `estimate_score_for_hand_type` returning a
+  play-frequency-weighted average across hand types rather than the best score
+  among types played at least once. Already deprecated in the store; noted so the
+  ID is not mistaken for a live decision. Note this is part of the dec-070 family
+  whose justification dec-076 retracted.
+
+---
+
 ## Operations
 
 See the [Usage](README.md#usage) section for launch commands. Key points:
