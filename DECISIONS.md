@@ -2546,3 +2546,150 @@ See the [Usage](README.md#usage) section for launch commands. Key points:
   loses minimal training; the default 10 risks losing hours.
 - Recording is **win-only** — winning runs are kept in `recordings/wins/`,
   everything else is discarded.
+
+---
+
+### Logging WHAT was chosen, not just that a choice happened — 08-07 (`dec-102`)
+
+**Problem.** The human recorder logged action TYPES only. A real captured event
+read:
+
+```json
+{"t": 1786143133.2, "action": 11, "detail": {"from_pack": true}, "ante": 1}
+```
+
+That says *a* pack card was taken. It does not say **which**. The agent's action
+is `(action_type, target_index, card_bits)`, so two thirds of every
+demonstration was missing and no recording could be replayed or imitated.
+
+The `coverage` metric hid it. Coverage asks "did we notice a decision happened",
+not "did we record what was chosen" — so it read **100% while content was 0%**.
+`content_coverage` now leads every status line, and the fix is to judge a
+recording by that number.
+
+**Approach.** The mod's `extract_card` gives every card `id = card.sort_id`, a
+stable per-card identity, so any action's content is recoverable by DIFFING the
+relevant area across the transition: what left `hand` was played, what arrived
+in `jokers` was bought, what left `consumables` was used. Cards also carry
+`state.highlight`, marking exactly what a player selected — authoritative and
+independent of animation timing. Each event additionally stores the
+ALTERNATIVES (full hand, joker row, shop, vouchers, open pack, consumables,
+money, counters, blind, hand levels): a demonstration is the choice *and* what
+was passed over.
+
+**Five bugs, all found by testing against the running game rather than unit
+tests alone.** This is the entry's real lesson — the unit tests passed
+throughout.
+
+1. `PLAY_TAROT` is an engine state, so the destination filter silently dropped
+   **every in-blind tarot use** — one of the action classes explicitly asked for.
+2. The mod exposes `pack` (an open booster's contents) and `vouchers`
+   separately from `shop`. The first draft diffed neither — precisely where
+   "which card did you pick from the pack" lives.
+3. At a 0.35s poll, the tick that decrements `hands_left` lands **before** the
+   played cards leave the hand. The diff was empty; the first live test read
+   `content=0%`. Fixed with deferred resolution against the pre-action state.
+4. Resolving on the first non-empty diff captured **1 of 5** played cards —
+   cards leave the hand a few at a time over the animation. The newest diff is
+   the complete one.
+5. A **fabricated action**: run teardown zeroes the round counters, and the
+   counter-decrease shortcut read `GAME_OVER → MENU` as a DISCARD, naming three
+   real cards as discarded. Exactly the wrong-label failure this module exists
+   to prevent.
+
+**Live verification (4x, the speed actually played).** PLAY and DISCARD capture
+exact card identity at 100% content coverage — e.g. a discard recorded
+`['KH','QC']` against a context hand of
+`['KH','QC','8S','8H','6D','4C','3C','2S']`.
+
+**Not verified live.** Shop, pack, voucher and sell content share the same diff
+machinery and the same card records, and are covered by unit tests built from a
+live-captured card shape — but were never observed against a real shop, because
+every attempt to drive one through the mod API killed the run first. The
+per-action-type breakdown in the status line (`BUY_JOKER:0/3`) is what makes
+that residual risk visible within a minute of real play instead of after an hour.
+
+**Also learned:** empty Lua tables serialise as JSON **arrays**, not objects — a
+plain card arrives as `{"state": [], "modifier": []}`. Every read of those
+fields must tolerate a list.
+
+---
+
+### The first human win — and the bug that inverted its most important signal — 08-07 (`dec-103`)
+
+**456 actions captured across antes 2–12, `won: True`.** A 6-joker build (Ride
+the Bus, Hanging Chad, Photograph, Trading Card, Hologram, Lucky Cat). This is
+the observational arm dec-096 was built for: the agent averages ~0.67 xmult
+engines and never leaves the 0–2 band, so no A/B we have run has ever contained
+a build like this one.
+
+**The bug.** The pack-pick detector tested `consumables went up or money
+changed`. That fires for Arcana and Spectral packs and nothing else:
+
+| pack | what a pick does | detected? |
+|---|---|---|
+| Arcana / Spectral | adds a consumable | yes |
+| **Celestial** | **levels a hand** | **no** |
+| **Buffoon** | **adds a joker** | **no** |
+| **Standard** | **adds a deck card** | **no** |
+
+Ten packs bought produced ten `SKIP_PACK` events. Every planet the player took
+was written down as a pack passed over — in the action class most central to the
+hand-level hypothesis. Now detected by a card leaving the OPEN pack (authoritative
+for every pack type), with joker/deck/hand-level/consumable gains corroborating.
+
+**Two more defects from the same run.** Every pack exit emitted a `SKIP_PACK`
+even when cards were taken (35 packs, 35 skips — a fabricated action). And on
+PLAY, the area diff `hand_left` disagreed with the exact `selected` highlight
+flag in **23 of 28** events, because the diff catches the hand mid-animation.
+Events now carry a canonical `chosen` field naming the authoritative source per
+action type.
+
+**The repair, and the check that validated it.** `audit_repair_human_record.py`
+recovers mislabelled picks from stored context: every event holds the full
+`hand_levels` dict, joker row and deck size, and a levelled hand maps
+deterministically to a planet (Flush → Jupiter), so both the pick *and the
+specific card* come back.
+
+The player stated — **before the script existed** — that every celestial this run
+was Jupiter (Telescope voucher, Flush build). That made the repair falsifiable.
+The first version diffed each skip against the FOLLOWING event and recovered
+**1** pick, passing its own check at 1/1. It was wrong: the acquisition happens
+inside the pack, *before* the exit is logged, so the skip's own context already
+carries the raised level. Diffing back to the preceding pack-buy recovered **15
+— all 15 Jupiter.**
+
+That 1/1 is the lesson. A validation that passes on n=1 has validated nothing;
+what made the check real was a prediction with enough instances to fail.
+
+**Recovered:** 15 celestial, 2 buffoon, 17 standard (card unknown, offer stored
+rather than guessed). 16 genuine skips left alone. Ante 1 was never captured —
+the recorder was not running, and nobody checked before play started.
+
+**Addendum — audited against the game's own end-of-run counters.** The GAME OVER
+screen (seed `YLUNVLTF`, ante 12, Most Played Hand **Flush (36)**) is independent
+ground truth, and it exposed a completeness gap no internal metric could see:
+
+| | game | recorded | capture |
+|---|---|---|---|
+| Cards played | 240 | 211 | 88% |
+| Cards discarded | 267 | 119 | **45%** |
+| Times rerolled | 82 | 65 | 79% |
+
+The *actions* were nearly all captured; the *card sets inside them* were not —
+discards averaged 1.1–1.8 cards against a real 3–5. `content=96%` measured "did
+we capture something", not "did we capture all of it": the same blind spot as
+`coverage` vs `content_coverage`, one level down. Cause: a player who highlights
+and clicks inside one 0.35s poll leaves no highlight in the pre-action snapshot,
+so the code fell back to the partial area diff. Fixed by remembering the last
+non-empty highlight across polls (cleared on use, so a stale selection can never
+be attributed to a later action).
+
+"Flush (36)" also confirms the Jupiter repair from a second, independent
+direction: Flush most-played + Telescope ⇒ Jupiter, and all 15 recovered picks
+were Jupiter.
+
+**The general lesson:** every internal completeness metric here has been a
+proxy that read high while the thing it stood for was broken — 100% coverage
+with 0% content, then 96% content with 45% of discarded cards. External ground
+truth caught what three rounds of self-reported metrics did not.
